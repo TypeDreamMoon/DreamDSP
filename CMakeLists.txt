@@ -68,6 +68,7 @@ qt_add_qml_module(DreamDSP
         src/app/CompressorModel.h      src/app/CompressorModel.cpp
         src/app/ReverbModel.h          src/app/ReverbModel.cpp
         src/app/OfflineRender.h        src/app/OfflineRender.cpp
+        src/app/EffectsModel.h         src/app/EffectsModel.cpp
 )
 
 # qmltyperegistrar emits `#include <AppController.h>` using the bare header

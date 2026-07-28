@@ -8,6 +8,7 @@
 // Full definitions, not forward declarations: moc registers the pointer types
 // used in Q_PROPERTY as metatypes, and that requires complete types.
 #include "app/CompressorModel.h"
+#include "app/EffectsModel.h"
 #include "app/ReverbModel.h"
 
 namespace dreamdsp {
@@ -26,6 +27,7 @@ class OfflineRender : public QObject
 
     Q_PROPERTY(dreamdsp::CompressorModel *compressor MEMBER m_compressor NOTIFY sourcesChanged)
     Q_PROPERTY(dreamdsp::ReverbModel *reverb MEMBER m_reverb NOTIFY sourcesChanged)
+    Q_PROPERTY(dreamdsp::EffectsModel *effects MEMBER m_effects NOTIFY sourcesChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(QString lastOutput READ lastOutput NOTIFY statusChanged)
@@ -54,6 +56,7 @@ private:
 
     CompressorModel *m_compressor = nullptr;
     ReverbModel *m_reverb = nullptr;
+    EffectsModel *m_effects = nullptr;
 
     bool m_busy = false;
     bool m_failed = false;

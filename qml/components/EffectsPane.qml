@@ -11,10 +11,13 @@ Item {
     CompressorModel { id: comp }
     ReverbModel { id: rev }
 
+    EffectsModel { id: fx }
+
     OfflineRender {
         id: render
         compressor: comp
         reverb: rev
+        effects: fx
     }
 
     component ParamRow: RowLayout {
@@ -297,21 +300,205 @@ Item {
 
         SectionCard {
             Layout.fillWidth: true
-            Layout.preferredHeight: 86
-            title: '计划中'
-            hint: '需要真实 DSP,和已有效果共用同一套离线验证流程'
+            Layout.preferredHeight: 150
+            title: '心理声学低音'
+            hint: '合成缺失基频的谐波 —— 小喇叭放不出 40 Hz,但耳朵能从 80/120 Hz 推断出它'
 
-            Flow {
+            headerRight: HusSwitch {
+                checked: fx.bassEnabled
+                onToggled: fx.bassEnabled = checked
+            }
+
+            GridLayout {
+                anchors.fill: parent
+                columns: 2
+                columnSpacing: 22
+                rowSpacing: 8
+
+                ParamRow {
+                    label: '扬声器口径'; unit: 'Hz'; from: 40; to: 250; step: 1; decimals: 0
+                    value: fx.bassCutoff
+                    onEdited: (v) => fx.bassCutoff = v
+                }
+                ParamRow {
+                    label: '低音水平'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                    value: fx.bassAmount
+                    onEdited: (v) => fx.bassAmount = v
+                }
+                ParamRow {
+                    label: '谐波强度'; unit: ''; from: 1; to: 12; step: 0.1; decimals: 1
+                    value: fx.bassDrive
+                    onEdited: (v) => fx.bassDrive = v
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    HusText {
+                        Layout.preferredWidth: 76
+                        text: '移除原低频'
+                        font.pixelSize: 12
+                    }
+                    HusSwitch {
+                        checked: fx.bassRemoveOriginal
+                        onToggled: fx.bassRemoveOriginal = checked
+                    }
+                    HusText {
+                        Layout.fillWidth: true
+                        text: '把喇叭放不出的部分滤掉,让振幅留给谐波'
+                        font.pixelSize: 11
+                        opacity: 0.45
+                        elide: Text.ElideRight
+                    }
+                }
+            }
+        }
+
+        SectionCard {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 132
+            title: '胆机饱和'
+            hint: '非对称软削波 · 2 倍过采样抗混叠 · 偏置产生偶次谐波'
+
+            headerRight: HusSwitch {
+                checked: fx.tubeEnabled
+                onToggled: fx.tubeEnabled = checked
+            }
+
+            ColumnLayout {
                 anchors.fill: parent
                 spacing: 8
 
-                Repeater {
-                    model: ['胆机饱和', '心理声学低音', '激励器 / 清晰度',
-                            '立体声扩展', 'Crossfeed', '多频段压缩']
-                    delegate: HusTag {
-                        required property string modelData
-                        text: modelData
-                    }
+                ParamRow {
+                    label: '驱动'; unit: ''; from: 1; to: 20; step: 0.1; decimals: 1
+                    value: fx.tubeDrive
+                    onEdited: (v) => fx.tubeDrive = v
+                }
+                ParamRow {
+                    label: '偏置'; unit: ''; from: 0; to: 0.8; step: 0.01; decimals: 2
+                    value: fx.tubeBias
+                    onEdited: (v) => fx.tubeBias = v
+                }
+                ParamRow {
+                    label: '干湿比'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                    value: fx.tubeMix
+                    onEdited: (v) => fx.tubeMix = v
+                }
+            }
+        }
+
+        SectionCard {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 132
+            title: '激励器 / 清晰度'
+            hint: '只对高频段做谐波激励,再混回原信号 —— 加细节而不是加脏'
+
+            headerRight: HusSwitch {
+                checked: fx.exciterEnabled
+                onToggled: fx.exciterEnabled = checked
+            }
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 8
+
+                ParamRow {
+                    label: '起始频率'; unit: 'Hz'; from: 1000; to: 12000; step: 50; decimals: 0
+                    value: fx.exciterFreq
+                    onEdited: (v) => fx.exciterFreq = v
+                }
+                ParamRow {
+                    label: '驱动'; unit: ''; from: 1; to: 15; step: 0.1; decimals: 1
+                    value: fx.exciterDrive
+                    onEdited: (v) => fx.exciterDrive = v
+                }
+                ParamRow {
+                    label: '混入量'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                    value: fx.exciterAmount
+                    onEdited: (v) => fx.exciterAmount = v
+                }
+            }
+        }
+
+        SectionCard {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 104
+            title: '立体声扩展'
+            hint: 'M/S 侧信号增益 · 宽度 1.00 是精确的恒等'
+
+            headerRight: HusSwitch {
+                checked: fx.widthEnabled
+                onToggled: fx.widthEnabled = checked
+            }
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 8
+
+                ParamRow {
+                    label: '宽度'; unit: ''; from: 0; to: 2; step: 0.01; decimals: 2
+                    value: fx.stereoWidth
+                    onEdited: (v) => fx.stereoWidth = v
+                }
+                ParamRow {
+                    label: '低频归中'; unit: 'Hz'; from: 0; to: 400; step: 5; decimals: 0
+                    value: fx.monoBelow
+                    onEdited: (v) => fx.monoBelow = v
+                }
+            }
+        }
+
+        SectionCard {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 104
+            title: 'Crossfeed'
+            hint: '耳机用 —— 把每个声道延迟、低通后混一点到另一边,模拟头部遮蔽'
+
+            headerRight: HusSwitch {
+                checked: fx.crossfeedEnabled
+                onToggled: fx.crossfeedEnabled = checked
+            }
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 8
+
+                ParamRow {
+                    label: '截止频率'; unit: 'Hz'; from: 300; to: 1500; step: 10; decimals: 0
+                    value: fx.crossfeedCutoff
+                    onEdited: (v) => fx.crossfeedCutoff = v
+                }
+                ParamRow {
+                    label: '串扰量'; unit: 'dB'; from: -18; to: 0; step: 0.5; decimals: 1
+                    value: fx.crossfeedLevel
+                    onEdited: (v) => fx.crossfeedLevel = v
+                }
+            }
+        }
+
+        SectionCard {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 104
+            title: '多频段压缩'
+            hint: 'Linkwitz-Riley 4 阶分频 —— 低频不再压掉高频。全部 1:1 时透明'
+
+            headerRight: HusSwitch {
+                checked: fx.multibandEnabled
+                onToggled: fx.multibandEnabled = checked
+            }
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 8
+
+                ParamRow {
+                    label: '低/中分频'; unit: 'Hz'; from: 60; to: 800; step: 5; decimals: 0
+                    value: fx.lowCross
+                    onEdited: (v) => fx.lowCross = v
+                }
+                ParamRow {
+                    label: '中/高分频'; unit: 'Hz'; from: 1000; to: 12000; step: 50; decimals: 0
+                    value: fx.highCross
+                    onEdited: (v) => fx.highCross = v
                 }
             }
         }

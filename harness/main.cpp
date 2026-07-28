@@ -7,8 +7,12 @@
 // signals with closed-form expected answers, long before it is loaded into a
 // live audio graph where a mistake costs the machine its sound.
 
+#include "BiquadFilter.h"
 #include "Compressor.h"
+#include "MultibandCompressor.h"
 #include "Reverb.h"
+#include "Saturation.h"
+#include "Stereo.h"
 #include "WavFile.h"
 
 #include <algorithm>
@@ -449,6 +453,387 @@ void testReverb()
     }
 }
 
+// ------------------------------------------------------------ spectrum tools
+
+// Magnitude at one frequency by direct Goertzel-style correlation. Enough to
+// answer "is there a second harmonic", which is what these tests need.
+double magnitudeAt(const std::vector<float> &x, double freq, double sr,
+                   size_t from = 0, size_t len = 0)
+{
+    const size_t end = len ? std::min(from + len, x.size()) : x.size();
+    double re = 0.0, im = 0.0;
+    const double w = 2.0 * 3.14159265358979323846 * freq / sr;
+    for (size_t i = from; i < end; ++i) {
+        re += double(x[i]) * std::cos(w * double(i));
+        im += double(x[i]) * std::sin(w * double(i));
+    }
+    const double n = double(end > from ? end - from : 1);
+    return 2.0 * std::sqrt(re * re + im * im) / n;
+}
+
+std::vector<float> sine(double freq, double sr, int n, float amp = 0.5f)
+{
+    std::vector<float> v(size_t(n), 0.0f);
+    for (int i = 0; i < n; ++i)
+        v[size_t(i)] = amp * std::sin(2.0 * 3.14159265358979323846 * freq * i / sr);
+    return v;
+}
+
+// ------------------------------------------------------------------ crossover
+
+void testCrossover()
+{
+    std::printf("\n[crossover]\n");
+    constexpr double sr = 48000.0;
+
+    LinkwitzRiley4 lr;
+    lr.design(1000.0, sr);
+
+    // The property that makes a multiband processor usable: low + high must
+    // reconstruct the input with flat magnitude.
+    const int n = 32768;
+    double worstDb = 0.0;
+    double worstFreq = 0.0;
+    for (double f : { 50.0, 200.0, 500.0, 900.0, 1000.0, 1100.0, 2000.0, 5000.0, 12000.0 }) {
+        lr.reset();
+        const auto in = sine(f, sr, n);
+        std::vector<float> summed(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i) {
+            float lo = 0.0f, hi = 0.0f;
+            lr.process(in[size_t(i)], &lo, &hi);
+            summed[size_t(i)] = lo + hi;
+        }
+        // Skip the settling transient.
+        const double a = magnitudeAt(in, f, sr, size_t(n / 2));
+        const double b = magnitudeAt(summed, f, sr, size_t(n / 2));
+        const double db = 20.0 * std::log10((b + 1e-12) / (a + 1e-12));
+        if (std::fabs(db) > std::fabs(worstDb)) { worstDb = db; worstFreq = f; }
+    }
+    check(std::fabs(worstDb) < 0.35,
+          fmt("LR4 bands sum flat: worst %.3f dB at %.0f Hz", worstDb, worstFreq));
+}
+
+// ----------------------------------------------------------------- saturation
+
+void testTube()
+{
+    std::printf("\n[tube saturation]\n");
+    constexpr double sr = 48000.0;
+    constexpr double f = 1000.0;
+    const int n = 32768;
+
+    // Symmetric drive makes odd harmonics only; that is a fuzz box, not a
+    // valve. Asymmetry is what produces the second harmonic.
+    const auto run = [&](float bias) {
+        TubeStage t;
+        t.prepare(sr, 1);
+        TubeStage::Params p;
+        p.drive = 6.0f; p.bias = bias; p.mix = 1.0f;
+        t.setParams(p);
+        t.reset();
+        auto sig = sine(f, sr, n, 0.5f);
+        float *ch[1] = { sig.data() };
+        AudioBuffer b{ ch, 1, n };
+        t.process(b);
+        return sig;
+    };
+
+    const auto sym = run(0.0f);
+    const auto asym = run(0.4f);
+
+    const size_t skip = size_t(n / 2);
+    const double sym2 = magnitudeAt(sym, 2 * f, sr, skip) / magnitudeAt(sym, f, sr, skip);
+    const double asym2 = magnitudeAt(asym, 2 * f, sr, skip) / magnitudeAt(asym, f, sr, skip);
+    const double sym3 = magnitudeAt(sym, 3 * f, sr, skip) / magnitudeAt(sym, f, sr, skip);
+
+    std::printf("    2nd harmonic: symmetric %.4f, asymmetric %.4f\n", sym2, asym2);
+    std::printf("    3rd harmonic (symmetric): %.4f\n", sym3);
+    check(sym2 < 0.01, "a symmetric curve makes almost no second harmonic");
+    check(sym3 > 0.02, "a symmetric curve does make odd harmonics");
+    check(asym2 > sym2 * 10.0, "bias introduces the even harmonics tubes are wanted for");
+
+    // Aliasing check: a tone high enough that its harmonics exceed Nyquist.
+    // Without oversampling they fold back to inharmonic frequencies.
+    {
+        TubeStage t;
+        t.prepare(sr, 1);
+        TubeStage::Params p;
+        p.drive = 8.0f; p.bias = 0.3f; p.mix = 1.0f;
+        t.setParams(p);
+        t.reset();
+        auto sig = sine(9000.0, sr, n, 0.5f);
+        float *ch[1] = { sig.data() };
+        AudioBuffer b{ ch, 1, n };
+        t.process(b);
+
+        const double fund = magnitudeAt(sig, 9000.0, sr, skip);
+        // 2*9k = 18k is real; 3*9k = 27k would fold to 48k-27k = 21k, and
+        // 4*9k = 36k folds to 12k -- squarely in the audible range.
+        const double fold = magnitudeAt(sig, 12000.0, sr, skip) / fund;
+        std::printf("    fold-back at 12 kHz from a 9 kHz tone: %.5f of fundamental\n", fold);
+        check(fold < 0.02, "oversampling keeps aliasing out of the audible range");
+    }
+}
+
+void testVirtualBass()
+{
+    std::printf("\n[virtual bass]\n");
+    constexpr double sr = 48000.0;
+    const int n = 65536;
+    const double f = 45.0;          // below what a small speaker manages
+
+    VirtualBass vb;
+    vb.prepare(sr, 1);
+    VirtualBass::Params p;
+    p.cutoffHz = 100.0f;
+    p.amount = 0.8f;
+    p.drive = 6.0f;
+    p.removeOriginal = false;
+    vb.setParams(p);
+    vb.reset();
+
+    auto sig = sine(f, sr, n, 0.5f);
+    const auto original = sig;
+    float *ch[1] = { sig.data() };
+    AudioBuffer b{ ch, 1, n };
+    vb.process(b);
+
+    const size_t skip = size_t(n / 2);
+    const double before2 = magnitudeAt(original, 2 * f, sr, skip);
+    const double after2 = magnitudeAt(sig, 2 * f, sr, skip);
+    const double after3 = magnitudeAt(sig, 3 * f, sr, skip);
+    const double fund = magnitudeAt(sig, f, sr, skip);
+
+    std::printf("    45 Hz in: 2nd harmonic %.5f -> %.5f, 3rd %.5f\n",
+                before2, after2, after3);
+    check(after2 > before2 * 20.0 + 1e-4,
+          "harmonics of the missing fundamental are synthesised");
+    check(after3 > 1e-4, "the series extends past the second harmonic");
+    check(fund > 1e-3, "the original low tone is still there when not removed");
+
+    // With removeOriginal the fundamental should be strongly attenuated -- that
+    // is the mode for a speaker that cannot reproduce it at all.
+    {
+        VirtualBass vb2;
+        vb2.prepare(sr, 1);
+        p.removeOriginal = true;
+        vb2.setParams(p);
+        vb2.reset();
+        auto s2 = sine(f, sr, n, 0.5f);
+        float *c2[1] = { s2.data() };
+        AudioBuffer b2{ c2, 1, n };
+        vb2.process(b2);
+        const double f2 = magnitudeAt(s2, f, sr, skip);
+        std::printf("    fundamental with removeOriginal: %.5f (was %.5f)\n", f2, fund);
+        check(f2 < fund * 0.3, "removeOriginal takes out what the speaker cannot play");
+    }
+}
+
+void testExciter()
+{
+    std::printf("\n[exciter]\n");
+    constexpr double sr = 48000.0;
+    const int n = 32768;
+
+    Exciter ex;
+    ex.prepare(sr, 1);
+    Exciter::Params p;
+    p.frequencyHz = 3000.0f;
+    p.drive = 5.0f;
+    p.amount = 0.6f;
+    ex.setParams(p);
+    ex.reset();
+
+    // A tone above the split point must gain harmonics.
+    auto high = sine(4000.0, sr, n, 0.4f);
+    float *ch[1] = { high.data() };
+    AudioBuffer b{ ch, 1, n };
+    ex.process(b);
+
+    const size_t skip = size_t(n / 2);
+    const double h3 = magnitudeAt(high, 12000.0, sr, skip) / magnitudeAt(high, 4000.0, sr, skip);
+    std::printf("    4 kHz tone gains a 12 kHz harmonic at %.4f of fundamental\n", h3);
+    check(h3 > 0.005, "the high band is excited");
+
+    // A tone well below the split point must come through nearly untouched --
+    // otherwise this is just a distortion box.
+    ex.reset();
+    auto low = sine(300.0, sr, n, 0.4f);
+    const auto lowRef = low;
+    float *ch2[1] = { low.data() };
+    AudioBuffer b2{ ch2, 1, n };
+    ex.process(b2);
+
+    const double before = magnitudeAt(lowRef, 300.0, sr, skip);
+    const double after = magnitudeAt(low, 300.0, sr, skip);
+    const double db = 20.0 * std::log10((after + 1e-12) / (before + 1e-12));
+    std::printf("    300 Hz tone changed by %.3f dB\n", db);
+    check(std::fabs(db) < 0.5, "content below the split point is left alone");
+}
+
+// --------------------------------------------------------------------- stereo
+
+void testStereo()
+{
+    std::printf("\n[stereo]\n");
+    constexpr double sr = 48000.0;
+    const int n = 8192;
+
+    // Width 1 must be the exact identity. A "neutral" setting that colours the
+    // signal is the kind of thing that gets blamed on everything else.
+    {
+        StereoWidener w;
+        w.prepare(sr);
+        StereoWidener::Params p;
+        p.width = 1.0f; p.monoBelowHz = 0.0f;
+        w.setParams(p);
+        w.reset();
+
+        std::vector<float> L(size_t(n), 0.0f), R(size_t(n), 0.0f), refL(size_t(n), 0.0f), refR(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i) {
+            L[size_t(i)] = refL[size_t(i)] = std::sin(float(i) * 0.03f);
+            R[size_t(i)] = refR[size_t(i)] = std::cos(float(i) * 0.017f) * 0.7f;
+        }
+        float *ch[2] = { L.data(), R.data() };
+        AudioBuffer b{ ch, 2, n };
+        w.process(b);
+
+        float worst = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            worst = std::max(worst, std::fabs(L[size_t(i)] - refL[size_t(i)]));
+            worst = std::max(worst, std::fabs(R[size_t(i)] - refR[size_t(i)]));
+        }
+        check(worst < 1e-6f, fmt("width 1.0 is the identity (worst deviation %.2e)", worst));
+    }
+
+    // Width 0 must collapse to mono.
+    {
+        StereoWidener w;
+        w.prepare(sr);
+        StereoWidener::Params p;
+        p.width = 0.0f;
+        w.setParams(p);
+        w.reset();
+
+        std::vector<float> L(size_t(n), 1.0f), R(size_t(n), -1.0f);
+        float *ch[2] = { L.data(), R.data() };
+        AudioBuffer b{ ch, 2, n };
+        w.process(b);
+
+        float worst = 0.0f;
+        for (int i = 0; i < n; ++i)
+            worst = std::max(worst, std::fabs(L[size_t(i)] - R[size_t(i)]));
+        check(worst < 1e-6f, "width 0 collapses to mono");
+    }
+
+    // Crossfeed must put some of each channel into the other, and must not
+    // change a mono signal's balance.
+    {
+        Crossfeed cf;
+        cf.prepare(sr);
+        Crossfeed::Params p;
+        cf.setParams(p);
+        cf.reset();
+
+        std::vector<float> L(size_t(n), 0.0f), R(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i)
+            L[size_t(i)] = std::sin(float(i) * 0.02f) * 0.5f;   // hard left
+
+        float *ch[2] = { L.data(), R.data() };
+        AudioBuffer b{ ch, 2, n };
+        cf.process(b);
+
+        double energyR = 0.0;
+        for (int i = n / 2; i < n; ++i)
+            energyR += double(R[size_t(i)]) * double(R[size_t(i)]);
+        check(energyR > 1e-4, fmt("a hard-left signal reaches the right ear (energy %.4f)", energyR));
+
+        cf.reset();
+        std::vector<float> mL(size_t(n), 0.0f), mR(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i)
+            mL[size_t(i)] = mR[size_t(i)] = std::sin(float(i) * 0.02f) * 0.5f;
+        float *ch2[2] = { mL.data(), mR.data() };
+        AudioBuffer b2{ ch2, 2, n };
+        cf.process(b2);
+
+        float worst = 0.0f;
+        for (int i = 0; i < n; ++i)
+            worst = std::max(worst, std::fabs(mL[size_t(i)] - mR[size_t(i)]));
+        check(worst < 1e-6f, "a centred signal stays centred");
+    }
+}
+
+// ----------------------------------------------------------------- multiband
+
+void testMultiband()
+{
+    std::printf("\n[multiband compressor]\n");
+    constexpr double sr = 48000.0;
+    const int n = 32768;
+
+    // Every band at 1:1 must be transparent. This is the check that a
+    // multiband processor is safe to leave switched on.
+    MultibandCompressor mb;
+    mb.prepare(sr, 2);
+    MultibandCompressor::Params p;
+    for (int b = 0; b < MultibandCompressor::kBands; ++b) {
+        p.band[b].ratio = 1.0f;
+        p.band[b].thresholdDb = 0.0f;
+    }
+    mb.setParams(p);
+    mb.reset();
+
+    double worstDb = 0.0, worstFreq = 0.0;
+    for (double f : { 60.0, 150.0, 250.0, 700.0, 3000.0, 6000.0, 12000.0 }) {
+        mb.reset();
+        auto L = sine(f, sr, n, 0.4f);
+        auto R = L;
+        const auto ref = L;
+        float *ch[2] = { L.data(), R.data() };
+        AudioBuffer b{ ch, 2, n };
+        mb.process(b);
+
+        const double a = magnitudeAt(ref, f, sr, size_t(n / 2));
+        const double c = magnitudeAt(L, f, sr, size_t(n / 2));
+        const double db = 20.0 * std::log10((c + 1e-12) / (a + 1e-12));
+        if (std::fabs(db) > std::fabs(worstDb)) { worstDb = db; worstFreq = f; }
+    }
+    std::printf("    bypassed deviation: worst %.3f dB at %.0f Hz\n", worstDb, worstFreq);
+    check(std::fabs(worstDb) < 0.6, "all bands at 1:1 is transparent");
+
+    // A loud bass tone must not duck the treble -- the entire point.
+    {
+        mb.reset();
+        MultibandCompressor::Params q;
+        for (int b = 0; b < MultibandCompressor::kBands; ++b) {
+            q.band[b].thresholdDb = -30.0f;
+            q.band[b].ratio = 10.0f;
+            q.band[b].attackMs = 1.0f;
+            q.band[b].releaseMs = 50.0f;
+        }
+        mb.setParams(q);
+        mb.reset();
+
+        // 60 Hz at full scale plus a quiet 8 kHz.
+        std::vector<float> L(size_t(n), 0.0f), R(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i) {
+            const double t = double(i) / sr;
+            const double v = 0.9 * std::sin(2 * 3.14159265358979 * 60 * t)
+                             + 0.05 * std::sin(2 * 3.14159265358979 * 8000 * t);
+            L[size_t(i)] = R[size_t(i)] = float(v);
+        }
+        float *ch[2] = { L.data(), R.data() };
+        AudioBuffer b{ ch, 2, n };
+        mb.process(b);
+
+        const double hi = magnitudeAt(L, 8000.0, sr, size_t(n / 2));
+        const double lo = magnitudeAt(L, 60.0, sr, size_t(n / 2));
+        std::printf("    loud 60 Hz + quiet 8 kHz -> bass %.4f, treble %.4f\n", lo, hi);
+        check(hi > 0.02, "a loud bass note does not duck the treble");
+        check(lo < 0.5, "the bass band itself is compressed");
+    }
+}
+
 int runTests()
 {
     std::printf("DreamDSP dsp harness\n");
@@ -459,6 +844,12 @@ int runTests()
     testStereoLink();
     testSilenceAndSanity();
     testReverb();
+    testCrossover();
+    testTube();
+    testVirtualBass();
+    testExciter();
+    testStereo();
+    testMultiband();
     std::printf("\n%s -- %d failure(s)\n", g_failures ? "FAIL" : "PASS", g_failures);
     return g_failures;
 }

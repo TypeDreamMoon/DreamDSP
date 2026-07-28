@@ -7,8 +7,13 @@
 
 add_library(dreamdsp_core STATIC
     DspTypes.h
+    BiquadFilter.h  BiquadFilter.cpp
+    Oversampler.h   Oversampler.cpp
     Compressor.h    Compressor.cpp
     Reverb.h        Reverb.cpp
+    Saturation.h    Saturation.cpp
+    Stereo.h        Stereo.cpp
+    MultibandCompressor.h MultibandCompressor.cpp
     WavFile.h       WavFile.cpp     # offline only, never on an audio callback
 )
 
