@@ -473,6 +473,12 @@ int processFile(const char *in, const char *out)
     }
     std::printf("in : %d ch, %d Hz, %d frames\n", wav.channelCount(), wav.sampleRate, wav.frames());
 
+    std::vector<float *> ch;
+    for (auto &v : wav.channels)
+        ch.push_back(v.data());
+    AudioBuffer buf{ ch.data(), wav.channelCount(), wav.frames() };
+
+    // Same order as the application: compressing a reverb tail pumps it.
     Compressor c;
     c.prepare(wav.sampleRate, wav.channelCount());
     Compressor::Params p;
@@ -483,12 +489,19 @@ int processFile(const char *in, const char *out)
     p.releaseMs = 80.0f;
     p.autoMakeup = true;
     c.setParams(p);
-
-    std::vector<float *> ch;
-    for (auto &v : wav.channels)
-        ch.push_back(v.data());
-    AudioBuffer buf{ ch.data(), wav.channelCount(), wav.frames() };
     c.process(buf);
+
+    Reverb r;
+    r.prepare(wav.sampleRate);
+    Reverb::Params rp;
+    rp.roomSize = 0.6f;
+    rp.damping = 0.5f;
+    rp.preDelayMs = 20.0f;
+    rp.wet = 0.25f;
+    rp.dry = 1.0f;
+    r.setParams(rp);
+    r.reset();
+    r.process(buf);
 
     if (!writeWav(out, wav, &err)) {
         std::printf("write %s: %s\n", out, err.c_str());

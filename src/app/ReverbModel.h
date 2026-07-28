@@ -41,6 +41,9 @@ public:
     double wet() const       { return m_p.wet; }        void setWet(double v);
     double dry() const       { return m_p.dry; }        void setDry(double v);
 
+    // For handing a copy to a worker thread.
+    dsp::Reverb::Params dspParams() const { return m_p; }
+
 signals:
     void paramsChanged();
 

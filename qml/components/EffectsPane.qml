@@ -11,6 +11,12 @@ Item {
     CompressorModel { id: comp }
     ReverbModel { id: rev }
 
+    OfflineRender {
+        id: render
+        compressor: comp
+        reverb: rev
+    }
+
     component ParamRow: RowLayout {
         // Referenced by id rather than through `parent`: these children are
         // direct children of the row, so `parent` is already this object and a
@@ -84,30 +90,74 @@ Item {
         width: parent.width - 12
         spacing: 12
 
-        // The DSP is written and verified, but nothing hosts it yet. Saying so
-        // is better than shipping controls that quietly do nothing.
+        // These effects have no host: nothing routes system audio through them
+        // yet. Rather than leaving switches that quietly do nothing, the page
+        // says so plainly and offers the one thing that does work today --
+        // running the settings over a file.
         Rectangle {
             Layout.fillWidth: true
-            implicitHeight: notice.implicitHeight + 20
-            radius: 8
-            color: Qt.rgba(1, 0.7, 0.1, 0.09)
+            implicitHeight: notice.implicitHeight + 24
+            radius: 10
+            color: render.failed ? Qt.rgba(1, 0.35, 0.25, 0.10)
+                                 : Qt.rgba(1, 0.7, 0.1, 0.09)
             border.width: 1
-            border.color: Qt.rgba(1, 0.7, 0.1, 0.35)
+            border.color: render.failed ? Qt.rgba(1, 0.35, 0.25, 0.45)
+                                        : Qt.rgba(1, 0.7, 0.1, 0.35)
 
-            RowLayout {
+            // Dropping a file anywhere on the banner processes it.
+            DropArea {
+                anchors.fill: parent
+                onDropped: (drop) => {
+                    if (drop.hasUrls && drop.urls.length > 0)
+                        render.renderUrl(drop.urls[0]);
+                }
+            }
+
+            ColumnLayout {
                 id: notice
                 anchors.fill: parent
-                anchors.margins: 10
-                spacing: 10
+                anchors.margins: 12
+                spacing: 8
 
-                HusText {
+                RowLayout {
                     Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    font.pixelSize: 12
-                    color: HusTheme.Primary.colorWarning
-                    text: '压缩器的 DSP 已实现并通过离线验证(增益曲线、拐点、时间常数均对照解析解断言),'
-                          + '但尚未接入音频链 —— Equalizer APO 的配置语言无法表达非线性处理,宿主方案待定。'
-                          + '下方曲线由真实的 gain computer 计算,不是示意图。'
+                    spacing: 8
+
+                    HusTag {
+                        text: '尚未接入系统音频'
+                        presetColor: '#d48806'
+                    }
+                    HusText {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        font.pixelSize: 12
+                        opacity: 0.85
+                        text: '下面的开关只改参数,不会影响你正在听的声音 —— Equalizer APO 的配置语言'
+                              + '无法表达非线性处理,宿主方案待定。DSP 本身已实现并通过离线验证。'
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    HusText {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        font.pixelSize: 12
+                        color: render.failed ? HusTheme.Primary.colorError
+                                             : HusTheme.Primary.colorTextBase
+                        opacity: render.status !== '' ? 0.95 : 0.6
+                        text: render.status !== ''
+                              ? render.status
+                              : '把一个 wav 文件拖到这里,用当前设置处理它 —— 这是今天能真正听到效果的方式。'
+                    }
+
+                    HusButton {
+                        text: '打开输出目录'
+                        visible: render.lastOutput !== ''
+                        onClicked: render.revealOutput()
+                    }
                 }
             }
         }

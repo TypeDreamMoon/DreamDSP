@@ -69,6 +69,9 @@ public:
     // dBFS in -> dBFS out, straight from the real gain computer.
     Q_INVOKABLE double outputFor(double inputDb) const;
 
+    // For handing a copy to a worker thread.
+    dsp::Compressor::Params dspParams() const { return m_p; }
+
 signals:
     void paramsChanged();
 

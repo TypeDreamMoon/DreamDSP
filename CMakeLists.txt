@@ -5,7 +5,7 @@ project(DreamDSP VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui Quick Network)
+find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui Quick Network Concurrent)
 find_package(HuskarUI REQUIRED)
 
 qt_standard_project_setup(REQUIRES 6.7)
@@ -67,6 +67,7 @@ qt_add_qml_module(DreamDSP
         src/ui/TransferCurveItem.h     src/ui/TransferCurveItem.cpp
         src/app/CompressorModel.h      src/app/CompressorModel.cpp
         src/app/ReverbModel.h          src/app/ReverbModel.cpp
+        src/app/OfflineRender.h        src/app/OfflineRender.cpp
 )
 
 # qmltyperegistrar emits `#include <AppController.h>` using the bare header
@@ -90,7 +91,8 @@ target_compile_definitions(DreamDSP PRIVATE
 
 target_link_libraries(DreamDSP PRIVATE
     Qt6::Quick
-    Qt6::Network   # QLocalServer/Socket for the single-instance guard
+    Qt6::Network      # QLocalServer/Socket for the single-instance guard
+    Qt6::Concurrent   # offline rendering off the GUI thread
     HuskarUI::Basic
     dreamdsp_core  # the host-neutral DSP layer
     ole32       # COM / MMDevice
