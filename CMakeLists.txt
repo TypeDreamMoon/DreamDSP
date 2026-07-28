@@ -13,6 +13,7 @@ qt_standard_project_setup(REQUIRES 6.7)
 # The DSP layer and its offline exerciser are independent of Qt entirely.
 add_subdirectory(dsp)
 add_subdirectory(harness)
+add_subdirectory(apo)
 
 # HuskarUIConfig.cmake gives us HuskarUI_INCLUDE_DIR / HuskarUI_QML_IMPORT_PATH.
 # The runtime DLLs live next to them in <prefix>/bin.
