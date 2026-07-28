@@ -34,12 +34,14 @@ qt_add_qml_module(DreamDSP
         qml/components/SettingsPane.qml
         qml/components/AutoEqPane.qml
         qml/components/MeterBar.qml
+        qml/components/ConvolutionPane.qml
     SOURCES
         src/core/Biquad.h              src/core/Biquad.cpp
         src/core/ApoConfig.h           src/core/ApoConfig.cpp
         src/core/PeacePreset.h         src/core/PeacePreset.cpp
         src/core/AutoEqDatabase.h      src/core/AutoEqDatabase.cpp
         src/core/Fft.h                 src/core/Fft.cpp
+        src/core/ImpulseResponse.h     src/core/ImpulseResponse.cpp
         src/core/AutoEqDatabase.h      src/core/AutoEqDatabase.cpp
         src/platform/ApoLocator.h      src/platform/ApoLocator.cpp
         src/platform/AudioDevices.h    src/platform/AudioDevices.cpp

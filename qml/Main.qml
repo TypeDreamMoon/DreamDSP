@@ -211,11 +211,12 @@ HusWindow {
             hint: win.eqViewMode === 0 ? '拖动滑块调整增益 · ±15 dB'
                 : win.eqViewMode === 1 ? '逐段编辑频率 / 增益 / Q / 滤波器类型'
                 : win.eqViewMode === 2 ? '耳机校正曲线库'
+                : win.eqViewMode === 3 ? '脉冲响应 · 由 APO 的 Convolution 执行'
                                        : ''
 
             headerRight: HusSegmented {
-                options: [{ label: '图形' }, { label: '参数' },
-                          { label: 'AutoEQ' }, { label: '设置' }]
+                options: [{ label: '图形' }, { label: '参数' }, { label: 'AutoEQ' },
+                          { label: '卷积' }, { label: '设置' }]
                 // Do not bind currentIndex: HusSegmented writes it internally on
                 // click, which would break the binding anyway.
                 Component.onCompleted: currentIndex = win.eqViewMode
@@ -294,6 +295,8 @@ HusWindow {
                 BandTable { }
 
                 AutoEqPane { }
+
+                ConvolutionPane { }
 
                 SettingsPane { }
             }

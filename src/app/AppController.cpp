@@ -132,6 +132,9 @@ void AppController::setCurrentDevice(int index)
     if (m_spectrumEnabled)
         m_capture.startCapture(profileKeyForDevice(index));
 
+    m_deviceRate = dreamdsp::deviceSampleRate(profileKeyForDevice(index));
+    emit convolutionChanged();
+
     emit currentDeviceChanged();
     emit generatedTextChanged();
     scheduleWrite();
@@ -198,8 +201,11 @@ void AppController::setEngaged(bool on)
 
 namespace {
 
-// One APO block: an optional Device: guard, a Preamp, and the filters.
-void appendBlock(QString &out, const Preset &p, const QString &deviceName)
+// One APO block: an optional Device: guard, a Preamp, the filters, and an
+// optional convolution. Order matters -- the impulse response is applied after
+// the equalizer, which is what you want when the IR models a speaker or room.
+void appendBlock(QString &out, const Preset &p, const QString &deviceName,
+                 const QString &convolutionPath = QString())
 {
     if (!deviceName.isEmpty())
         out += QStringLiteral("Device: %1\r\n").arg(deviceName);
@@ -226,8 +232,11 @@ void appendBlock(QString &out, const Preset &p, const QString &deviceName)
         out += line + QStringLiteral("\r\n");
     }
 
-    if (n == 1)
+    if (n == 1 && convolutionPath.isEmpty())
         out += QStringLiteral("# (all bands flat)\r\n");
+
+    if (!convolutionPath.isEmpty())
+        out += QStringLiteral("Convolution: %1\r\n").arg(convolutionPath);
 }
 
 } // namespace
@@ -243,13 +252,17 @@ QString AppController::generatedText() const
         return out;
     }
 
+    const QString conv = (m_convolutionEnabled && !m_convolution.path.isEmpty())
+                             ? m_convolution.path
+                             : QString();
+
     if (!m_perDevice) {
         // One curve. A specific device selection still guards it, so the
         // equalizer only touches the endpoint you picked.
         const QString deviceName = (m_currentDevice > 0 && m_currentDevice - 1 < m_devices.size())
                                        ? m_devices.at(m_currentDevice - 1).name
                                        : QString();
-        appendBlock(out, currentAsPreset(), deviceName);
+        appendBlock(out, currentAsPreset(), deviceName, conv);
         return out;
     }
 
@@ -261,7 +274,7 @@ QString AppController::generatedText() const
 
     if (const auto it = all.constFind(QString()); it != all.constEnd() && it->isValid()) {
         out += QStringLiteral("# --- all devices ---\r\n");
-        appendBlock(out, *it, QString());
+        appendBlock(out, *it, QString(), conv);
     }
 
     for (const AudioDevice &dev : m_devices) {
@@ -269,7 +282,7 @@ QString AppController::generatedText() const
         if (it == all.constEnd() || !it->isValid())
             continue;
         out += QStringLiteral("\r\n# --- %1 ---\r\n").arg(dev.name);
-        appendBlock(out, *it, dev.name);
+        appendBlock(out, *it, dev.name, conv);
     }
     return out;
 }
@@ -302,8 +315,12 @@ void AppController::refreshDevices()
     if (m_currentDevice >= m_deviceNames.size())
         m_currentDevice = 0;
 
+    // Needed for the convolution sample-rate check.
+    m_deviceRate = dreamdsp::deviceSampleRate(profileKeyForDevice(m_currentDevice));
+
     emit devicesChanged();
     emit currentDeviceChanged();
+    emit convolutionChanged();
 }
 
 void AppController::resetAll()
@@ -398,6 +415,103 @@ void AppController::quitApplication()
     flushNow();
     m_tray.uninstall();
     QCoreApplication::quit();
+}
+
+// -------------------------------------------------------------- convolution
+
+bool AppController::rateMismatch() const
+{
+    // Only meaningful once both rates are known; an unreadable impulse
+    // response (flac/ogg) reports rate 0 and cannot be pre-checked.
+    return m_convolution.sampleRate > 0 && m_deviceRate > 0
+           && m_convolution.sampleRate != m_deviceRate;
+}
+
+bool AppController::loadImpulses()
+{
+    if (!m_impulses.isEmpty())
+        return true;
+
+    m_impulses = scanImpulseResponses(
+        defaultImpulseRoots(m_apo.configPath, PresetStore::userDirectory() + QStringLiteral("/..")));
+
+    emit impulsesChanged();
+    if (m_impulses.isEmpty()) {
+        setError(QStringLiteral("没有找到脉冲响应文件"));
+        return false;
+    }
+    setMessage(QStringLiteral("找到 %1 个脉冲响应").arg(m_impulses.size()));
+    return true;
+}
+
+QVariantList AppController::searchImpulses(const QString &needle, int limit)
+{
+    QVariantList out;
+    const QString n = needle.trimmed();
+
+    for (int i = 0; i < m_impulses.size() && out.size() < limit; ++i) {
+        const ImpulseResponse &ir = m_impulses.at(i);
+        if (!n.isEmpty()
+            && !ir.name.contains(n, Qt::CaseInsensitive)
+            && !ir.category.contains(n, Qt::CaseInsensitive)) {
+            continue;
+        }
+        out.append(QVariantMap{
+            { QStringLiteral("index"), i },
+            { QStringLiteral("name"), ir.name },
+            { QStringLiteral("category"), ir.category },
+            { QStringLiteral("rate"), ir.sampleRate },
+            { QStringLiteral("channels"), ir.channels },
+            { QStringLiteral("ms"), int(ir.durationMs() + 0.5) },
+            { QStringLiteral("ok"), ir.readable },
+            // Flag the ones that cannot work on the current device.
+            { QStringLiteral("mismatch"),
+              ir.sampleRate > 0 && m_deviceRate > 0 && ir.sampleRate != m_deviceRate },
+        });
+    }
+    return out;
+}
+
+bool AppController::selectImpulse(int index)
+{
+    if (index < 0 || index >= m_impulses.size())
+        return false;
+
+    m_convolution = m_impulses.at(index);
+    m_convolutionEnabled = true;
+
+    emit convolutionChanged();
+    emit generatedTextChanged();
+    scheduleWrite();
+
+    if (rateMismatch()) {
+        setError(QStringLiteral("采样率不匹配:该脉冲响应是 %1 Hz,设备是 %2 Hz —— APO 要求两者一致,卷积不会正确工作")
+                     .arg(m_convolution.sampleRate).arg(m_deviceRate));
+    } else {
+        setError({});
+        setMessage(QStringLiteral("已应用卷积「%1」").arg(m_convolution.name));
+    }
+    return true;
+}
+
+void AppController::clearConvolution()
+{
+    m_convolution = ImpulseResponse{};
+    m_convolutionEnabled = false;
+    emit convolutionChanged();
+    emit generatedTextChanged();
+    scheduleWrite();
+    setMessage(QStringLiteral("已移除卷积"));
+}
+
+void AppController::setConvolutionEnabled(bool on)
+{
+    if (m_convolutionEnabled == on)
+        return;
+    m_convolutionEnabled = on;
+    emit convolutionChanged();
+    emit generatedTextChanged();
+    scheduleWrite();
 }
 
 // ----------------------------------------------------------------- spectrum
@@ -886,6 +1000,8 @@ void AppController::saveSession()
     PeaceFile::write(sessionPath(), p);
 
     s.setValue(QStringLiteral("perDevice"), m_perDevice);
+    s.setValue(QStringLiteral("convolutionFile"), m_convolution.path);
+    s.setValue(QStringLiteral("convolutionEnabled"), m_convolutionEnabled);
     m_hotkeys.save(s);
 
     if (m_perDevice) {
@@ -903,6 +1019,14 @@ void AppController::restoreSession()
     m_closeToTray = s.value(QStringLiteral("closeToTray"), true).toBool();
     m_perDevice = s.value(QStringLiteral("perDevice"), false).toBool();
     m_hotkeys.load(s);
+
+    // Re-read the header rather than trusting stored metadata: the file may
+    // have been replaced or removed since last run.
+    const QString convFile = s.value(QStringLiteral("convolutionFile")).toString();
+    if (!convFile.isEmpty() && QFileInfo::exists(convFile)) {
+        readWaveHeader(convFile, &m_convolution);
+        m_convolutionEnabled = s.value(QStringLiteral("convolutionEnabled"), false).toBool();
+    }
     m_currentPreset = s.value(QStringLiteral("currentPreset")).toString();
     m_pendingDeviceId = s.value(QStringLiteral("deviceId")).toString();
 

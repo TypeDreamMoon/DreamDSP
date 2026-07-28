@@ -16,4 +16,10 @@ struct AudioDevice {
 // configuration bound to a currently-absent device is still selectable.
 QVector<AudioDevice> enumerateRenderDevices(QString *error = nullptr);
 
+// The endpoint's current shared-mode mix format sample rate, or 0 if unknown.
+// Needed because APO's Convolution: requires the impulse response to be at
+// exactly the device's rate -- a mismatch is silently wrong, not an error.
+// An empty id queries the default render endpoint.
+int deviceSampleRate(const QString &endpointId);
+
 } // namespace dreamdsp

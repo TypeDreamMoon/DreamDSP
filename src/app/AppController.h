@@ -8,6 +8,7 @@
 #include "app/EqBandModel.h"
 #include "app/PresetStore.h"
 #include "core/AutoEqDatabase.h"
+#include "core/ImpulseResponse.h"
 #include "platform/ApoLocator.h"
 #include "platform/AudioDevices.h"
 #include "platform/HotkeyManager.h"
@@ -51,6 +52,14 @@ class AppController : public QObject
     Q_PROPERTY(QString generatedText READ generatedText NOTIFY generatedTextChanged)
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
     Q_PROPERTY(QString lastMessage READ lastMessage NOTIFY lastMessageChanged)
+
+    Q_PROPERTY(bool convolutionEnabled READ convolutionEnabled WRITE setConvolutionEnabled NOTIFY convolutionChanged)
+    Q_PROPERTY(QString convolutionFile READ convolutionFile NOTIFY convolutionChanged)
+    Q_PROPERTY(QString convolutionName READ convolutionName NOTIFY convolutionChanged)
+    Q_PROPERTY(int convolutionRate READ convolutionRate NOTIFY convolutionChanged)
+    Q_PROPERTY(int deviceRate READ deviceRate NOTIFY convolutionChanged)
+    Q_PROPERTY(bool rateMismatch READ rateMismatch NOTIFY convolutionChanged)
+    Q_PROPERTY(int impulseCount READ impulseCount NOTIFY impulsesChanged)
 
     Q_PROPERTY(bool spectrumEnabled READ spectrumEnabled WRITE setSpectrumEnabled NOTIFY spectrumEnabledChanged)
     Q_PROPERTY(QVector<float> spectrum READ spectrum NOTIFY spectrumChanged)
@@ -119,6 +128,24 @@ public:
     Q_INVOKABLE void attachWindow(QObject *window);
     Q_INVOKABLE void quitApplication();
 
+    // --- convolution ------------------------------------------------------
+    bool convolutionEnabled() const { return m_convolutionEnabled; }
+    void setConvolutionEnabled(bool on);
+    QString convolutionFile() const { return m_convolution.path; }
+    QString convolutionName() const { return m_convolution.name; }
+    int convolutionRate() const { return m_convolution.sampleRate; }
+    int deviceRate() const { return m_deviceRate; }
+    // APO requires the impulse response to be at the device's sample rate.
+    // A mismatch is silently wrong rather than an error, so it is surfaced.
+    bool rateMismatch() const;
+    int impulseCount() const { return m_impulses.size(); }
+
+    Q_INVOKABLE bool loadImpulses();
+    // [{ index, name, category, rate, channels, ms, ok }]
+    Q_INVOKABLE QVariantList searchImpulses(const QString &needle, int limit = 200);
+    Q_INVOKABLE bool selectImpulse(int index);
+    Q_INVOKABLE void clearConvolution();
+
     // --- spectrum ---------------------------------------------------------
     bool spectrumEnabled() const { return m_spectrumEnabled; }
     void setSpectrumEnabled(bool on);
@@ -170,6 +197,8 @@ signals:
     void meteringChanged();
     void spectrumChanged();
     void spectrumEnabledChanged();
+    void convolutionChanged();
+    void impulsesChanged();
     void perDeviceChanged();
     void autoEqChanged();
     void hotkeysChanged();
@@ -238,6 +267,11 @@ private:
     QVector<float> m_spectrum;
     bool m_spectrumEnabled = false;
     bool m_spectrumLive = false;
+
+    QVector<ImpulseResponse> m_impulses;
+    ImpulseResponse m_convolution;
+    bool m_convolutionEnabled = false;
+    int m_deviceRate = 0;
 
     QHash<QString, Preset> m_profiles;   // "" == all devices
     QString m_profileKey;                // the one currently being edited

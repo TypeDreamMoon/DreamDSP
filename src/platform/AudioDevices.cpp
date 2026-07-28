@@ -6,6 +6,7 @@
 #include <initguid.h>
 #include <windows.h>
 #include <mmdeviceapi.h>
+#include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
 
 #include <algorithm>
@@ -114,6 +115,42 @@ QVector<AudioDevice> enumerateRenderDevices(QString *error)
         return a.name.localeAwareCompare(b.name) < 0;
     });
     return out;
+}
+
+int deviceSampleRate(const QString &endpointId)
+{
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    if (FAILED(::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                  __uuidof(IMMDeviceEnumerator),
+                                  reinterpret_cast<void **>(&enumerator)))
+        || !enumerator) {
+        return 0;
+    }
+
+    ComPtr<IMMDevice> device;
+    if (endpointId.isEmpty()) {
+        enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device);
+    } else {
+        const std::wstring id = endpointId.toStdWString();
+        enumerator->GetDevice(id.c_str(), &device);
+    }
+    if (!device)
+        return 0;
+
+    ComPtr<IAudioClient> client;
+    if (FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                reinterpret_cast<void **>(&client)))
+        || !client) {
+        return 0;
+    }
+
+    WAVEFORMATEX *fmt = nullptr;
+    if (FAILED(client->GetMixFormat(&fmt)) || !fmt)
+        return 0;
+
+    const int rate = int(fmt->nSamplesPerSec);
+    ::CoTaskMemFree(fmt);
+    return rate;
 }
 
 } // namespace dreamdsp
