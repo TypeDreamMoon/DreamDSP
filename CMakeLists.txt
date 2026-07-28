@@ -10,6 +10,10 @@ find_package(HuskarUI REQUIRED)
 
 qt_standard_project_setup(REQUIRES 6.7)
 
+# The DSP layer and its offline exerciser are independent of Qt entirely.
+add_subdirectory(dsp)
+add_subdirectory(harness)
+
 # HuskarUIConfig.cmake gives us HuskarUI_INCLUDE_DIR / HuskarUI_QML_IMPORT_PATH.
 # The runtime DLLs live next to them in <prefix>/bin.
 get_filename_component(HUSKARUI_ROOT "${HuskarUI_INCLUDE_DIR}" DIRECTORY)
@@ -35,6 +39,9 @@ qt_add_qml_module(DreamDSP
         qml/components/AutoEqPane.qml
         qml/components/MeterBar.qml
         qml/components/ConvolutionPane.qml
+        qml/components/NavRail.qml
+        qml/components/EqualizerPane.qml
+        qml/components/EffectsPane.qml
     SOURCES
         src/core/Biquad.h              src/core/Biquad.cpp
         src/core/ApoConfig.h           src/core/ApoConfig.cpp
@@ -56,6 +63,8 @@ qt_add_qml_module(DreamDSP
         src/app/AppController.h        src/app/AppController.cpp
         src/app/SelfTest.h             src/app/SelfTest.cpp
         src/ui/ResponseCurveItem.h     src/ui/ResponseCurveItem.cpp
+        src/ui/TransferCurveItem.h     src/ui/TransferCurveItem.cpp
+        src/app/CompressorModel.h      src/app/CompressorModel.cpp
 )
 
 # qmltyperegistrar emits `#include <AppController.h>` using the bare header
@@ -81,6 +90,7 @@ target_link_libraries(DreamDSP PRIVATE
     Qt6::Quick
     Qt6::Network   # QLocalServer/Socket for the single-instance guard
     HuskarUI::Basic
+    dreamdsp_core  # the host-neutral DSP layer
     ole32       # COM / MMDevice
     uuid        # PKEY_* / IID_* GUIDs
     advapi32    # registry

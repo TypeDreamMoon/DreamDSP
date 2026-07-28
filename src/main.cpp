@@ -113,7 +113,7 @@ int main(int argc, char *argv[])
                 // the graphic and the parameter view can be captured.
                 const int viewAt = args.indexOf(QStringLiteral("--view"));
                 if (viewAt >= 0 && viewAt + 1 < args.size())
-                    root->setProperty("eqViewMode", args.at(viewAt + 1).toInt());
+                    root->setProperty("page", args.at(viewAt + 1).toInt());
 
                 // --spectrum turns the analyser on before the grab, so a
                 // screenshot can show it with audio actually playing.
