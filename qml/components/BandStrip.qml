@@ -26,17 +26,10 @@ ColumnLayout {
         Behavior on opacity { NumberAnimation { duration: 120 } }
     }
 
-    HusSlider {
+    Fader {
         id: slider
         Layout.alignment: Qt.AlignHCenter
         Layout.fillHeight: true
-        // A vertical HusSlider has an implicitWidth of 0: it has no background
-        // of its own, and the inner T.Slider has no contentItem to measure.
-        // Combined with Layout.alignment the layout then hands it zero width,
-        // and a zero-width item gets no mouse events -- it still *looks* right,
-        // because the track hardcodes width 4 and the handle has its own
-        // implicit size, but it cannot be dragged. Give it a real width.
-        Layout.preferredWidth: 26
         orientation: Qt.Vertical
         min: -root.range
         max: root.range

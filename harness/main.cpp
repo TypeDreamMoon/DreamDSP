@@ -8,7 +8,10 @@
 // live audio graph where a mistake costs the machine its sound.
 
 #include "Compressor.h"
+#include "Reverb.h"
 #include "WavFile.h"
+
+#include <algorithm>
 
 #include <cmath>
 #include <cstdio>
@@ -283,6 +286,169 @@ void testSilenceAndSanity()
           fmt("full-scale square stays finite and <= 1.0 (peak %.4f)", peak));
 }
 
+// ------------------------------------------------------------------- reverb
+
+// Energy of an impulse response in a window, in dB.
+double windowDb(const std::vector<float> &x, size_t from, size_t len)
+{
+    double sum = 0.0;
+    const size_t end = std::min(from + len, x.size());
+    for (size_t i = from; i < end; ++i)
+        sum += double(x[i]) * double(x[i]);
+    const size_t n = (end > from) ? (end - from) : 1;
+    return 10.0 * std::log10(sum / double(n) + 1e-20);
+}
+
+std::vector<float> reverbImpulse(Reverb::Params p, double sr, int seconds = 4)
+{
+    Reverb r;
+    r.prepare(sr);
+    r.setParams(p);
+    r.reset();
+
+    const int n = int(sr) * seconds;
+    std::vector<float> L(size_t(n), 0.0f), R(size_t(n), 0.0f);
+    L[0] = 1.0f;
+    R[0] = 1.0f;
+
+    float *ch[2] = { L.data(), R.data() };
+    AudioBuffer buf{ ch, 2, n };
+    r.process(buf);
+    return L;
+}
+
+void testReverb()
+{
+    std::printf("\n[reverb]\n");
+    constexpr double sr = 48000.0;
+
+    // Fully dry must be bit-exact: a "reverb off" that still colours the signal
+    // is a bug you only notice after chasing it for an hour.
+    {
+        Reverb r;
+        r.prepare(sr);
+        Reverb::Params p;
+        p.wet = 0.0f; p.dry = 1.0f;
+        r.setParams(p);
+        r.reset();
+
+        std::vector<float> L(4096), R(4096), refL(4096);
+        for (size_t i = 0; i < L.size(); ++i) {
+            L[i] = refL[i] = std::sin(float(i) * 0.05f);
+            R[i] = L[i];
+        }
+        float *ch[2] = { L.data(), R.data() };
+        AudioBuffer b{ ch, 2, int(L.size()) };
+        r.process(b);
+
+        float worst = 0.0f;
+        for (size_t i = 0; i < L.size(); ++i)
+            worst = std::max(worst, std::fabs(L[i] - refL[i]));
+        check(worst == 0.0f, fmt("wet=0 is bit-exact (largest deviation %.2e)", worst));
+    }
+
+    // The tail has to decay, and keep decaying.
+    {
+        Reverb::Params p;
+        p.roomSize = 0.7f; p.damping = 0.4f; p.wet = 1.0f; p.dry = 0.0f;
+        const auto ir = reverbImpulse(p, sr);
+
+        const double e0 = windowDb(ir, size_t(sr * 0.05), size_t(sr * 0.1));
+        const double e1 = windowDb(ir, size_t(sr * 0.50), size_t(sr * 0.1));
+        const double e2 = windowDb(ir, size_t(sr * 1.50), size_t(sr * 0.1));
+        std::printf("    energy at 50 ms / 500 ms / 1.5 s: %.1f / %.1f / %.1f dB\n", e0, e1, e2);
+        check(e1 < e0 && e2 < e1, "the tail decays monotonically");
+
+        double peak = 0.0;
+        bool finite = true;
+        for (float v : ir) {
+            if (!std::isfinite(v)) finite = false;
+            peak = std::max(peak, double(std::fabs(v)));
+        }
+        check(finite, "impulse response stays finite over 4 s");
+        check(peak < 4.0, fmt("no runaway feedback (peak %.3f)", peak));
+    }
+
+    // A bigger room must ring longer. This is the single check that would catch
+    // the feedback coefficient being wired backwards.
+    {
+        Reverb::Params small, big;
+        small.wet = big.wet = 1.0f;
+        small.dry = big.dry = 0.0f;
+        small.damping = big.damping = 0.2f;
+        small.roomSize = 0.1f;
+        big.roomSize = 0.95f;
+
+        const auto irS = reverbImpulse(small, sr);
+        const auto irB = reverbImpulse(big, sr);
+        const double sDb = windowDb(irS, size_t(sr * 1.0), size_t(sr * 0.2));
+        const double bDb = windowDb(irB, size_t(sr * 1.0), size_t(sr * 0.2));
+        std::printf("    energy at 1 s: small room %.1f dB, big room %.1f dB\n", sDb, bDb);
+        check(bDb > sDb + 6.0, "a bigger room rings substantially longer");
+    }
+
+    // Damping must remove high frequencies from the tail, not just level.
+    {
+        Reverb::Params dry_, damped;
+        dry_.wet = damped.wet = 1.0f;
+        dry_.dry = damped.dry = 0.0f;
+        dry_.roomSize = damped.roomSize = 0.8f;
+        dry_.damping = 0.0f;
+        damped.damping = 1.0f;
+
+        const auto irA = reverbImpulse(dry_, sr);
+        const auto irB = reverbImpulse(damped, sr);
+
+        // Crude HF measure: mean |x[n] - x[n-1]| over the tail.
+        const auto hf = [](const std::vector<float> &x, size_t from, size_t len) {
+            double s = 0.0;
+            const size_t end = std::min(from + len, x.size());
+            for (size_t i = from + 1; i < end; ++i)
+                s += std::fabs(double(x[i]) - double(x[i - 1]));
+            return s / double(end - from);
+        };
+        const double a = hf(irA, size_t(sr * 0.5), size_t(sr * 0.3));
+        const double b = hf(irB, size_t(sr * 0.5), size_t(sr * 0.3));
+        std::printf("    tail high-frequency content: undamped %.2e, damped %.2e\n", a, b);
+        check(b < a, "damping removes high frequencies from the tail");
+    }
+
+    // Pre-delay must actually delay the onset of the wet signal.
+    {
+        Reverb::Params p;
+        p.wet = 1.0f; p.dry = 0.0f; p.roomSize = 0.5f;
+        p.preDelayMs = 50.0f;
+        const auto ir = reverbImpulse(p, sr, 2);
+
+        const double before = windowDb(ir, 0, size_t(sr * 0.04));
+        const double after = windowDb(ir, size_t(sr * 0.06), size_t(sr * 0.04));
+        std::printf("    before/after a 50 ms pre-delay: %.1f / %.1f dB\n", before, after);
+        check(after > before + 20.0, "pre-delay holds the wet signal back");
+    }
+
+    // The two channels must not be identical, or the reverb is mono.
+    {
+        Reverb r;
+        r.prepare(sr);
+        Reverb::Params p;
+        p.wet = 1.0f; p.dry = 0.0f; p.width = 1.0f; p.roomSize = 0.6f;
+        r.setParams(p);
+        r.reset();
+
+        const int n = int(sr);
+        std::vector<float> L(size_t(n), 0.0f), R(size_t(n), 0.0f);
+        L[0] = R[0] = 1.0f;
+        float *ch[2] = { L.data(), R.data() };
+        AudioBuffer b{ ch, 2, n };
+        r.process(b);
+
+        double diff = 0.0;
+        for (int i = 0; i < n; ++i)
+            diff += std::fabs(double(L[size_t(i)]) - double(R[size_t(i)]));
+        check(diff > 1.0, fmt("left and right decorrelate (total difference %.2f)", diff));
+    }
+}
+
 int runTests()
 {
     std::printf("DreamDSP dsp harness\n");
@@ -292,6 +458,7 @@ int runTests()
     testAutoMakeup();
     testStereoLink();
     testSilenceAndSanity();
+    testReverb();
     std::printf("\n%s -- %d failure(s)\n", g_failures ? "FAIL" : "PASS", g_failures);
     return g_failures;
 }

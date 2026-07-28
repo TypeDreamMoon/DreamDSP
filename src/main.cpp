@@ -100,6 +100,13 @@ int main(int argc, char *argv[])
                                  QMetaObject::invokeMethod(root, "restoreFromTray");
                              });
 
+            // --view selects the section, for grabbing and slider testing alike.
+            {
+                const int viewAt = args.indexOf(QStringLiteral("--view"));
+                if (viewAt >= 0 && viewAt + 1 < args.size())
+                    root->setProperty("page", args.at(viewAt + 1).toInt());
+            }
+
             if (wantSliderTest) {
                 // Give the scene a moment to lay out before poking at it.
                 QTimer::singleShot(1200, &app, [root] {

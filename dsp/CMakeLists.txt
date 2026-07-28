@@ -8,6 +8,7 @@
 add_library(dreamdsp_core STATIC
     DspTypes.h
     Compressor.h    Compressor.cpp
+    Reverb.h        Reverb.cpp
     WavFile.h       WavFile.cpp     # offline only, never on an audio callback
 )
 

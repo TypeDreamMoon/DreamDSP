@@ -85,10 +85,9 @@ Item {
                                    : HusTheme.Primary.colorWarning
                         }
 
-                        HusSlider {
+                        Fader {
                             Layout.alignment: Qt.AlignHCenter
                             Layout.fillHeight: true
-                            Layout.preferredWidth: 26   // see BandStrip.qml
                             orientation: Qt.Vertical
                             min: -30
                             max: 10

@@ -457,15 +457,26 @@ int runSliderTest(QObject *rootObject)
         return cut > 0 ? cls.left(cut) : cls;
     };
 
+    // Identify sliders by their interface rather than by type name: they are
+    // wrapped in Fader.qml, and any future wrapper would silently stop being
+    // tested if this matched on the class name.
+    const auto isSlider = [](const QQuickItem *item) {
+        const QMetaObject *mo = item->metaObject();
+        return mo->indexOfProperty("currentValue") >= 0
+               && mo->indexOfProperty("orientation") >= 0
+               && mo->indexOfProperty("min") >= 0
+               && mo->indexOfProperty("max") >= 0;
+    };
+
     QList<QQuickItem *> sliders;
     for (QQuickItem *item : all) {
-        if (typeName(item) != QLatin1String("HusSlider"))
-            continue;
-        sliders.append(item);
+        if (isSlider(item))
+            sliders.append(item);
     }
 
     out() << "  scanned " << all.size() << " QQuickItem(s)" << Qt::endl;
-    out() << "  HusSlider instances: " << sliders.size() << Qt::endl;
+    out() << "  HusSlider instances: " << sliders.size()
+          << "  (page " << rootObject->property("page").toInt() << ")" << Qt::endl;
     for (int i = 0; i < sliders.size() && i < 20; ++i) {
         QQuickItem *s = sliders.at(i);
         const QPointF at = s->mapToScene(QPointF(0, 0));
@@ -477,6 +488,18 @@ int runSliderTest(QObject *rootObject)
               << Qt::endl;
     }
 
+    // A visible slider with a zero dimension is the recurring HuskarUI trap:
+    // it renders perfectly and receives no mouse events, because the track and
+    // handle draw outside a parent whose bounds are empty. Catch it here rather
+    // than waiting for someone to report that a control does not respond.
+    int zeroSized = 0;
+    for (QQuickItem *s : std::as_const(sliders)) {
+        if (s->isVisible() && (s->width() <= 0.0 || s->height() <= 0.0))
+            ++zeroSized;
+    }
+    check(zeroSized == 0,
+          QStringLiteral("no visible slider has a zero dimension (%1 offending)").arg(zeroSized));
+
     // Keep only ones that can actually be clicked.
     sliders.erase(std::remove_if(sliders.begin(), sliders.end(), [](QQuickItem *s) {
                       return !s->isVisible() || !s->isEnabled()
@@ -484,6 +507,16 @@ int runSliderTest(QObject *rootObject)
                   }),
                   sliders.end());
     out() << "  usable: " << sliders.size() << Qt::endl;
+
+    // The drag assertions below read the equalizer model, so they only apply
+    // on that page. Elsewhere the geometry check above is the whole test.
+    if (rootObject->property("page").toInt() != 0) {
+        out() << "  (not on the equalizer page; geometry only)" << Qt::endl;
+        out() << "\n" << (g_failures == 0 ? "PASS" : "FAIL")
+              << " -- " << g_failures << " failure(s)" << Qt::endl;
+        out().flush();
+        return g_failures;
+    }
     if (sliders.size() < 2) {
         check(false, QStringLiteral("at least 2 sliders present (preamp + bands)"));
         out().flush();

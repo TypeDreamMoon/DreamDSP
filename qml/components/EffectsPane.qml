@@ -9,6 +9,7 @@ Item {
     id: root
 
     CompressorModel { id: comp }
+    ReverbModel { id: rev }
 
     component ParamRow: RowLayout {
         // Referenced by id rather than through `parent`: these children are
@@ -39,7 +40,7 @@ Item {
             font.pixelSize: 12
         }
 
-        HusSlider {
+        Fader {
             Layout.fillWidth: true
             min: prow.from
             max: prow.to
@@ -68,8 +69,19 @@ Item {
         }
     }
 
-    ColumnLayout {
+    // The rack only grows, so it scrolls rather than trying to fit.
+    Flickable {
         anchors.fill: parent
+        contentWidth: width
+        contentHeight: col.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+
+        HusScrollBar.vertical: HusScrollBar { }
+
+    ColumnLayout {
+        id: col
+        width: parent.width - 12
         spacing: 12
 
         // The DSP is written and verified, but nothing hosts it yet. Saying so
@@ -102,7 +114,7 @@ Item {
 
         SectionCard {
             Layout.fillWidth: true
-            Layout.fillHeight: true
+            Layout.preferredHeight: 292
             title: '压缩器'
             hint: '对数域前馈 · 立体声联动 · 软拐点'
 
@@ -175,16 +187,76 @@ Item {
 
         SectionCard {
             Layout.fillWidth: true
-            Layout.preferredHeight: 96
+            Layout.preferredHeight: 236
+            title: '混响'
+            hint: 'Freeverb · 八路并联梳状 + 四级串联全通 · 附加预延迟与输入带宽'
+
+            headerRight: HusSwitch {
+                checked: rev.enabled
+                onToggled: rev.enabled = checked
+            }
+
+            GridLayout {
+                anchors.fill: parent
+                columns: 2
+                columnSpacing: 22
+                rowSpacing: 8
+
+                ParamRow {
+                    label: '房间大小'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                    value: rev.roomSize
+                    onEdited: (v) => rev.roomSize = v
+                }
+                ParamRow {
+                    label: '预延迟'; unit: 'ms'; from: 0; to: 200; step: 1; decimals: 0
+                    value: rev.preDelay
+                    onEdited: (v) => rev.preDelay = v
+                }
+                ParamRow {
+                    label: '阻尼系数'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                    value: rev.damping
+                    onEdited: (v) => rev.damping = v
+                }
+                ParamRow {
+                    label: '空间密度'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                    value: rev.density
+                    onEdited: (v) => rev.density = v
+                }
+                ParamRow {
+                    label: '信号带宽'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                    value: rev.bandwidth
+                    onEdited: (v) => rev.bandwidth = v
+                }
+                ParamRow {
+                    label: '立体声宽度'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                    value: rev.width
+                    onEdited: (v) => rev.width = v
+                }
+                ParamRow {
+                    label: '湿混合'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                    value: rev.wet
+                    onEdited: (v) => rev.wet = v
+                }
+                ParamRow {
+                    label: '干混合'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                    value: rev.dry
+                    onEdited: (v) => rev.dry = v
+                }
+            }
+        }
+
+        SectionCard {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 86
             title: '计划中'
-            hint: '需要真实 DSP,和压缩器共用同一套离线验证流程'
+            hint: '需要真实 DSP,和已有效果共用同一套离线验证流程'
 
             Flow {
                 anchors.fill: parent
                 spacing: 8
 
                 Repeater {
-                    model: ['算法混响', '胆机饱和', '心理声学低音', '激励器 / 清晰度',
+                    model: ['胆机饱和', '心理声学低音', '激励器 / 清晰度',
                             '立体声扩展', 'Crossfeed', '多频段压缩']
                     delegate: HusTag {
                         required property string modelData
@@ -193,5 +265,6 @@ Item {
                 }
             }
         }
+    }
     }
 }

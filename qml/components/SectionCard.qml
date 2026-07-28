@@ -58,6 +58,10 @@ Rectangle {
             id: contentArea
             Layout.fillWidth: true
             Layout.fillHeight: true
+            // Without this a card squeezed below its content's natural height
+            // spills over whatever is underneath instead of being cut off,
+            // which reads as two cards drawn on top of each other.
+            clip: true
         }
     }
 }

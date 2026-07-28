@@ -40,6 +40,7 @@ qt_add_qml_module(DreamDSP
         qml/components/MeterBar.qml
         qml/components/ConvolutionPane.qml
         qml/components/NavRail.qml
+        qml/components/Fader.qml
         qml/components/EqualizerPane.qml
         qml/components/EffectsPane.qml
     SOURCES
@@ -65,6 +66,7 @@ qt_add_qml_module(DreamDSP
         src/ui/ResponseCurveItem.h     src/ui/ResponseCurveItem.cpp
         src/ui/TransferCurveItem.h     src/ui/TransferCurveItem.cpp
         src/app/CompressorModel.h      src/app/CompressorModel.cpp
+        src/app/ReverbModel.h          src/app/ReverbModel.cpp
 )
 
 # qmltyperegistrar emits `#include <AppController.h>` using the bare header
