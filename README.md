@@ -1,0 +1,396 @@
+# DreamDSP
+
+A system-wide audio DSP application for Windows, built with Qt 6 / QML and
+[HuskarUI](https://github.com/mengps/HuskarUI).
+
+Comparable in intent to [JamesDSP](https://github.com/james34602/JamesDSPManager) /
+[RootlessJamesDSP](https://github.com/timschneeb/RootlessJamesDSP) on Android and
+to ViPER4Windows here — a full effects rack, not just an equalizer.
+
+## Architecture
+
+Two pieces, split along a line that matters:
+
+```
+DreamDSP.exe     Qt/QML interface — configuration, presets, analysis
+DreamDSPFX.dll   VST2 plugin — the effects that need real DSP        [planned]
+```
+
+Everything runs inside **Equalizer APO**, which handles the parts that are
+genuinely dangerous to get wrong: audio-engine integration, format negotiation,
+device management, and crash isolation.
+
+```
+audio → Windows Audio Engine → Equalizer APO ─┬─ linear filters (APO native)
+                                              └─ DreamDSPFX.dll (our effects)
+                                     ↑ reads
+                            config/dreamdsp.txt   ← DreamDSP writes only this
+                            config/config.txt     ← only adds/removes one
+                                                    "Include: dreamdsp.txt" line
+```
+
+**Why a VST plugin rather than our own APO.** Both Equalizer APO and
+ViPER4Windows are APOs — DLLs registered into `MMDevices` and loaded into
+`audiodg.exe`. Writing another one means re-implementing what APO already does
+well, and a null dereference there kills system audio until the user restarts
+the audio service. APO, by contrast, guards its plugin calls — strings lifted
+straight out of `EqualizerAPO.dll`:
+
+```
+The VST plugin %s crashed during audio processing.
+The VST plugin %s crashed during initialization.
+Library %s has wrong architecture, must be %d-bit
+VSTPluginMain                    <- VST2 entry point; no VST3 symbols present
+\VSTPlugins                      <- default search path
+```
+
+So a bug in our DSP gets caught and the plugin dropped, instead of silencing
+the machine. That single line decides the architecture.
+
+APO hosts **VST2 only** (the `VSTPluginMain` export, 64-bit). The VST2 SDK is no
+longer distributed by Steinberg, but the interface is a plain C ABI struct —
+`AEffect` is declared directly in this project rather than taking an SDK
+dependency.
+
+## Effect inventory
+
+Split by what can be expressed in APO's linear configuration language and what
+needs real signal processing:
+
+| Effect | Where it runs | Status |
+|---|---|---|
+| Parametric EQ, up to 31 bands, 18 filter types | APO native | done |
+| Preamp, per-device profiles, channel routing | APO native | done |
+| AutoEQ headphone correction (20,777 curves) | APO native | done |
+| Peace `.peace` preset interop | APO native | done |
+| ViPER **DDC** (`.vdc`) import | APO native — DDC is just cascaded biquads | planned |
+| Convolution / impulse response | APO native (`Convolution:`) | planned |
+| Loudness correction | APO native (`LoudnessCorrection:`) | planned |
+| Compressor / compander | plugin | planned |
+| Algorithmic reverb | plugin | planned |
+| Tube saturation, exciter | plugin | planned |
+| Psychoacoustic bass | plugin | planned |
+| Stereo widener, crossfeed | plugin | planned |
+
+The linear half is not a limitation to work around — APO's filter engine is
+good, and anything expressible as biquads belongs there rather than in our
+plugin.
+
+## Peace compatibility
+
+DreamDSP began as a Peace Equalizer replacement and keeps full interoperability
+with it, now as one feature among others: it reads and writes Peace's `.peace`
+preset format, imports the presets an existing Peace install left behind, and
+touches `config.txt` with a single reversible `Include:` line so a Peace setup
+alongside it keeps working.
+
+## Requirements
+
+| | |
+|---|---|
+| Qt | 6.8.3 msvc2022_64 (`D:\Qt\6.8.3\msvc2022_64`) |
+| Toolchain | Visual Studio 2022 (matching Qt's MSVC build) |
+| Build system | CMake ≥ 3.21 + Ninja |
+| Runtime | Equalizer APO ≥ 1.4 installed |
+
+Paths are set in [`scripts/env.bat`](scripts/env.bat) — edit there if yours differ.
+
+## Build
+
+```bat
+scripts\build-huskarui.bat
+scripts\build.bat
+scripts\run.bat
+```
+
+`build-huskarui.bat` builds HuskarUI from `third_party/HuskarUI` and installs it into
+`third_party/HuskarUI-install` (a local prefix — it does **not** touch the Qt SDK).
+Pass `gallery` to also build HuskarUI's component gallery.
+
+`scripts\build.bat clean` wipes the build directory first.
+
+### Two build gotchas worth knowing
+
+1. **RelWithDebInfo, not Debug.** HuskarUI is built Release (`/MD`). A Debug build
+   (`/MDd`) of DreamDSP links a different CRT and Qt refuses to load the QML plugin
+   with *"plugin uses incompatible Qt library"*.
+
+2. **HuskarUI version shadowing.** There is an older HuskarUI (0.5.2) installed into
+   the Qt SDK's own `qml/` directory, which sits ahead of anything
+   `addImportPath()` appends. `main.cpp` prepends our prefix via
+   `setImportPathList()`, and `build.bat` pins `HuskarUI_DIR` so `find_package`
+   cannot resolve the stale one either.
+
+## Layout
+
+```
+src/
+  core/       ApoConfig, Biquad          — no Qt GUI dependency, unit-testable
+  platform/   ApoLocator, AudioDevices   — Win32 / COM (registry, MMDevice)
+  app/        AppController, EqBandModel — QML-facing façade + models
+  ui/         ResponseCurveItem          — QQuickPaintedItem frequency response
+qml/
+  Main.qml, components/                  — HuskarUI-based interface
+scripts/                                 — env / build / run
+```
+
+`core/` and `platform/` deliberately avoid Qt Quick so the config-generation logic
+can be tested without a GUI.
+
+## Presets
+
+DreamDSP reads and writes Peace's own `.peace` format, so presets are shared in
+both directions:
+
+- **Your own presets** live in `%APPDATA%\DreamDSP\presets\` and are editable.
+- **Peace's presets** in Equalizer APO's config directory are listed too,
+  tagged *来自 Peace*, and are read-only — DreamDSP never deletes out of another
+  program's directory.
+
+Session state (bands, preamp, selected device, on/off) is restored on launch.
+Bands and preamp are stored as `%APPDATA%\DreamDSP\session.peace` — a normal
+preset file, so it can be inspected or copied like any other.
+
+The `[Filters]` section stores a filter type as an integer. The decoding table
+is Peace's `$FilterTypes` array (`Peace.au3:384`), reproduced in
+`core/Biquad.h` — the enum order **is** the on-disk index:
+
+```
+0=PK   1=LPQ   2=HPQ   3=BP    4=LS    5=HS    6=NO    7=AP    8=LSC
+9=HSC  10=BWLP 11=BWHP 12=LRLP 13=LRHP 14=LSCQ 15=HSCQ 16=LSQ  17=HSQ
+```
+
+## Self-tests
+
+```bat
+scripts\run.bat --selftest              :: headless: DSP, config I/O, presets, autostart
+scripts\run.bat --slidertest            :: drives the UI with synthetic mouse events
+scripts\run.bat --view 1 --grab out.png :: screenshot a given tab (0/1/2)
+scripts\run.bat --traymenu --grab m.png :: screenshot the tray popup
+scripts\run.bat --spectrum --grab s.png :: screenshot with the analyser running
+```
+
+`--selftest` includes an FFT section that checks a synthetic sine reads back at
+exactly the right bin *and* the right amplitude. That caught a real bug: the
+window gain was halved twice, so the whole spectrum ran 6 dB hot — invisible by
+eye, obvious to the test.
+
+`--selftest` checks the parts a screenshot cannot: biquad magnitudes against
+known values, `config.txt` include add/remove idempotency and BOM-freedom, and
+a parse plus write/read round-trip of **every** `.peace` file on the machine.
+
+`--slidertest` posts real `QMouseEvent`s into the live scene and asserts that
+band 0's model value follows the drag, then restores it. Dragging is the one
+interaction a screenshot cannot verify — and it was silently broken twice, so
+it gets a test. Note it walks the **visual** tree (`childItems()`), not
+`QObject::findChildren`: Repeater delegates are not QObject children of the
+window, so `findChildren` misses every band strip.
+
+Both exit with the failure count.
+
+## HuskarUI API traps
+
+- **A vertical `HusSlider` has `implicitWidth == 0`, and a zero-width item gets
+  no mouse events.** It still *looks* correct — the track hardcodes `width: 4`
+  and the handle has its own implicit size, both drawn outside the parent's
+  zero-wide bounds — but it cannot be dragged. Set `Layout.preferredWidth`
+  explicitly. (`HusSlider` has no background of its own and the inner
+  `T.Slider` has no contentItem, so there is nothing for the implicit size to
+  come from; `Layout.alignment` then hands it that zero width.)
+- **`HusSlider.value` is write-only from the outside.** Assigning to it pushes
+  into the inner `T.Slider`; dragging never writes back. Read the dragged value
+  from the read-only `currentValue`, and listen to `firstMoved` /
+  `firstReleased` — `onValueChanged` only fires for your own assignments, so a
+  slider wired that way silently refuses to move.
+- **`HusSelect.currentIndex` cannot be bound.** Assigning a model makes
+  ComboBox write `currentIndex` itself, breaking any declarative binding. Drive
+  it imperatively via `Qt.callLater` after the model settles.
+- **`HusWindow` draws no background.** Without an explicit backing rectangle the
+  window is transparent, which reads as white with unreadable pale text
+  wherever the compositor is not blurring a backdrop.
+- **`HusInputNumber` formats through `toLocaleString()` by default**, so 1000
+  displays as "1,000" — and in a comma-decimal locale 1.41 would become "1,41".
+  Override the `formatter` / `parser` properties. Everything here feeds
+  Equalizer APO, which rewrites commas in numeric parameters, so locale-shaped
+  numbers must never reach it.
+- **`HusSegmented` takes `options`, not `model`** — the doc text says `model`.
+- Theme tokens live under `HusTheme.Primary.*` (`colorPrimary`, `colorTextBase`,
+  `colorSuccess`, `durationMid`, …). There is no `HusTheme.HusText`.
+
+## Things that will bite you (learned from APO's parser)
+
+- **Never write a UTF-8 BOM.** APO silently drops the first command line.
+- **Never emit locale-formatted numbers.** APO replaces `,` with `.` in numeric
+  parameters; all formatting here goes through `QString::asprintf`.
+- **`ConfigPath` must come from the registry** (`HKLM\SOFTWARE\EqualizerAPO`),
+  never derived from `InstallPath` — they can diverge on upgraded machines.
+  On this machine APO lives on `D:`, not the default `C:\Program Files`.
+- **Debounce writes.** APO coalesces change notifications in a 10 ms window;
+  writing on every slider frame risks it reading a torn file. `AppController`
+  debounces at 150 ms and writes atomically via `QSaveFile`.
+
+## Status
+
+Working: device enumeration, parametric EQ up to 31 bands with all 18 APO
+filter types, preamp, live frequency-response curve, debounced `dreamdsp.txt`
+generation, reversible `config.txt` engagement, preset save/load/delete,
+import of existing `.peace` presets, session persistence, dark/light theme.
+
+Two equalizer views, switched with the segmented control on the 均衡 card:
+
+- **图形** — vertical gain sliders, one per band.
+- **参数** — a table with per-band frequency, gain, Q, filter type and enable,
+  plus insert/remove. Inserted bands land at the geometric mean of their
+  neighbours, i.e. the visual midpoint on a log frequency axis. Gain is greyed
+  out for types that carry none (LP/HP/BP/NO/AP) rather than showing a number
+  APO will ignore.
+
+Four tabs on the 均衡 card: **图形** (sliders), **参数** (table), **AutoEQ**,
+**设置**. Tray icon, run-at-login, close-to-tray, global hotkeys, level meter
+and per-device mode all live in 设置.
+
+Not yet: an installer, VST pass-through, hearing test, MIDI control.
+
+## Global hotkeys
+
+`RegisterHotKey` against the **thread** (`hwnd == nullptr`) rather than a
+window, so bindings survive the main window being hidden into the tray.
+`MOD_NOREPEAT` is always set — without it, holding "gain +1 dB" runs away.
+
+Key capture goes through the QML `KeyEvent`'s `nativeScanCode`, converted with
+`MapVirtualKeyW(sc, MAPVK_VSC_TO_VK_EX)`. Using the scan code rather than
+`Qt::Key` means the physical key is captured correctly whatever the layout.
+
+**Known limitation, surfaced in the UI rather than hidden:** while an elevated
+process has focus, Windows UIPI stops these reaching a non-elevated
+application. Peace has the same limitation; the only workaround is running
+elevated, which costs more than it buys.
+
+## Per-device configurations
+
+With 逐设备独立配置 on, every endpoint keeps its own curve, and the generated
+file emits *all* of them, each behind its own `Device:` guard:
+
+```
+# --- all devices ---
+Preamp: 0.0 dB
+...
+# --- 后面板 耳机 (Realtek USB Audio) ---
+Device: 后面板 耳机 (Realtek USB Audio)
+Preamp: -3.0 dB
+Filter 1: ON PK Fc 62 Hz Gain 4.0 dB Q 1.41
+```
+
+So every device is handled at once, not just the selected one — the combo box
+only chooses which curve you are *editing*. Profiles live in
+`%APPDATA%\DreamDSP\devices\`, keyed by endpoint ID rather than by name or list
+position, because both of those change when hardware is plugged in.
+
+## AutoEQ import
+
+Reads the four compressed databases sitting in Equalizer APO's config
+directory (Harman / IEF / IEF Bass / OPRA — 20,777 entries here). Both the
+parametric and the 10-band fixed variants can be imported.
+
+The format is undocumented; it was reconstructed from `Peace.au3:593-601`:
+
+```
+A = preamp    P = peaking    F = peaking on a fixed frequency
+L = low shelf H = high shelf M = low shelf, centre   I = high shelf, centre
+G = gain      Q = quality    R = raw response        O = OPRA source path
+line-initial: D = device, W = target/rig, M = measurer
+```
+
+`E` is never used as a tag — it would be read as an exponent by the number
+conversion. Fixed-band entries always use 31/62/125/250/500/1k/2k/4k/8k/16k at
+Q 1.41.
+
+A handful of upstream records are malformed (Fostex T-X0 ends `...Q615000`,
+where a filter tag went missing and the next frequency ran into the Q). Peace
+mis-reads those identically; the parser clamps so a corrupt record yields a
+harmless filter instead of an infinitely narrow spike. Not every low frequency
+is a bug, though — oratory1990 legitimately publishes filters down to 8.5 Hz.
+
+## Live spectrum
+
+Drawn behind the EQ curve on the same log frequency axis, so the curve you are
+drawing lines up with the energy actually present. Peace has nothing like it,
+and APO's own editor "analysis" panel is not live either — it pushes a
+synthetic impulse through the filter chain rather than looking at real audio.
+
+- **Capture**: WASAPI loopback (`AUDCLNT_STREAMFLAGS_LOOPBACK` on a *render*
+  endpoint). Qt Multimedia does not expose loopback at all. Shared mode only,
+  so an exclusive-mode device yields nothing — the same blind spot the level
+  meter has. Polled rather than event-driven, because event callbacks with
+  loopback need Windows 10 1703+.
+- **FFT**: hand-rolled iterative radix-2, ~90 lines. FFTW (which APO ships) and
+  KissFFT are both overkill for a 4096-point transform 40 times a second, and
+  each would be a dependency to carry.
+- **Size**: 4096 points = 10.8 Hz per bin at 44.1 kHz. Smaller transforms cannot
+  resolve the bottom two octaves: below ~200 Hz the log-spaced display bands are
+  narrower than one bin, several read the same value, and the low end renders as
+  a flat plateau. 93 ms of window is fine for a visual analyser.
+- **Bands**: 96, log-spaced 20 Hz .. 20 kHz — the same mapping the axis uses, so
+  band index converts straight to x. Peak per band, not average; an averaged
+  analyser looks flat and reads nothing like what you hear.
+- **Decay**: rises instantly, falls 2.5 dB per frame. Raw output at 40 fps is
+  unreadable strobing.
+- **Idle**: loopback stops delivering packets when nothing is playing rather
+  than sending silence, so a 400 ms timeout clears the display — otherwise the
+  last frame would hang on screen forever.
+
+Everything except the finished band values stays on the capture thread.
+
+**Unverified:** whether the captured stream is before or after Equalizer APO's
+processing. That depends on whether APO installed itself as a pre-mix or
+post-mix effect, and confirming it means engaging the equalizer with a large
+boost and watching the spectrum move.
+
+## Level meter
+
+`IAudioMeterInformation` on the selected endpoint, polled at 30 Hz and only
+while switched on. The reading is post-APO, so it reflects what the equalizer
+is doing. A device held in **exclusive mode always reports 0.0**, which is
+indistinguishable from silence — the UI says "读不到电平" rather than showing a
+convincing zero.
+
+## Single instance
+
+With a tray icon and global hotkeys a second copy is actively harmful: two
+icons, two claims on the same hotkeys, two writers racing on `dreamdsp.txt`.
+A second launch hands off via `QLocalSocket` and exits. Diagnostic runs
+(`--selftest`, `--slidertest`, `--grab`) deliberately bypass the guard.
+
+`ApoConfig::writeText` also retries on failure with a short backoff: APO reads
+that directory continuously and another editor may be writing it, so the
+rename loses the race occasionally. APO's own editor retries too.
+
+## Tray icon
+
+Native `Shell_NotifyIconW`, not `QSystemTrayIcon` — the latter lives in
+QtWidgets and would force the application to be a `QApplication`, dragging the
+whole widget stack into a Qt Quick app for one icon, and its menu is a native
+`QMenu` that ignores the dark theme. Here the icon is native and the menu is a
+frameless QML window styled like the rest of the app.
+
+Two details worth keeping:
+
+- The callback message goes to the **main window's** HWND rather than a
+  dedicated message-only window, so the `TaskbarCreated` broadcast — which only
+  reaches top-level windows — is received and the icon is re-added after an
+  Explorer restart.
+- The icon is drawn with `QPainter` at `SM_CXSMICON` and converted to an
+  `HICON`, so it can go grey when the equalizer is switched off. Qt 6 dropped
+  `QtWin::toHICON`, hence the manual `CreateDIBSection` + `CreateIconIndirect`.
+
+Run-at-login writes `HKCU\...\CurrentVersion\Run` (user scope, no elevation)
+with `--tray` appended, so an automatic launch comes up hidden.
+
+## Dev utility
+
+```bat
+run.bat --grab out.png
+```
+
+Renders the app's own window to a PNG and exits (uses `QQuickWindow::grabWindow`,
+so it captures only this application's pixels).

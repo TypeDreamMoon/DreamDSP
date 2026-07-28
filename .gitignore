@@ -1,0 +1,6 @@
+build/
+third_party/HuskarUI-install/
+*.user
+.vs/
+.cache/
+CMakeUserPresets.json
