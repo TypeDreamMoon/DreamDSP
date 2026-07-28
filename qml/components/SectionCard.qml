@@ -2,9 +2,13 @@ import QtQuick
 import QtQuick.Layouts
 import HuskarUI.Basic
 
-// A titled surface. Deliberately hand-rolled rather than HusCard: we want the
-// content to fill the card and control its own padding, plus a slot for
-// controls on the right of the title row.
+// A titled surface.
+//
+// Sizes itself to its content by default. Hard-coded card heights are a
+// guess that goes stale the moment a control is added, and with clipping on
+// the symptom is a silently truncated last row -- so the height is derived
+// instead. A card that should stretch instead can still say
+// Layout.fillHeight: true.
 Rectangle {
     id: root
 
@@ -14,6 +18,13 @@ Rectangle {
     default property alias content: contentArea.data
     property alias contentItem: contentArea
 
+    // Content is conventionally a single layout anchored to fill contentArea;
+    // its implicitHeight is what the card needs to show everything.
+    readonly property real contentImplicitHeight:
+        contentArea.children.length > 0 ? contentArea.children[0].implicitHeight : 0
+
+    implicitHeight: column.anchors.margins * 2 + column.implicitHeight
+
     radius: 10
     color: HusTheme.isDark ? Qt.rgba(1, 1, 1, 0.04) : Qt.rgba(0, 0, 0, 0.025)
     border.width: 1
@@ -22,11 +33,13 @@ Rectangle {
     Behavior on color { ColorAnimation { duration: HusTheme.Primary.durationMid } }
 
     ColumnLayout {
+        id: column
         anchors.fill: parent
         anchors.margins: 14
         spacing: 10
 
         RowLayout {
+            id: header
             Layout.fillWidth: true
             spacing: 8
             visible: root.title !== '' || root.headerRight !== null
@@ -58,9 +71,9 @@ Rectangle {
             id: contentArea
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.minimumHeight: root.contentImplicitHeight
             // Without this a card squeezed below its content's natural height
-            // spills over whatever is underneath instead of being cut off,
-            // which reads as two cards drawn on top of each other.
+            // spills over whatever is underneath instead of being cut off.
             clip: true
         }
     }

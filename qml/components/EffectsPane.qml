@@ -167,7 +167,6 @@ Item {
 
         SectionCard {
             Layout.fillWidth: true
-            Layout.preferredHeight: 292
             title: '压缩器'
             hint: '对数域前馈 · 立体声联动 · 软拐点'
 
@@ -240,7 +239,6 @@ Item {
 
         SectionCard {
             Layout.fillWidth: true
-            Layout.preferredHeight: 236
             title: '混响'
             hint: 'Freeverb · 八路并联梳状 + 四级串联全通 · 附加预延迟与输入带宽'
 
@@ -300,7 +298,6 @@ Item {
 
         SectionCard {
             Layout.fillWidth: true
-            Layout.preferredHeight: 150
             title: '心理声学低音'
             hint: '合成缺失基频的谐波 —— 小喇叭放不出 40 Hz,但耳朵能从 80/120 Hz 推断出它'
 
@@ -355,7 +352,6 @@ Item {
 
         SectionCard {
             Layout.fillWidth: true
-            Layout.preferredHeight: 132
             title: '胆机饱和'
             hint: '非对称软削波 · 2 倍过采样抗混叠 · 偏置产生偶次谐波'
 
@@ -388,7 +384,6 @@ Item {
 
         SectionCard {
             Layout.fillWidth: true
-            Layout.preferredHeight: 132
             title: '激励器 / 清晰度'
             hint: '只对高频段做谐波激励,再混回原信号 —— 加细节而不是加脏'
 
@@ -421,7 +416,6 @@ Item {
 
         SectionCard {
             Layout.fillWidth: true
-            Layout.preferredHeight: 104
             title: '立体声扩展'
             hint: 'M/S 侧信号增益 · 宽度 1.00 是精确的恒等'
 
@@ -449,7 +443,6 @@ Item {
 
         SectionCard {
             Layout.fillWidth: true
-            Layout.preferredHeight: 104
             title: 'Crossfeed'
             hint: '耳机用 —— 把每个声道延迟、低通后混一点到另一边,模拟头部遮蔽'
 
@@ -477,7 +470,6 @@ Item {
 
         SectionCard {
             Layout.fillWidth: true
-            Layout.preferredHeight: 104
             title: '多频段压缩'
             hint: 'Linkwitz-Riley 4 阶分频 —— 低频不再压掉高频。全部 1:1 时透明'
 
