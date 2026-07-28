@@ -4,3 +4,4 @@ third_party/HuskarUI-install/
 .vs/
 .cache/
 CMakeUserPresets.json
+backup/

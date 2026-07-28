@@ -1,6 +1,7 @@
 #include "DreamApo.h"
 
 #include <new>
+#include <cstdio>
 
 namespace dreamdsp::apo {
 
@@ -9,6 +10,33 @@ const CLSID CLSID_DreamDspApo =
     { 0x6d2f1c55, 0x5e4b, 0x4a7e, { 0x9c, 0x31, 0x0d, 0x5a, 0x6c, 0x4b, 0x7e, 0x10 } };
 
 namespace {
+
+// Diagnostics. There is no debugger and no console inside audiodg.exe, so the
+// only way to know whether the APO was loaded at all -- and with what format --
+// is to leave a trace. Called from LockForProcess and UnlockForProcess only,
+// never from APOProcess: this opens a file.
+void trace(const wchar_t *what, unsigned a = 0, unsigned b = 0, unsigned c = 0)
+{
+    HANDLE h = ::CreateFileW(L"C:\\ProgramData\\DreamDSP\\apo.log",
+                             FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+
+    SYSTEMTIME t{};
+    ::GetLocalTime(&t);
+
+    char line[256];
+    const int n = ::_snprintf_s(line, sizeof(line), _TRUNCATE,
+                                "%02u:%02u:%02u.%03u  %ls  %u %u %u\r\n",
+                                t.wHour, t.wMinute, t.wSecond, t.wMilliseconds,
+                                what, a, b, c);
+    if (n > 0) {
+        DWORD written = 0;
+        ::WriteFile(h, line, DWORD(n), &written, nullptr);
+    }
+    ::CloseHandle(h);
+}
 
 // Registration properties are handed to the audio engine as a plain struct.
 // Static so nothing is allocated when the engine asks for them.
@@ -207,11 +235,14 @@ HRESULT DreamApo::LockForProcess(UINT32 u32NumInputConnections,
     Reset();
 
     m_locked = true;
+    trace(L"LockForProcess ch/rate/maxFrames",
+          m_channels, unsigned(m_sampleRate), m_maxFrames);
     return S_OK;
 }
 
 HRESULT DreamApo::UnlockForProcess()
 {
+    trace(L"UnlockForProcess");
     m_locked = false;
     m_scratch.clear();
     m_channelPtrs.clear();
