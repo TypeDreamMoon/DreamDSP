@@ -11,6 +11,7 @@
 #include "Compressor.h"
 #include "Denormals.h"
 #include "EffectChain.h"
+#include "Fft.h"
 #include "MultibandCompressor.h"
 #include "ParamBlock.h"
 #include "ParamSlots.h"
@@ -70,6 +71,13 @@ std::string fmt(const char *f, double a, double b = 0, double c = 0)
     char buf[256];
     std::snprintf(buf, sizeof(buf), f, a, b, c);
     return buf;
+}
+
+// A cheap deterministic generator, so a failure can be reproduced exactly.
+uint32_t xorshift(uint32_t &s)
+{
+    s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+    return s;
 }
 
 // Runs a mono signal through a compressor and returns it.
@@ -863,14 +871,98 @@ void testMultiband()
     }
 }
 
-// ---------------------------------------------------------- parameter channel
+// ------------------------------------------------------------------------ fft
 
-// A cheap deterministic generator, so a failure can be reproduced exactly.
-uint32_t xorshift(uint32_t &s)
+void testFft()
 {
-    s ^= s << 13; s ^= s >> 17; s ^= s << 5;
-    return s;
+    std::printf("\n[fft]\n");
+
+    // Checked against a naive O(n^2) DFT rather than against itself. A fast
+    // transform that agrees with its own inverse can still be wrong in a way
+    // that cancels; agreeing with the definition cannot.
+    auto naiveDft = [](const std::vector<float> &x) {
+        const int n = int(x.size());
+        std::vector<std::complex<double>> out(size_t(n), std::complex<double>(0.0, 0.0));
+        for (int k = 0; k < n; ++k) {
+            std::complex<double> sum(0.0, 0.0);
+            for (int t = 0; t < n; ++t) {
+                const double a = -2.0 * 3.14159265358979323846 * double(k) * double(t) / double(n);
+                sum += double(x[size_t(t)]) * std::complex<double>(std::cos(a), std::sin(a));
+            }
+            out[size_t(k)] = sum;
+        }
+        return out;
+    };
+
+    uint32_t seed = 0xBEEF01u;
+    for (int half : { 4, 8, 64, 512 }) {
+        Fft fft(half);
+        const int n = fft.realSize();
+
+        std::vector<float> x(size_t(n), 0.0f);
+        for (auto &v : x)
+            v = float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f;
+
+        const auto reference = naiveDft(x);
+        std::vector<std::complex<float>> bins(size_t(fft.realBins()), std::complex<float>(0.0f, 0.0f));
+        fft.realForward(x.data(), bins.data());
+
+        double worst = 0.0;
+        for (int k = 0; k < fft.realBins(); ++k)
+            worst = std::max(worst, std::abs(std::complex<double>(bins[size_t(k)]) - reference[size_t(k)]));
+        check(worst < 1e-2,
+              fmt("real forward matches a naive DFT at n=%.0f (worst error %.2e)",
+                  double(n), worst));
+
+        // Round trip. The forward is unnormalised and the inverse divides by N,
+        // which is what makes multiply-in-the-frequency-domain a plain
+        // convolution with no stray scale factor to remember.
+        std::vector<float> back(size_t(n), 0.0f);
+        fft.realInverse(bins.data(), back.data());
+        double worstRt = 0.0;
+        for (int i = 0; i < n; ++i)
+            worstRt = std::max(worstRt, double(std::fabs(back[size_t(i)] - x[size_t(i)])));
+        check(worstRt < 1e-5,
+              fmt("real round trip is the identity at n=%.0f (worst error %.2e)",
+                  double(n), worstRt));
+    }
+
+    // The property the convolver actually depends on: multiplying spectra is
+    // circular convolution in time.
+    {
+        Fft fft(64);
+        const int n = fft.realSize();
+        std::vector<float> a(size_t(n), 0.0f), b(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i) {
+            a[size_t(i)] = float(int(xorshift(seed) & 0xFFFu) - 2048) / 2048.0f;
+            b[size_t(i)] = (i < 8) ? float(int(xorshift(seed) & 0xFFFu) - 2048) / 2048.0f : 0.0f;
+        }
+
+        std::vector<float> expected(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+                expected[size_t(i)] += a[size_t(j)] * b[size_t((i - j + n) % n)];
+
+        const std::complex<float> zeroC(0.0f, 0.0f);
+        std::vector<std::complex<float>> A(size_t(fft.realBins()), zeroC);
+        std::vector<std::complex<float>> B(size_t(fft.realBins()), zeroC);
+        fft.realForward(a.data(), A.data());
+        fft.realForward(b.data(), B.data());
+        for (int k = 0; k < fft.realBins(); ++k)
+            A[size_t(k)] *= B[size_t(k)];
+
+        std::vector<float> got(size_t(n), 0.0f);
+        fft.realInverse(A.data(), got.data());
+
+        double worst = 0.0;
+        for (int i = 0; i < n; ++i)
+            worst = std::max(worst, double(std::fabs(got[size_t(i)] - expected[size_t(i)])));
+        check(worst < 1e-4,
+              fmt("spectral multiply is circular convolution (worst error %.2e)", worst));
+    }
 }
+
+// ---------------------------------------------------------- parameter channel
 
 // Offset of the first word that is a NaN or an infinity, or -1 if there is
 // none. Returns the offset rather than a bool so a failure names the field
@@ -1185,6 +1277,7 @@ int runTests()
     testExciter();
     testStereo();
     testMultiband();
+    testFft();
     testParamBlock();
     testTransparency();
     testNoAllocation();

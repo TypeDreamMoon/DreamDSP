@@ -13,6 +13,7 @@
 set(DREAMDSP_CORE_SOURCES
     DspTypes.h
     Denormals.h
+    Fft.h                 Fft.cpp
     ParamBlock.h          ParamBlock.cpp
     ParamSlots.h
     StatusBlock.h
