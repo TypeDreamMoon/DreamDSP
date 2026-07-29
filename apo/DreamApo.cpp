@@ -297,8 +297,17 @@ HRESULT DreamApo::LockForProcess(UINT32 u32NumInputConnections,
 
 HRESULT DreamApo::UnlockForProcess()
 {
-    trace(L"UnlockForProcess");
+    // Peaks in thousandths, because trace() only carries integers. A non-zero
+    // frame count proves the DSP was in the signal path rather than merely
+    // instantiated; peak-out differing from peak-in proves it changed the audio.
+    trace(L"UnlockForProcess frames/peakIn/peakOut(1000x)",
+          unsigned(m_framesProcessed),
+          unsigned(m_peakIn * 1000.0f),
+          unsigned(m_peakOut * 1000.0f));
     m_locked = false;
+    m_framesProcessed = 0;
+    m_peakIn = 0.0f;
+    m_peakOut = 0.0f;
     m_scratch.clear();
     m_channelPtrs.clear();
     m_channels = 0;
@@ -346,17 +355,30 @@ void DreamApo::APOProcess(UINT32 u32NumInputConnections,
     // Deinterleave -> process -> reinterleave. The DSP layer works on planar
     // buffers, which is also what makes it testable offline.
     const UINT32 ch = m_channels;
-    for (UINT32 i = 0; i < frames; ++i)
-        for (UINT32 c = 0; c < ch; ++c)
-            m_channelPtrs[c][i] = src[size_t(i) * ch + c];
+    for (UINT32 i = 0; i < frames; ++i) {
+        for (UINT32 c = 0; c < ch; ++c) {
+            const float v = src[size_t(i) * ch + c];
+            m_channelPtrs[c][i] = v;
+            const float a = v < 0.0f ? -v : v;
+            if (a > m_peakIn)
+                m_peakIn = a;
+        }
+    }
 
     dsp::AudioBuffer buf{ m_channelPtrs.data(), int(ch), int(frames) };
     m_comp.process(buf);
     m_reverb.process(buf);
 
-    for (UINT32 i = 0; i < frames; ++i)
-        for (UINT32 c = 0; c < ch; ++c)
-            dst[size_t(i) * ch + c] = m_channelPtrs[c][i];
+    for (UINT32 i = 0; i < frames; ++i) {
+        for (UINT32 c = 0; c < ch; ++c) {
+            const float v = m_channelPtrs[c][i];
+            dst[size_t(i) * ch + c] = v;
+            const float a = v < 0.0f ? -v : v;
+            if (a > m_peakOut)
+                m_peakOut = a;
+        }
+    }
+    m_framesProcessed += frames;
 }
 
 } // namespace dreamdsp::apo

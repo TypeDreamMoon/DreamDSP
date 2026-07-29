@@ -118,6 +118,15 @@ private:
     std::vector<float> m_scratch;
     std::vector<float *> m_channelPtrs;
 
+    // Evidence that the DSP actually ran, reported once from UnlockForProcess.
+    // Being instantiated and being in the signal path are different things, and
+    // from outside audiodg they look identical. Plain members, not atomics:
+    // only APOProcess writes them, and only UnlockForProcess reads them, after
+    // streaming has stopped.
+    unsigned long long m_framesProcessed = 0;
+    float m_peakIn = 0.0f;
+    float m_peakOut = 0.0f;
+
     dsp::Compressor m_comp;
     dsp::Reverb m_reverb;
 };
