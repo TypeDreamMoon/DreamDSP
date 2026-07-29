@@ -15,6 +15,7 @@
 #include "MultibandCompressor.h"
 #include "ParamBlock.h"
 #include "ParamSlots.h"
+#include "Resampler.h"
 #include "Reverb.h"
 #include "Saturation.h"
 #include "StatusBlock.h"
@@ -962,6 +963,108 @@ void testFft()
     }
 }
 
+// ------------------------------------------------------------------ resampler
+
+void testResampler()
+{
+    std::printf("\n[resampler]\n");
+
+    // Unity ratio has to be exactly the identity, not merely close: it is the
+    // common case, and a resampler that quietly filters an already-correct
+    // impulse response would degrade it for nothing.
+    {
+        std::vector<float> x(size_t(1000), 0.0f);
+        uint32_t seed = 0x51EDu;
+        for (auto &v : x)
+            v = float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f;
+        const auto y = Resampler::resample(x.data(), int(x.size()), 48000.0, 48000.0);
+        check(y.size() == x.size() && std::memcmp(y.data(), x.data(), x.size() * sizeof(float)) == 0,
+              "a matching rate is passed through untouched");
+    }
+
+    // Constant in, constant out. This is the DC gain, and getting it wrong
+    // would change the level of every impulse response that needs converting.
+    {
+        std::vector<float> x(size_t(4000), 0.5f);
+        const auto y = Resampler::resample(x.data(), int(x.size()), 44100.0, 96000.0);
+        double worst = 0.0;
+        // Skip the ends, where the kernel legitimately runs off the signal.
+        for (size_t i = 400; i + 400 < y.size(); ++i)
+            worst = std::max(worst, double(std::fabs(y[i] - 0.5f)));
+        check(worst < 1e-4, fmt("DC is preserved 44.1k -> 96k (worst error %.2e)", worst));
+    }
+
+    // A sine has to come out as the same sine, at the same frequency and
+    // amplitude. Anything else means the conversion shifted pitch, which is
+    // exactly the failure that makes a mismatched impulse response wrong.
+    {
+        constexpr double inRate = 44100.0, outRate = 96000.0, freq = 1000.0;
+        const int n = 44100;
+        std::vector<float> x(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i)
+            x[size_t(i)] = float(std::sin(2.0 * 3.14159265358979323846 * freq * double(i) / inRate));
+
+        const auto y = Resampler::resample(x.data(), n, inRate, outRate);
+
+        double worst = 0.0;
+        const size_t guard = 2000;
+        for (size_t i = guard; i + guard < y.size(); ++i) {
+            const double want = std::sin(2.0 * 3.14159265358979323846 * freq * double(i) / outRate);
+            worst = std::max(worst, std::fabs(double(y[i]) - want));
+        }
+        check(worst < 2e-3,
+              fmt("a 1 kHz sine survives 44.1k -> 96k (worst error %.2e)", worst));
+    }
+
+    // Downsampling has to REMOVE content above the new Nyquist, not fold it
+    // back. A resampler without this sounds broken rather than merely soft,
+    // because the aliases are inharmonic.
+    {
+        constexpr double inRate = 96000.0, outRate = 44100.0;
+        constexpr double freq = 30000.0;          // well above 22.05 kHz
+        const int n = 96000;
+        std::vector<float> x(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i)
+            x[size_t(i)] = float(std::sin(2.0 * 3.14159265358979323846 * freq * double(i) / inRate));
+
+        const auto y = Resampler::resample(x.data(), n, inRate, outRate);
+
+        double peak = 0.0;
+        const size_t guard = 2000;
+        for (size_t i = guard; i + guard < y.size(); ++i)
+            peak = std::max(peak, double(std::fabs(y[i])));
+        check(peak < 0.01,
+              fmt("a 30 kHz tone is removed, not aliased, at 96k -> 44.1k (peak %.4f)", peak));
+    }
+
+    // An impulse must land where it belongs in time. A resampler that is right
+    // in the frequency domain but off by a sample would smear every impulse
+    // response it touched.
+    {
+        constexpr double inRate = 48000.0, outRate = 96000.0;
+        const int n = 2000, at = 1000;
+        std::vector<float> x(size_t(n), 0.0f);
+        x[size_t(at)] = 1.0f;
+
+        const auto y = Resampler::resample(x.data(), n, inRate, outRate);
+
+        size_t peakAt = 0;
+        double peak = 0.0;
+        for (size_t i = 0; i < y.size(); ++i) {
+            if (std::fabs(double(y[i])) > peak) {
+                peak = std::fabs(double(y[i]));
+                peakAt = i;
+            }
+        }
+        const size_t want = size_t(double(at) * outRate / inRate);
+        check(peakAt == want,
+              fmt("an impulse stays put: peak at %.0f, want %.0f", double(peakAt), double(want)));
+    }
+
+    check(Resampler::outputFrames(44100, 44100.0, 96000.0) == 96000,
+          "output length follows the ratio");
+}
+
 // ---------------------------------------------------------- parameter channel
 
 // Offset of the first word that is a NaN or an infinity, or -1 if there is
@@ -1278,6 +1381,7 @@ int runTests()
     testStereo();
     testMultiband();
     testFft();
+    testResampler();
     testParamBlock();
     testTransparency();
     testNoAllocation();
