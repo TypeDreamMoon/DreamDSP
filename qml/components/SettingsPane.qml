@@ -225,6 +225,24 @@ Item {
                 }
             }
 
+            // The one-way channel's blind spot: without a report from the other
+            // end, "I moved a slider and nothing happened" has half a dozen
+            // indistinguishable causes. This is what tells them apart.
+            SettingRow {
+                label: '运行状态'
+                hint: AppController.apoStatusText
+                Rectangle {
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: 10
+                    implicitHeight: 10
+                    radius: 5
+                    color: AppController.apoLive
+                           ? (AppController.apoInSync ? HusTheme.Primary.colorSuccess
+                                                      : HusTheme.Primary.colorWarning)
+                           : HusTheme.Primary.colorTextQuaternary
+                }
+            }
+
             SettingRow {
                 label: '重启音频服务'
                 hint: AppController.apoRestartPending
