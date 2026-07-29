@@ -7,13 +7,13 @@
 #include <atomic>
 #include <vector>
 
-#include "Compressor.h"
-#include "MultibandCompressor.h"
-#include "Reverb.h"
-#include "Saturation.h"
-#include "Stereo.h"
+#include "EffectChain.h"
+#include "ParamBlock.h"
+#include "StatusBlock.h"
 
 namespace dreamdsp::apo {
+
+class ParamChannel;
 
 // {6D2F1C55-5E4B-4A7E-9C31-0D5A6C4B7E10}
 extern const CLSID CLSID_DreamDspApo;
@@ -102,6 +102,11 @@ public:
     STDMETHOD_(UINT32, CalcInputFrames)(UINT32 u32OutputFrameCount) override;
     STDMETHOD_(UINT32, CalcOutputFrames)(UINT32 u32InputFrameCount) override;
 
+    // Fills in this instance's row of the status block. Called from the
+    // watcher thread, so it only reads atomics and values that are fixed
+    // between LockForProcess and UnlockForProcess.
+    void fillStatus(dsp::StatusInstance &out) const noexcept;
+
 private:
     bool formatAcceptable(IAudioMediaType *type, WAVEFORMATEX **out) const;
 
@@ -120,15 +125,25 @@ private:
 
     // Evidence that the DSP actually ran, reported once from UnlockForProcess.
     // Being instantiated and being in the signal path are different things, and
-    // from outside audiodg they look identical. Plain members, not atomics:
-    // only APOProcess writes them, and only UnlockForProcess reads them, after
-    // streaming has stopped.
-    unsigned long long m_framesProcessed = 0;
+    // from outside audiodg they look identical.
     float m_peakIn = 0.0f;
     float m_peakOut = 0.0f;
 
-    dsp::Compressor m_comp;
-    dsp::Reverb m_reverb;
+    // Read by the status writer on the watcher thread while the callback is
+    // updating them, hence atomic. Relaxed throughout: these are a report, not
+    // a synchronisation mechanism, and a status file one block out of date is
+    // of no consequence.
+    std::atomic<unsigned long long> m_framesProcessed{ 0 };
+    std::atomic<uint32_t> m_statusFlags{ 0 };
+
+    // The last block read from the channel, kept so a callback that catches the
+    // publisher mid-write can carry on with what it already had. A member, not
+    // a local, so no allocation and no per-callback initialisation.
+    dsp::ParamBlock m_pending{};
+    ParamChannel *m_channel = nullptr;
+    bool m_channelHeld = false;
+
+    dsp::EffectChain m_chain;
 };
 
 } // namespace dreamdsp::apo

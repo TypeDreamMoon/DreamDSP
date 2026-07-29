@@ -11,6 +11,10 @@ void StereoWidener::prepare(double sampleRate)
 {
     m_sampleRate = sampleRate;
     setParams(m_p);
+    // The crossover state used to be cleared as a side effect of designing it.
+    // LinkwitzRiley4::design no longer does that -- it would click on every
+    // parameter change -- so preparing has to ask.
+    m_splitS.reset();
 }
 
 void StereoWidener::setParams(const Params &p)
@@ -98,6 +102,10 @@ void Crossfeed::process(const AudioBuffer &buf)
     float *L = buf.channels[0];
     float *R = buf.channels[1];
 
+    // Normalised so the total energy does not climb with the feed level. m_feed
+    // cannot change inside the loop, so this is hoisted out of it.
+    const float norm = 1.0f / (1.0f + m_feed);
+
     for (int i = 0; i < buf.frames; ++i) {
         const float inL = L[i], inR = R[i];
 
@@ -114,8 +122,6 @@ void Crossfeed::process(const AudioBuffer &buf)
         const float crossToL = m_lpR.process(delayedR) * m_feed;
         const float crossToR = m_lpL.process(delayedL) * m_feed;
 
-        // Normalised so the total energy does not climb with the feed level.
-        const float norm = 1.0f / (1.0f + m_feed);
         L[i] = (inL + crossToL) * norm;
         R[i] = (inR + crossToR) * norm;
     }

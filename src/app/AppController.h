@@ -6,6 +6,7 @@
 #include <QtQml/qqmlregistration.h>
 
 #include "app/EqBandModel.h"
+#include "app/ParamPublisher.h"
 #include "app/PresetStore.h"
 #include "core/AutoEqDatabase.h"
 #include "core/ImpulseResponse.h"
@@ -43,6 +44,15 @@ class AppController : public QObject
 
     Q_PROPERTY(dreamdsp::EqBandModel *bands READ bands CONSTANT)
     Q_PROPERTY(dreamdsp::PresetStore *presets READ presets CONSTANT)
+
+    // The effect models live here rather than in the QML that displays them.
+    // They used to be created by the effects pane, which meant they did not
+    // exist until that pane was first shown and were destroyed with it -- so
+    // nothing with a process-long lifetime could save them, restore them, or
+    // notice a change in order to publish it.
+    Q_PROPERTY(dreamdsp::CompressorModel *compressor READ compressor CONSTANT)
+    Q_PROPERTY(dreamdsp::ReverbModel *reverb READ reverbModel CONSTANT)
+    Q_PROPERTY(dreamdsp::EffectsModel *effects READ effects CONSTANT)
     Q_PROPERTY(QString currentPreset READ currentPreset NOTIFY currentPresetChanged)
     Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
 
@@ -81,6 +91,13 @@ class AppController : public QObject
     Q_PROPERTY(bool apoBusy READ apoBusy NOTIFY apoStateChanged)
     Q_PROPERTY(bool apoRestartPending READ apoRestartPending NOTIFY apoStateChanged)
 
+    // What the copy running inside audiodg says it is doing. Without this a
+    // slider that appears to do nothing has half a dozen indistinguishable
+    // explanations, and the user has no way to tell which one they have.
+    Q_PROPERTY(bool apoLive READ apoLive NOTIFY apoStatusChanged)
+    Q_PROPERTY(bool apoInSync READ apoInSync NOTIFY apoStatusChanged)
+    Q_PROPERTY(QString apoStatusText READ apoStatusText NOTIFY apoStatusChanged)
+
     Q_PROPERTY(bool trayActive READ trayActive NOTIFY trayActiveChanged)
     Q_PROPERTY(bool autostart READ autostart WRITE setAutostart NOTIFY autostartChanged)
     Q_PROPERTY(bool closeToTray READ closeToTray WRITE setCloseToTray NOTIFY closeToTrayChanged)
@@ -102,6 +119,15 @@ public:
 
     EqBandModel *bands() { return &m_bands; }
     PresetStore *presets() { return &m_presets; }
+    CompressorModel *compressor() { return &m_compressor; }
+    ReverbModel *reverbModel() { return &m_reverb; }
+    EffectsModel *effects() { return &m_effects; }
+
+    // True when an APO instance is streaming somewhere on this machine.
+    bool apoLive() const;
+    // True when what it is running is the parameter set last published.
+    bool apoInSync() const;
+    QString apoStatusText() const;
     QString currentPreset() const { return m_currentPreset; }
     bool dirty() const { return m_dirty; }
 
@@ -244,6 +270,7 @@ signals:
     void autoEqChanged();
     void hotkeysChanged();
     void apoStateChanged();
+    void apoStatusChanged();
     void quittingChanged();
 
     // Asked for by a hotkey; the window is QML's business, not the controller's.
@@ -275,6 +302,11 @@ private:
     // The endpoint an APO action applies to: the selected device, or the
     // system default when the "all devices" entry is selected.
     QString apoTargetDevice() const;
+
+    CompressorModel m_compressor;
+    ReverbModel m_reverb;
+    EffectsModel m_effects;
+    ParamPublisher m_publisher;
 
     ApoState m_apoState;
     ApoSlot m_apoSlot;

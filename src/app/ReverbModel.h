@@ -15,6 +15,10 @@ class ReverbModel : public QObject
 {
     Q_OBJECT
     QML_ELEMENT
+    // Owned by AppController, not by the QML engine: it is the only object
+    // with a process-long lifetime and with save/restore, and the parameter
+    // publisher has to see every change wherever it comes from.
+    QML_UNCREATABLE("owned by AppController")
 
     Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY paramsChanged)
     Q_PROPERTY(double roomSize READ roomSize WRITE setRoomSize NOTIFY paramsChanged)

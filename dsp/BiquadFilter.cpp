@@ -92,7 +92,16 @@ void LinkwitzRiley4::design(double crossoverHz, double sampleRate)
     m_lp2.design(BiquadFilter::Kind::LowPass, crossoverHz, kButterworthQ, 0.0, sampleRate);
     m_hp1.design(BiquadFilter::Kind::HighPass, crossoverHz, kButterworthQ, 0.0, sampleRate);
     m_hp2.design(BiquadFilter::Kind::HighPass, crossoverHz, kButterworthQ, 0.0, sampleRate);
-    reset();
+
+    // Deliberately no reset() here.
+    //
+    // design() writes coefficients and nothing else, exactly as
+    // BiquadFilter::design does -- which is what lets a crossover frequency be
+    // changed while audio is flowing. Clearing the delay memory instead put a
+    // discontinuity into the output on every parameter change, i.e. an audible
+    // click every time the user moved a widener, virtual-bass or multiband
+    // slider. Callers that need a clean state ask for reset() explicitly; the
+    // three prepare() functions that used to get one through here now do.
 }
 
 void LinkwitzRiley4::reset()

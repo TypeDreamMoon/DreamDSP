@@ -8,7 +8,8 @@
 # once the audio graph is running protected content, and the failure is silent.
 
 add_library(DreamDspApo SHARED
-    DreamApo.h  DreamApo.cpp
+    DreamApo.h    DreamApo.cpp
+    ParamChannel.h ParamChannel.cpp
     DllMain.cpp
     DreamDspApo.def
 )

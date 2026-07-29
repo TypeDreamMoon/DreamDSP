@@ -12,6 +12,11 @@
 
 set(DREAMDSP_CORE_SOURCES
     DspTypes.h
+    Denormals.h
+    ParamBlock.h          ParamBlock.cpp
+    ParamSlots.h
+    StatusBlock.h
+    EffectChain.h         EffectChain.cpp
     BiquadFilter.h        BiquadFilter.cpp
     Oversampler.h         Oversampler.cpp
     Compressor.h          Compressor.cpp

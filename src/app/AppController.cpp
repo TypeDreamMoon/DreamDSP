@@ -88,10 +88,30 @@ AppController::AppController(QObject *parent)
 
     loadProfiles();
 
+    // Every effect change reaches the copy inside audiodg, whether it came from
+    // a slider, a preset, or restoring the last session. The publisher
+    // coalesces, so connecting the fine-grained signals directly is fine.
+    m_publisher.setSources(&m_compressor, &m_reverb, &m_effects);
+    connect(&m_compressor, &CompressorModel::paramsChanged,
+            &m_publisher, &ParamPublisher::schedule);
+    connect(&m_reverb, &ReverbModel::paramsChanged,
+            &m_publisher, &ParamPublisher::schedule);
+    connect(&m_effects, &EffectsModel::changed,
+            &m_publisher, &ParamPublisher::schedule);
+    connect(&m_publisher, &ParamPublisher::statusChanged,
+            this, &AppController::apoStatusChanged);
+
     restoreSession();
     refreshDevices();
     refreshEngaged();
     refreshApoState();
+
+    // Continue the generation counter from the file rather than restarting at
+    // 1: an APO that has been streaming all along must never see the sequence
+    // go backwards. Then publish once, so a fresh audiodg has something to read
+    // even if the user never touches a control.
+    m_publisher.load();
+    m_publisher.publishNow();
 
     // Make sure our include file exists from the start; it is inert until the
     // user engages it, so this cannot change what they hear.
@@ -360,6 +380,48 @@ void AppController::flushNow()
 // Getting DreamDSP's own processing object into the Windows mixing chain. This
 // is what makes the application affect audio directly rather than by writing a
 // configuration file for Equalizer APO to execute.
+
+bool AppController::apoLive() const
+{
+    if (!m_publisher.statusFresh())
+        return false;
+    for (uint32_t i = 0; i < m_publisher.status().instanceCount; ++i) {
+        if (m_publisher.status().inst[i].flags & dsp::kSfStreaming)
+            return true;
+    }
+    return false;
+}
+
+bool AppController::apoInSync() const
+{
+    return m_publisher.statusFresh()
+           && m_publisher.status().loadedGeneration == m_publisher.generation();
+}
+
+QString AppController::apoStatusText() const
+{
+    if (!m_apoState.installed())
+        return QStringLiteral("音频组件未安装");
+    if (!m_publisher.statusFresh())
+        return QStringLiteral("尚未收到运行反馈 —— 播放一点声音看看");
+
+    const dsp::StatusBlock &s = m_publisher.status();
+    if (s.rejectCount > 0 && s.loadCount == 0)
+        return QStringLiteral("参数文件被拒绝了 %1 次 —— 版本可能不匹配").arg(s.rejectCount);
+    if (s.instanceCount == 0)
+        return QStringLiteral("已加载,但当前没有音频流经过");
+
+    uint32_t mask = 0;
+    for (uint32_t i = 0; i < s.instanceCount; ++i)
+        mask |= s.inst[i].appliedMask;
+
+    if (mask == 0)
+        return QStringLiteral("正在直通(没有启用任何效果)");
+    if (!apoInSync())
+        return QStringLiteral("正在生效,但参数还在同步(第 %1 代 → 第 %2 代)")
+            .arg(s.loadedGeneration).arg(m_publisher.generation());
+    return QStringLiteral("正在处理 %1 路音频流").arg(s.instanceCount);
+}
 
 QString AppController::apoTargetDevice() const
 {

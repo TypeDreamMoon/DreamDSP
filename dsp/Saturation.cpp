@@ -129,6 +129,11 @@ void VirtualBass::prepare(double sampleRate, int channels)
         m_dc[c].prepare(sampleRate);
     }
     setParams(m_p);
+    // The band splitter's state used to be cleared as a side effect of
+    // designing it; LinkwitzRiley4::design no longer does that, because it
+    // clicked on every parameter change.
+    for (int c = 0; c < m_channels; ++c)
+        m_split[c].reset();
 }
 
 void VirtualBass::setParams(const Params &p)

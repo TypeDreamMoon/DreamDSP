@@ -2,8 +2,6 @@
 
 #include "BiquadFilter.h"
 
-#include <functional>
-
 namespace dreamdsp::dsp {
 
 // 2x oversampling around a nonlinearity.
@@ -24,8 +22,41 @@ public:
     void prepare(double sampleRate);
     void reset();
 
-    // Calls `shape` once per oversampled sample.
-    float process(float x, const std::function<float(float)> &shape);
+    // Calls `shape` twice per input sample -- once per oversampled sample.
+    //
+    // A template rather than a std::function parameter, and defined here so it
+    // inlines. The callers pass small lambdas capturing two or three floats;
+    // MSVC's std::function stores at most 16 bytes inline, so one more captured
+    // float would have turned this into an operator new *per sample*, on the
+    // real-time thread inside audiodg. Even below that threshold it cost an
+    // indirect call for every oversampled sample.
+    template <class F>
+    float process(float x, F &&shape)
+    {
+        if (!m_ready)
+            return shape(x);
+
+        // Zero-stuffing halves the amplitude, so the interpolation filter's
+        // output is scaled back up by two.
+        float a = x * 2.0f;
+        for (int i = 0; i < kStages; ++i)
+            a = m_up[i].process(a);
+
+        float b = 0.0f;
+        for (int i = 0; i < kStages; ++i)
+            b = m_up[i].process(b);
+
+        a = shape(a);
+        b = shape(b);
+
+        // Filter both, keep the first: that is the decimation.
+        for (int i = 0; i < kStages; ++i)
+            a = m_down[i].process(a);
+        for (int i = 0; i < kStages; ++i)
+            b = m_down[i].process(b);
+
+        return a;
+    }
 
 private:
     static constexpr int kStages = 4;   // 4 biquads = 8th order

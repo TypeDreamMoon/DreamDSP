@@ -1,0 +1,17 @@
+# Line endings are LF in the repository, everywhere.
+#
+# Not a style preference: a tool that rewrites a file with the other convention
+# turns its next diff into "every line changed", which hides the actual edit and
+# makes the history useless for the one thing history is for. That has already
+# happened once here, to three files in a single commit.
+#
+# `* text=auto` normalises on the way in, so it no longer matters what a script
+# or an editor wrote locally.
+* text=auto eol=lf
+
+# Binary, byte-for-byte.
+*.png binary
+*.wav binary
+*.dll binary
+*.exe binary
+*.reg binary

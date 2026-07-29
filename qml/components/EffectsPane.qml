@@ -8,16 +8,18 @@ import DreamDSP
 Item {
     id: root
 
-    CompressorModel { id: comp }
-    ReverbModel { id: rev }
-
-    EffectsModel { id: fx }
+    // Owned by AppController, not created here. A pane that owns its own
+    // models only has them while it is on screen, which is no use to anything
+    // that has to save them or push them to the audio engine.
+    readonly property CompressorModel comp: AppController.compressor
+    readonly property ReverbModel rev: AppController.reverb
+    readonly property EffectsModel fx: AppController.effects
 
     OfflineRender {
         id: render
-        compressor: comp
-        reverb: rev
-        effects: fx
+        compressor: root.comp
+        reverb: root.rev
+        effects: root.fx
     }
 
     component ParamRow: RowLayout {

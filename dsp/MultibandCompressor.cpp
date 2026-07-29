@@ -4,13 +4,19 @@
 
 namespace dreamdsp::dsp {
 
-void MultibandCompressor::prepare(double sampleRate, int channels)
+void MultibandCompressor::prepare(double sampleRate, int channels, int maxFrames)
 {
     m_sampleRate = sampleRate;
     m_channels = clampTo(channels, 1, kMaxChannels);
-    for (int b = 0; b < kBands; ++b)
+    m_maxFrames = maxFrames < 1 ? 1 : maxFrames;
+    for (int b = 0; b < kBands; ++b) {
         m_comp[b].prepare(sampleRate, m_channels);
+        m_scratch[b].assign(size_t(m_channels) * size_t(m_maxFrames), 0.0f);
+    }
     setParams(m_p);
+    // setParams used to reset the filter states as a side effect of designing
+    // them. It no longer does, so the reset has to be asked for.
+    reset();
 }
 
 void MultibandCompressor::setParams(const Params &p)
@@ -29,8 +35,10 @@ void MultibandCompressor::setParams(const Params &p)
         m_lowAllpass2[c].design(BiquadFilter::Kind::AllPass, hi, kQ, 0.0, m_sampleRate);
     }
 
-    for (int b = 0; b < kBands; ++b)
+    for (int b = 0; b < kBands; ++b) {
         m_comp[b].setParams(m_p.band[b]);
+        m_bandGainLin[b] = dbToLin(m_p.bandGainDb[b]);
+    }
 }
 
 void MultibandCompressor::reset()
@@ -60,8 +68,11 @@ void MultibandCompressor::process(const AudioBuffer &buf)
     const int channels = std::min(buf.channelCount, m_channels);
     const int frames = buf.frames;
 
-    for (int b = 0; b < kBands; ++b)
-        m_scratch[b].assign(size_t(frames) * size_t(channels), 0.0f);
+    // The scratch was sized in prepare(). Refuse rather than resize: this runs
+    // on a real-time thread, and a caller handing over more than it declared is
+    // a bug worth failing loudly in testing rather than allocating around.
+    if (size_t(frames) * size_t(channels) > m_scratch[0].size())
+        return;
 
     // --- split ------------------------------------------------------------
     for (int c = 0; c < channels; ++c) {
@@ -98,9 +109,11 @@ void MultibandCompressor::process(const AudioBuffer &buf)
         float *out = buf.channels[c];
         for (int i = 0; i < frames; ++i) {
             float sum = 0.0f;
+            // Every band is summed, including one whose compressor is disabled:
+            // bandEnabled means "do not compress this band", not "mute it".
             for (int b = 0; b < kBands; ++b) {
                 sum += m_scratch[b][size_t(c) * size_t(frames) + size_t(i)]
-                       * dbToLin(m_p.bandGainDb[b]);
+                       * m_bandGainLin[b];
             }
             out[i] = sum;
         }

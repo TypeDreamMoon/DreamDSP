@@ -9,19 +9,48 @@
 
 #include "BiquadFilter.h"
 #include "Compressor.h"
+#include "Denormals.h"
+#include "EffectChain.h"
 #include "MultibandCompressor.h"
+#include "ParamBlock.h"
+#include "ParamSlots.h"
 #include "Reverb.h"
 #include "Saturation.h"
+#include "StatusBlock.h"
 #include "Stereo.h"
 #include "WavFile.h"
 
 #include <algorithm>
+#include <atomic>
+#include <thread>
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
+
+// Counting allocator hooks, so "the real-time path does not allocate" can be
+// asserted rather than asserted-in-a-comment. Replacing the global operators is
+// the only way to see allocations made deep inside std::vector or std::function
+// where no test can reach.
+namespace {
+std::atomic<long> g_allocations{ 0 };
+bool g_countAllocations = false;
+}
+
+void *operator new(std::size_t n)
+{
+    if (g_countAllocations)
+        g_allocations.fetch_add(1, std::memory_order_relaxed);
+    void *p = std::malloc(n ? n : 1);
+    if (!p)
+        throw std::bad_alloc();
+    return p;
+}
+
+void operator delete(void *p) noexcept { std::free(p); }
+void operator delete(void *p, std::size_t) noexcept { std::free(p); }
 
 using namespace dreamdsp::dsp;
 
@@ -774,7 +803,7 @@ void testMultiband()
     // Every band at 1:1 must be transparent. This is the check that a
     // multiband processor is safe to leave switched on.
     MultibandCompressor mb;
-    mb.prepare(sr, 2);
+    mb.prepare(sr, 2, n);
     MultibandCompressor::Params p;
     for (int b = 0; b < MultibandCompressor::kBands; ++b) {
         p.band[b].ratio = 1.0f;
@@ -834,6 +863,312 @@ void testMultiband()
     }
 }
 
+// ---------------------------------------------------------- parameter channel
+
+// A cheap deterministic generator, so a failure can be reproduced exactly.
+uint32_t xorshift(uint32_t &s)
+{
+    s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+    return s;
+}
+
+// Offset of the first word that is a NaN or an infinity, or -1 if there is
+// none. Returns the offset rather than a bool so a failure names the field
+// instead of leaving the reader to bisect the struct by hand.
+//
+// Walked as raw memory rather than field by field, deliberately: the claim is
+// that *nothing* in the block can be non-finite, including fields added later
+// that a hand-written list would silently stop covering.
+int firstNonFiniteOffset(const ParamBlock &b)
+{
+    const unsigned char *p = reinterpret_cast<const unsigned char *>(&b);
+    for (size_t off = 24; off + 4 <= sizeof(ParamBlock); off += 4) {
+        // The four bool groups are not floats and must be skipped, or their
+        // byte patterns get misread as exponents.
+        if (off == offsetof(ParamBlock, comp) + 24
+            || off == offsetof(ParamBlock, bass) + 12
+            || off == offsetof(ParamBlock, multiband) + 8 + 24
+            || off == offsetof(ParamBlock, multiband) + 8 + 28 + 24
+            || off == offsetof(ParamBlock, multiband) + 8 + 56 + 24
+            || off == offsetof(ParamBlock, multiband) + 104) {
+            continue;
+        }
+        uint32_t bits;
+        std::memcpy(&bits, p + off, 4);
+        if ((bits & 0x7F800000u) == 0x7F800000u)   // NaN or infinity
+            return int(off);
+    }
+    return -1;
+}
+
+bool everyFloatFinite(const ParamBlock &b) { return firstNonFiniteOffset(b) < 0; }
+
+void testParamBlock()
+{
+    std::printf("\n[parameter block]\n");
+
+    check(sizeof(ParamBlock) == 256, fmt("wire size is %.0f bytes", double(sizeof(ParamBlock))));
+    check(sizeof(StatusBlock) == 296, "status block is 296 bytes");
+
+    // The transparent default must not be the dsp defaults. This is the test
+    // that makes "just value-initialise it" impossible to land: ParamBlock{}
+    // carries reverb.wet = 0.3, which is an always-on reverb on every stream.
+    const ParamBlock t = transparentBlock();
+    ParamBlock valueInit{};
+    check(t.enableMask == 0u, "transparent block enables nothing");
+    check(isSane(t), "the transparent block is itself a sanitised block");
+    check(t.reverb.wet == 0.0f, "transparent block has no reverb");
+    check(std::memcmp(&t, &valueInit, sizeof t) != 0,
+          "transparent block differs from a value-initialised one");
+
+    // Hostile input. Nothing that comes out may be a NaN, an infinity, or
+    // outside the documented range, whatever goes in.
+    {
+        ParamBlock hostile;
+        std::memset(&hostile, 0xFF, sizeof hostile);
+        const ParamBlock s = sanitise(hostile);
+        const int bad = firstNonFiniteOffset(s);
+        check(bad < 0, bad < 0 ? "all-0xFF input yields only finite floats"
+                               : fmt("all-0xFF input left offset %.0f non-finite", double(bad)));
+        check((s.enableMask & ~kEnKnown) == 0u, "unknown enable bits are dropped");
+        check(s.magic == kParamMagic && s.sizeBytes == sizeof(ParamBlock),
+              "header fields come from the constants, not the input");
+        check(s.comp.makeupDb <= 24.0f && s.comp.makeupDb >= -24.0f,
+              "makeup gain is bounded");
+        check(s.multiband.highCrossHz >= s.multiband.lowCrossHz * 1.5f,
+              "crossover ordering survives hostile input");
+    }
+
+    // Every float slot individually poisoned.
+    {
+        const float poisons[] = { std::nanf(""), INFINITY, -INFINITY, -0.0f, 1e30f, -1e30f };
+        int bad = 0;
+        for (float poison : poisons) {
+            for (size_t off = 24; off + 4 <= sizeof(ParamBlock); off += 4) {
+                ParamBlock in = transparentBlock();
+                std::memcpy(reinterpret_cast<unsigned char *>(&in) + off, &poison, 4);
+                const ParamBlock s = sanitise(in);
+                if (!everyFloatFinite(s))
+                    ++bad;
+            }
+        }
+        check(bad == 0, fmt("every single-field poisoning is neutralised (%.0f bad)", double(bad)));
+    }
+
+    // Random bytes, and idempotence -- which is what makes EffectChain's
+    // memcmp change-detection stable rather than re-triggering forever.
+    {
+        uint32_t seed = 0x1234567u;
+        int bad = 0, notIdempotent = 0;
+        for (int i = 0; i < 20000; ++i) {
+            ParamBlock in;
+            auto *p = reinterpret_cast<uint32_t *>(&in);
+            for (size_t w = 0; w < sizeof(ParamBlock) / 4; ++w)
+                p[w] = xorshift(seed);
+            const ParamBlock a = sanitise(in);
+            if (!everyFloatFinite(a) || (a.enableMask & ~kEnKnown))
+                ++bad;
+            const ParamBlock b = sanitise(a);
+            if (std::memcmp(&a, &b, sizeof a) != 0)
+                ++notIdempotent;
+        }
+        check(bad == 0, fmt("20000 random blocks all sanitise clean (%.0f bad)", double(bad)));
+        check(notIdempotent == 0,
+              fmt("sanitise is idempotent (%.0f mismatches)", double(notIdempotent)));
+    }
+}
+
+void testTransparency()
+{
+    std::printf("\n[transparency]\n");
+
+    const double rates[] = { 44100.0, 48000.0, 96000.0, 192000.0 };
+    const int channelCounts[] = { 1, 2, 6, 8 };
+    const int frames = 4096;
+
+    int bad = 0;
+    for (double sr : rates) {
+        for (int ch : channelCounts) {
+            std::vector<std::vector<float>> data(size_t(ch), std::vector<float>(size_t(frames), 0.0f));
+            std::vector<std::vector<float>> original;
+            uint32_t seed = 0xC0FFEEu + uint32_t(ch);
+            for (auto &v : data)
+                for (auto &s : v)
+                    s = float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f;
+            original = data;
+
+            // Second argument is not optional: `ptrs(size_t(ch))` parses as a
+            // function declaration, not a variable.
+            std::vector<float *> ptrs(size_t(ch), nullptr);
+            for (int c = 0; c < ch; ++c)
+                ptrs[size_t(c)] = data[size_t(c)].data();
+            AudioBuffer buf{ ptrs.data(), ch, frames };
+
+            EffectChain chain;
+            chain.prepare(sr, ch, frames);
+            chain.apply(transparentBlock());
+            chain.process(buf);
+
+            for (int c = 0; c < ch; ++c) {
+                if (std::memcmp(data[size_t(c)].data(), original[size_t(c)].data(),
+                                size_t(frames) * sizeof(float)) != 0) {
+                    ++bad;
+                }
+            }
+
+            // And again after enabling everything and switching it back off:
+            // reaching enableMask == 0 from a non-zero state must be equally
+            // bit-exact, or "turn it all off" would not restore the original.
+            ParamBlock all = transparentBlock();
+            all.enableMask = kEnKnown;
+            all.generation = 1;
+            chain.apply(all);
+            ParamBlock off = transparentBlock();
+            off.generation = 2;
+            chain.apply(off);
+            data = original;
+            chain.process(buf);
+            for (int c = 0; c < ch; ++c) {
+                if (std::memcmp(data[size_t(c)].data(), original[size_t(c)].data(),
+                                size_t(frames) * sizeof(float)) != 0) {
+                    ++bad;
+                }
+            }
+        }
+    }
+    check(bad == 0, fmt("bit-exact passthrough at 4 rates x 4 channel counts (%.0f bad)",
+                        double(bad)));
+}
+
+void testNoAllocation()
+{
+    std::printf("\n[real-time discipline]\n");
+
+    constexpr int ch = 8;
+    constexpr int maxFrames = 1056;
+    const double sr = 96000.0;
+
+    EffectChain chain;
+    chain.prepare(sr, ch, maxFrames);
+
+    std::vector<std::vector<float>> data(ch, std::vector<float>(maxFrames, 0.1f));
+    std::vector<float *> ptrs(ch);
+    for (int c = 0; c < ch; ++c)
+        ptrs[size_t(c)] = data[size_t(c)].data();
+
+    ParamBlock p = transparentBlock();
+    p.enableMask = kEnKnown;
+    p.generation = 1;
+    p.comp.ratio = 4.0f;
+    p.reverb.wet = 0.3f;
+    p.tube.mix = 0.5f;
+    p.exciter.amount = 0.3f;
+    p.bass.amount = 0.4f;
+    p.width.width = 1.4f;
+    p.multiband.band[0].ratio = 2.0f;
+    p = sanitise(p);
+
+    // One warm-up pass outside the count: the first apply legitimately designs
+    // every filter, and the point of the test is the steady state.
+    chain.apply(p);
+    { AudioBuffer b{ ptrs.data(), ch, maxFrames }; chain.process(b); }
+
+    // Deliberately varying block sizes, including growing ones -- that is what
+    // used to make MultibandCompressor reallocate its band scratch mid-stream.
+    const int sizes[] = { 128, 256, 512, 1056, 480, 1056, 64 };
+
+    g_allocations.store(0, std::memory_order_relaxed);
+    g_countAllocations = true;
+    for (int round = 0; round < 4; ++round) {
+        for (int n : sizes) {
+            p.generation = uint32_t(round * 100 + n);
+            p.comp.thresholdDb = -float(n % 20);    // force a genuine re-design
+            chain.apply(sanitise(p));
+            AudioBuffer b{ ptrs.data(), ch, n };
+            chain.process(b);
+        }
+    }
+    g_countAllocations = false;
+
+    const long n = g_allocations.load(std::memory_order_relaxed);
+    check(n == 0, fmt("no allocations on the process path (%.0f seen)", double(n)));
+}
+
+void testParamSlots()
+{
+    std::printf("\n[parameter slots]\n");
+
+    ParamSlots slots;
+    slots.clear();
+
+    std::atomic<bool> stop{ false };
+    std::atomic<long> torn{ 0 };
+    std::atomic<long> accepted{ 0 };
+    std::atomic<long> refused{ 0 };
+
+    // Every field is a deterministic function of the generation, so any mixture
+    // of two publishes is detectable rather than merely improbable.
+    auto fill = [](uint32_t gen) {
+        ParamBlock b = transparentBlock();
+        b.generation = gen;
+        b.enableMask = gen & kEnKnown;
+        b.comp.ratio = 1.0f + float(gen % 50);
+        b.reverb.wet = float(gen % 100) / 100.0f;
+        b.tube.drive = 1.0f + float(gen % 30);
+        return sanitise(b);
+    };
+
+    std::thread writer([&] {
+        for (uint32_t g = 1; g <= 200000u; ++g)
+            slots.publish(fill(g));
+        stop.store(true);
+    });
+
+    std::thread reader([&] {
+        ParamBlock got;
+        while (!stop.load()) {
+            if (!slots.read(&got)) {
+                refused.fetch_add(1);
+                continue;
+            }
+            // Generation 0 is the transparent block the slots start out
+            // holding; the writer never publishes it, so there is nothing to
+            // compare it against.
+            if (got.generation == 0u)
+                continue;
+            accepted.fetch_add(1);
+            const ParamBlock expected = fill(got.generation);
+            if (std::memcmp(&got, &expected, sizeof got) != 0)
+                torn.fetch_add(1);
+        }
+    });
+
+    writer.join();
+    reader.join();
+
+    check(torn.load() == 0,
+          fmt("no torn block in %.0f reads (%.0f torn)",
+              double(accepted.load()), double(torn.load())));
+    check(accepted.load() > 0, "the reader actually saw blocks");
+}
+
+void testDenormals()
+{
+    std::printf("\n[denormals]\n");
+
+    const unsigned before = DenormalGuard::rawMode();
+    {
+        const DenormalGuard guard;
+        volatile float tiny = 1e-40f;
+        const float product = tiny * 1.0f;
+        check(product == 0.0f, "denormals are flushed inside the guard");
+    }
+    // The half a naive implementation forgets. audiodg shares this thread with
+    // other vendors' processing objects; leaving their arithmetic altered would
+    // be a genuinely nasty thing to do.
+    check(DenormalGuard::rawMode() == before, "the previous mode is restored");
+}
+
 int runTests()
 {
     std::printf("DreamDSP dsp harness\n");
@@ -850,6 +1185,11 @@ int runTests()
     testExciter();
     testStereo();
     testMultiband();
+    testParamBlock();
+    testTransparency();
+    testNoAllocation();
+    testParamSlots();
+    testDenormals();
     std::printf("\n%s -- %d failure(s)\n", g_failures ? "FAIL" : "PASS", g_failures);
     return g_failures;
 }

@@ -29,31 +29,7 @@ void Oversampler2x::reset()
     }
 }
 
-float Oversampler2x::process(float x, const std::function<float(float)> &shape)
-{
-    if (!m_ready)
-        return shape(x);
-
-    // Zero-stuffing halves the amplitude, so the interpolation filter's output
-    // is scaled back up by two.
-    float a = x * 2.0f;
-    for (int i = 0; i < kStages; ++i)
-        a = m_up[i].process(a);
-
-    float b = 0.0f;
-    for (int i = 0; i < kStages; ++i)
-        b = m_up[i].process(b);
-
-    a = shape(a);
-    b = shape(b);
-
-    // Filter both, keep the first: that is the decimation.
-    for (int i = 0; i < kStages; ++i)
-        a = m_down[i].process(a);
-    for (int i = 0; i < kStages; ++i)
-        b = m_down[i].process(b);
-
-    return a;
-}
+// process() is a template and lives in the header, so it can inline into the
+// three saturation stages that call it once per sample.
 
 } // namespace dreamdsp::dsp

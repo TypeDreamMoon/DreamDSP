@@ -30,7 +30,10 @@ public:
         bool bandEnabled[kBands] = { true, true, true };
     };
 
-    void prepare(double sampleRate, int channels);
+    // maxFrames is the largest block process() will ever be handed. The band
+    // scratch is sized here and never again: process() runs on a real-time
+    // thread, where a resize would be an allocation inside audiodg.
+    void prepare(double sampleRate, int channels, int maxFrames);
     void reset();
     void setParams(const Params &p);
     const Params &params() const { return m_p; }
@@ -56,6 +59,13 @@ private:
 
     Compressor m_comp[kBands];
     std::vector<float> m_scratch[kBands];
+    int m_maxFrames = 0;
+
+    // dbToLin is a std::pow. Evaluating it per band per sample per channel came
+    // to 2.3 million pow calls a second at 96 kHz and 8 channels -- by a wide
+    // margin the largest single cost in the chain, and all of it recomputing
+    // three constants.
+    float m_bandGainLin[kBands] = { 1.0f, 1.0f, 1.0f };
 };
 
 } // namespace dreamdsp::dsp
