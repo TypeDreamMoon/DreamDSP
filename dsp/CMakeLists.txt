@@ -14,6 +14,7 @@ set(DREAMDSP_CORE_SOURCES
     DspTypes.h
     Denormals.h
     Fft.h                 Fft.cpp
+    Convolver.h           Convolver.cpp
     Resampler.h           Resampler.cpp
     ParamBlock.h          ParamBlock.cpp
     ParamSlots.h

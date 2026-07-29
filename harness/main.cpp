@@ -9,6 +9,7 @@
 
 #include "BiquadFilter.h"
 #include "Compressor.h"
+#include "Convolver.h"
 #include "Denormals.h"
 #include "EffectChain.h"
 #include "Fft.h"
@@ -1065,6 +1066,230 @@ void testResampler()
           "output length follows the ratio");
 }
 
+// ----------------------------------------------------------------- convolver
+
+// Straight time-domain convolution. Slow and obviously correct, which is the
+// point: the partitioned FFT engine is checked against this, not against
+// itself.
+std::vector<float> naiveConvolve(const std::vector<float> &x, const std::vector<float> &h)
+{
+    std::vector<float> y(x.size(), 0.0f);
+    for (size_t n = 0; n < x.size(); ++n) {
+        double acc = 0.0;
+        for (size_t k = 0; k < h.size() && k <= n; ++k)
+            acc += double(x[n - k]) * double(h[k]);
+        y[n] = float(acc);
+    }
+    return y;
+}
+
+// Runs `x` through a stage in blocks of `blockSize`, returning the output.
+std::vector<float> runStage(ConvolutionStage &stage, const std::vector<float> &x,
+                            int blockSize)
+{
+    std::vector<float> y = x;
+    size_t at = 0;
+    while (at < y.size()) {
+        const int n = int(std::min(size_t(blockSize), y.size() - at));
+        float *ch[1] = { y.data() + at };
+        AudioBuffer buf{ ch, 1, n };
+        stage.process(buf);
+        at += size_t(n);
+    }
+    return y;
+}
+
+void testConvolver()
+{
+    std::printf("\n[convolution]\n");
+
+    constexpr double sr = 48000.0;
+    const uint32_t block = convBlockForRate(sr);
+    check(block == 256u, fmt("block size at 48 kHz is %.0f", double(block)));
+
+    // A short decaying impulse response, deliberately not a multiple of the
+    // block so the final partition is partly empty.
+    //
+    // Normalised so that the sum of its magnitudes is 1. That is the only bound
+    // that actually guarantees |y| <= |x|, and without it a random 700-tap
+    // response drives a full-scale input to about +24 dBFS -- where safeWet's
+    // +12 dB ceiling correctly clamps it, and the test would be measuring the
+    // clamp rather than the convolution.
+    uint32_t seed = 0xC0FFEEu;
+    std::vector<float> ir(size_t(700), 0.0f);
+    for (size_t i = 0; i < ir.size(); ++i) {
+        const float decay = std::exp(-float(i) / 200.0f);
+        ir[i] = float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f * decay;
+    }
+    {
+        double l1 = 0.0;
+        for (float v : ir)
+            l1 += std::fabs(double(v));
+        for (auto &v : ir)
+            v = float(double(v) / l1);
+    }
+
+    std::vector<float> x(size_t(4096), 0.0f);
+    for (auto &v : x)
+        v = float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f;
+
+    const std::vector<float> reference = naiveConvolve(x, ir);
+
+    auto buildStage = [&](ConvolutionStage &stage) {
+        stage.prepare(sr, 1, 64);
+        stage.setArmed(true);
+        Convolution::Params p;
+        p.mix = 1.0f;
+        p.irGeneration = 1;
+        stage.setParams(p);
+
+        const float *irChans[1] = { ir.data() };
+        ConvBuildRequest req;
+        req.irChannels = irChans;
+        req.irChannelCount = 1;
+        req.tapCount = int(ir.size());
+        req.streamChannels = 1;
+        req.block = block;
+        req.wetGain = 1.0f;
+        ConvKernel *k = buildConvKernel(req);
+        check(k != nullptr, "kernel builds");
+        stage.offerKernel(k);
+        stage.setEnabled(true);
+        // Two ticks: one to take the kernel and duck, one to install it. Then
+        // let the crossfade finish.
+        std::vector<float> warm(size_t(block) * 4, 0.0f);
+        runStage(stage, warm, int(block));
+        stage.setEnabled(true);
+        std::vector<float> settle(size_t(sr * 0.05), 0.0f);
+        runStage(stage, settle, int(block));
+    };
+
+    // The core claim: the partitioned engine reproduces a direct convolution,
+    // delayed by exactly one block.
+    {
+        ConvolutionStage stage;
+        buildStage(stage);
+        const std::vector<float> got = runStage(stage, x, int(block));
+
+        double worst = 0.0;
+        // Compare from one block in, since the output is delayed by `block`.
+        for (size_t n = block; n < got.size(); ++n)
+            worst = std::max(worst, double(std::fabs(got[n] - reference[n - block])));
+        check(worst < 1e-4,
+              fmt("matches a direct convolution, delayed one block (worst %.2e)", worst));
+    }
+
+    // Independence from the host's block size. The audio engine hands over
+    // whatever it likes, including sizes that are not multiples of the internal
+    // block, and the result must not change.
+    {
+        double worst = 0.0;
+        for (int hostBlock : { 1, 37, 100, 256, 480, 1056 }) {
+            ConvolutionStage stage;
+            buildStage(stage);
+            const std::vector<float> got = runStage(stage, x, hostBlock);
+            for (size_t n = block; n < got.size(); ++n)
+                worst = std::max(worst, double(std::fabs(got[n] - reference[n - block])));
+        }
+        check(worst < 1e-4,
+              fmt("same output for host blocks of 1..1056 samples (worst %.2e)", worst));
+    }
+
+    // An unarmed stage must be exactly transparent -- not approximately, and
+    // with no delay either, since an unarmed stage reports no latency.
+    {
+        ConvolutionStage stage;
+        stage.prepare(sr, 1, 64);
+        const std::vector<float> got = runStage(stage, x, 256);
+        check(std::memcmp(got.data(), x.data(), x.size() * sizeof(float)) == 0,
+              "an unarmed stage is bit-exact transparent");
+        check(stage.latencySamples() == 0u, "an unarmed stage reports no latency");
+    }
+
+    // Armed but with no kernel: dry, delayed by one block. This is the state
+    // between arming and the impulse response finishing its build, and it must
+    // already carry the delay the engine has been told about.
+    {
+        ConvolutionStage stage;
+        stage.prepare(sr, 1, 64);
+        stage.setArmed(true);
+        const std::vector<float> got = runStage(stage, x, 256);
+        double worst = 0.0;
+        for (size_t n = block; n < got.size(); ++n)
+            worst = std::max(worst, double(std::fabs(got[n] - x[n - block])));
+        check(worst == 0.0, "armed without a kernel is the dry signal, delayed exactly");
+        check(stage.latencySamples() == block, "an armed stage reports one block of latency");
+    }
+
+    // Nothing may allocate once prepared. An FFT convolver that allocates per
+    // callback would be the single worst offender in the whole chain.
+    {
+        ConvolutionStage stage;
+        buildStage(stage);
+
+        std::vector<float> audio(size_t(1056), 0.2f);
+        float *ch[1] = { audio.data() };
+
+        g_allocations.store(0, std::memory_order_relaxed);
+        g_countAllocations = true;
+        for (int round = 0; round < 8; ++round) {
+            for (int n : { 128, 256, 512, 1056, 480, 64 }) {
+                AudioBuffer buf{ ch, 1, n };
+                stage.process(buf);
+            }
+        }
+        g_countAllocations = false;
+        const long allocations = g_allocations.load(std::memory_order_relaxed);
+        check(allocations == 0,
+              fmt("no allocations on the convolution path (%.0f seen)", double(allocations)));
+
+        ConvKernel *retired = stage.reclaimKernel();
+        destroyConvKernel(retired);
+    }
+
+    // A NaN arriving from upstream must not poison the delay line. Every other
+    // effect washes one out as its state decays; this one would keep it
+    // forever, silencing the endpoint permanently.
+    {
+        ConvolutionStage stage;
+        buildStage(stage);
+
+        std::vector<float> poisoned = x;
+        poisoned[100] = std::nanf("");
+        poisoned[1000] = INFINITY;
+        const std::vector<float> got = runStage(stage, poisoned, 256);
+
+        bool finite = true;
+        for (size_t n = 2000; n < got.size(); ++n) {
+            uint32_t bits;
+            std::memcpy(&bits, &got[n], 4);
+            if ((bits & 0x7F800000u) == 0x7F800000u)
+                finite = false;
+        }
+        check(finite, "a NaN from upstream does not poison the delay line");
+    }
+
+    // Channel routing: a mono impulse response must feed every channel, and an
+    // LFE channel must be left alone by default.
+    {
+        const float *irChans[1] = { ir.data() };
+        ConvBuildRequest req;
+        req.irChannels = irChans;
+        req.irChannelCount = 1;
+        req.tapCount = int(ir.size());
+        req.streamChannels = 6;
+        req.block = block;
+        // 5.1: FL FR FC LFE BL BR -- LFE is stream channel 3.
+        req.channelMask = 0x3F;
+        ConvKernel *k = buildConvKernel(req);
+        check(k && k->route[0].spec == 0 && k->route[1].spec == 0,
+              "a mono impulse response feeds the main channels");
+        check(k && k->route[3].spec == kConvBypass,
+              "the LFE channel is bypassed by default");
+        destroyConvKernel(k);
+    }
+}
+
 // ---------------------------------------------------------- parameter channel
 
 // Offset of the first word that is a NaN or an infinity, or -1 if there is
@@ -1382,6 +1607,7 @@ int runTests()
     testMultiband();
     testFft();
     testResampler();
+    testConvolver();
     testParamBlock();
     testTransparency();
     testNoAllocation();
