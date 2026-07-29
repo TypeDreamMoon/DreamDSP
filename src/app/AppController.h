@@ -303,6 +303,10 @@ private:
     // system default when the "all devices" entry is selected.
     QString apoTargetDevice() const;
 
+    // The elevated helper's own account of what went wrong, since it runs
+    // hidden and cannot report anything directly.
+    QString installLogTail(const QString &fallback) const;
+
     CompressorModel m_compressor;
     ReverbModel m_reverb;
     EffectsModel m_effects;

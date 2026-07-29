@@ -334,14 +334,28 @@ QString performApoInstall()
         return QStringLiteral("找不到 %1").arg(source);
 
     QDir().mkpath(programDataDir());
+    // The parameter file lives here. Created now so the directory exists with
+    // the right access before anything tries to write into it.
+    QDir().mkpath(programDataDir() + QStringLiteral("/control"));
 
     const QString staged = stagedDllPath();
-    // Copying over a DLL that audiodg still has mapped fails, and there is no
-    // way around it from here -- the service has to be restarted first. Say so
-    // rather than reporting a bare permission error.
-    if (QFile::exists(staged) && !QFile::remove(staged)) {
-        return QStringLiteral("旧的 DreamDspApo.dll 正被音频服务占用,"
-                              "请先重启音频服务再安装");
+
+    // Stopping Audiosrv does not make audiodg.exe exit instantly, and while it
+    // is alive the staged DLL stays mapped and cannot be replaced. Waiting is
+    // the whole difference between an install that works and one that silently
+    // leaves the old build in place -- which is exactly what happened the first
+    // time this ran.
+    if (QFile::exists(staged)) {
+        bool removed = false;
+        for (int attempt = 0; attempt < 40 && !removed; ++attempt) {   // ~8 s
+            removed = QFile::remove(staged);
+            if (!removed)
+                ::Sleep(200);
+        }
+        if (!removed) {
+            return QStringLiteral("旧的 DreamDspApo.dll 仍被音频引擎占用 —— "
+                                  "audiodg.exe 没有随音频服务退出");
+        }
     }
     if (!QFile::copy(source, staged))
         return QStringLiteral("无法复制到 %1").arg(staged);

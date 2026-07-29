@@ -381,6 +381,21 @@ void AppController::flushNow()
 // is what makes the application affect audio directly rather than by writing a
 // configuration file for Equalizer APO to execute.
 
+// What the elevated helper left behind. It runs hidden, so this is the only
+// place its reason for failing survives; without it the user gets an exit code.
+QString AppController::installLogTail(const QString &fallback) const
+{
+    QFile log(QStringLiteral("C:/ProgramData/DreamDSP/install.log"));
+    if (!log.open(QIODevice::ReadOnly | QIODevice::Text))
+        return fallback;
+    const QStringList lines = QString::fromUtf8(log.readAll()).split(QLatin1Char('\n'),
+                                                                    Qt::SkipEmptyParts);
+    if (lines.size() < 2)
+        return fallback;
+    const QString last = lines.last().trimmed();
+    return last.isEmpty() || last == QStringLiteral("ok") ? fallback : last;
+}
+
 bool AppController::apoLive() const
 {
     if (!m_publisher.statusFresh())
@@ -458,16 +473,28 @@ void AppController::installApo()
     const QString err = runElevated({ QStringLiteral("--apo-install"),
                                       QStringLiteral("--apo-restart-audio") });
     m_apoBusy = false;
-
-    if (err.isEmpty()) {
-        m_apoRestartPending = false;
-        setMessage(QStringLiteral("DreamDSP 音频组件已安装"));
-    } else if (err == QStringLiteral("已取消")) {
-        setMessage(QStringLiteral("安装已取消"));
-    } else {
-        setError(QStringLiteral("安装失败:%1").arg(err));
-    }
     refreshApoState();
+
+    if (!err.isEmpty()) {
+        if (err == QStringLiteral("已取消"))
+            setMessage(QStringLiteral("安装已取消"));
+        else
+            setError(QStringLiteral("安装失败:%1").arg(installLogTail(err)));
+        return;
+    }
+
+    // Reporting success on the strength of an exit code is not enough: the
+    // interesting failure is the one where every step returns success and the
+    // old DLL is still sitting there, which is exactly what happened the first
+    // time. Check the thing that actually matters.
+    if (!m_apoState.upToDate) {
+        setError(QStringLiteral("安装过程未报错,但暂存的组件仍是旧版本 —— %1")
+                     .arg(installLogTail(QStringLiteral("原因不明"))));
+        return;
+    }
+
+    m_apoRestartPending = false;
+    setMessage(QStringLiteral("DreamDSP 音频组件已安装并更新到当前版本"));
 }
 
 void AppController::uninstallApo()

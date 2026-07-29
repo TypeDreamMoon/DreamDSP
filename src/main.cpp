@@ -1,7 +1,11 @@
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
 #include <QStringList>
+#include <QTextStream>
 #include <QTimer>
 
 #include "app/AppController.h"
@@ -92,6 +96,23 @@ int main(int argc, char *argv[])
                     err = startErr;
             } else if (err.isEmpty() && doRestart) {
                 err = dreamdsp::restartAudioService();
+            }
+
+            // The elevated copy is a separate, hidden process, so anything it
+            // prints is lost. Leaving the outcome on disk is what lets the GUI
+            // report why an install failed instead of showing an exit code --
+            // and the transcript survives the status bar being overwritten by
+            // the next message.
+            {
+                QFile log(QStringLiteral("C:/ProgramData/DreamDSP/install.log"));
+                QDir().mkpath(QStringLiteral("C:/ProgramData/DreamDSP"));
+                if (log.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                    QTextStream out(&log);
+                    out << QDateTime::currentDateTime().toString(Qt::ISODate) << "  "
+                        << (doInstall ? "install " : "") << (doUninstall ? "uninstall " : "")
+                        << (doRestart ? "restart" : "") << "\n"
+                        << (err.isEmpty() ? QStringLiteral("ok") : err) << "\n";
+                }
             }
 
             if (!err.isEmpty())
