@@ -135,6 +135,112 @@ Item {
 
             HusDivider { Layout.fillWidth: true }
 
+            // ----------------------------------------------------- system fx
+            //
+            // Two separate steps, deliberately shown as two: registering the
+            // component is machine-wide and needs administrator rights,
+            // attaching it to a device does not. Conflating them into one
+            // button would mean an elevation prompt every time you switch
+            // device.
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                SectionTitle { text: '系统音效 (APO)'; Layout.fillWidth: false }
+
+                Rectangle {
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: stateLabel.implicitWidth + 16
+                    implicitHeight: 20
+                    radius: 10
+                    color: AppController.apoAttached
+                           ? HusTheme.Primary.colorSuccessBg
+                           : (AppController.apoInstalled ? HusTheme.Primary.colorWarningBg
+                                                         : HusTheme.Primary.colorFillTertiary)
+                    HusText {
+                        id: stateLabel
+                        anchors.centerIn: parent
+                        font.pixelSize: 11
+                        text: !AppController.apoInstalled ? '未安装'
+                              : (AppController.apoAttached ? '已接入当前设备' : '已安装 · 未接入')
+                        color: AppController.apoAttached
+                               ? HusTheme.Primary.colorSuccess
+                               : (AppController.apoInstalled ? HusTheme.Primary.colorWarning
+                                                             : HusTheme.Primary.colorTextTertiary)
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
+            }
+
+            HusText {
+                Layout.fillWidth: true
+                text: 'DreamDSP 作为音频处理对象接入 Windows 混音链,对系统里所有声音生效 —— '
+                      + '不再依赖 Equalizer APO 执行。'
+                font.pixelSize: 11
+                opacity: 0.5
+                wrapMode: Text.WordWrap
+            }
+
+            SettingRow {
+                label: '安装音频组件'
+                hint: AppController.apoInstalled
+                      ? (AppController.apoUpToDate ? '已注册,且是当前版本'
+                                                   : '已注册,但文件比程序旧,建议重新安装')
+                      : '需要一次管理员授权,之后切换设备都不再需要'
+                RowLayout {
+                    spacing: 8
+                    HusButton {
+                        text: AppController.apoInstalled ? '重新安装' : '安装'
+                        type: AppController.apoInstalled ? HusButton.Type_Default
+                                                         : HusButton.Type_Primary
+                        enabled: !AppController.apoBusy
+                        onClicked: AppController.installApo()
+                    }
+                    HusButton {
+                        text: '卸载'
+                        visible: AppController.apoInstalled
+                        enabled: !AppController.apoBusy
+                        onClicked: AppController.uninstallApo()
+                    }
+                }
+            }
+
+            SettingRow {
+                label: '接入当前输出设备'
+                hint: {
+                    if (!AppController.apoInstalled)
+                        return '先安装音频组件';
+                    if (AppController.apoAttached)
+                        return '本设备的后混槽位由 DreamDSP 占用';
+                    if (AppController.apoSlotOwner !== '')
+                        return '⚠ 该槽位当前是「' + AppController.apoSlotOwner
+                               + '」,接入会顶替它 —— 移除时会自动还原';
+                    return '槽位空闲,可直接接入';
+                }
+                HusSwitch {
+                    checked: AppController.apoAttached
+                    enabled: AppController.apoInstalled && !AppController.apoBusy
+                    onToggled: AppController.setApoAttached(checked)
+                }
+            }
+
+            SettingRow {
+                label: '重启音频服务'
+                hint: AppController.apoRestartPending
+                      ? '⚠ 有改动尚未生效 —— 音效链只在服务重启时重建'
+                      : '全机声音会中断一瞬,正在播放的程序通常能自行恢复'
+                HusButton {
+                    text: '重启'
+                    type: AppController.apoRestartPending ? HusButton.Type_Primary
+                                                          : HusButton.Type_Default
+                    enabled: !AppController.apoBusy
+                    onClicked: AppController.restartAudio()
+                }
+            }
+
+            HusDivider { Layout.fillWidth: true }
+
             // ------------------------------------------------------- hotkeys
             SectionTitle { text: '全局热键' }
 

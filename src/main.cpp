@@ -6,6 +6,7 @@
 
 #include "app/AppController.h"
 #include "app/SelfTest.h"
+#include "platform/ApoInstaller.h"
 #include "platform/SingleInstance.h"
 #include "platform/TonePlayer.h"
 
@@ -55,6 +56,51 @@ int main(int argc, char *argv[])
     app.setQuitOnLastWindowClosed(false);
 
     const QStringList args = app.arguments();
+
+    // Elevated helper modes. The GUI re-runs itself with one of these through
+    // ShellExecute "runas" so the user sees a single consent prompt per action
+    // instead of being sent to a PowerShell script. They must be handled before
+    // anything else: no window, no single-instance guard, no QML engine.
+    {
+        const bool doInstall = args.contains(QStringLiteral("--apo-install"));
+        const bool doUninstall = args.contains(QStringLiteral("--apo-uninstall"));
+        const bool doRestart = args.contains(QStringLiteral("--apo-restart-audio"));
+        if (doInstall || doUninstall || doRestart) {
+            attachConsoleIfNeeded();
+            QString err;
+
+            // audiodg.exe holds the staged DLL mapped for as long as the audio
+            // service is running, so replacing it has to happen while the
+            // service is down. Registration changes need a restart to be
+            // noticed anyway, so doing the work in the gap costs nothing extra
+            // -- one interruption rather than a failed copy followed by two.
+            const bool bracketWithStop = doRestart && (doInstall || doUninstall);
+            QStringList stoppedServices;
+            if (bracketWithStop)
+                err = dreamdsp::stopAudioService(&stoppedServices);
+
+            if (err.isEmpty() && doUninstall)
+                err = dreamdsp::performApoUninstall();
+            if (err.isEmpty() && doInstall)
+                err = dreamdsp::performApoInstall();
+
+            if (bracketWithStop) {
+                // Always bring audio back, even if the work above failed:
+                // leaving the machine silent would be far worse.
+                const QString startErr = dreamdsp::startAudioService(stoppedServices);
+                if (err.isEmpty())
+                    err = startErr;
+            } else if (err.isEmpty() && doRestart) {
+                err = dreamdsp::restartAudioService();
+            }
+
+            if (!err.isEmpty())
+                std::printf("%s\n", err.toLocal8Bit().constData());
+            std::fflush(stdout);
+            return err.isEmpty() ? 0 : 1;
+        }
+    }
+
     const bool wantSelfTest = args.contains(QStringLiteral("--selftest"));
     const bool wantSliderTest = args.contains(QStringLiteral("--slidertest"));
     if (wantSelfTest || wantSliderTest || args.contains(QStringLiteral("--playtone")))
@@ -112,6 +158,19 @@ int main(int argc, char *argv[])
         if (!engine.rootObjects().isEmpty()) {
             QObject *root = engine.rootObjects().first();
 
+            // Diagnostic runs have to leave the same way the tray menu does.
+            // Calling QCoreApplication::quit() directly does not work: the main
+            // window vetoes the close that quit() performs, and the event loop
+            // simply keeps running.
+            auto *controller = engine.singletonInstance<dreamdsp::AppController *>(
+                "DreamDSP", "AppController");
+            const auto leave = [controller] {
+                if (controller)
+                    controller->quitApplication();
+                else
+                    QCoreApplication::quit();
+            };
+
             // A second launch asks the running copy to come forward.
             QObject::connect(&instance, &dreamdsp::SingleInstance::raiseRequested,
                              root, [root] {
@@ -155,11 +214,11 @@ int main(int argc, char *argv[])
                     const bool wantMenu = args.contains(QStringLiteral("--traymenu"));
                     auto *win = qobject_cast<QQuickWindow *>(root);
 
-                    QTimer::singleShot(1200, &app, [root, win, target, wantMenu] {
+                    QTimer::singleShot(1200, &app, [root, win, target, wantMenu, leave] {
                         if (!wantMenu) {
                             if (win)
                                 win->grabWindow().save(target);
-                            QCoreApplication::quit();
+                            leave();
                             return;
                         }
 
@@ -167,7 +226,7 @@ int main(int argc, char *argv[])
                         // whichever visible window is not the main one.
                         QMetaObject::invokeMethod(root, "showTrayMenuAt",
                                                   Q_ARG(QVariant, 600), Q_ARG(QVariant, 600));
-                        QTimer::singleShot(600, qApp, [win, target] {
+                        QTimer::singleShot(600, qApp, [win, target, leave] {
                             for (QWindow *w : QGuiApplication::allWindows()) {
                                 auto *qw = qobject_cast<QQuickWindow *>(w);
                                 if (qw && qw != win && qw->isVisible()) {
@@ -175,12 +234,25 @@ int main(int argc, char *argv[])
                                     break;
                                 }
                             }
-                            QCoreApplication::quit();
+                            leave();
                         });
                     });
                 }
             }
             rc = app.exec();
+            // These two lines are how the tray-quit bug was found, and they are
+            // the fastest way to recognise it coming back: a process that will
+            // not exit is either stuck in the event loop (neither line prints)
+            // or stuck tearing down (only the first prints). Diagnostic runs
+            // only, so nothing is written during normal use.
+            if (diagnostic) {
+                std::fprintf(stderr, "[main] exec returned %d\n", rc);
+                std::fflush(stderr);
+            }
+        }
+        if (diagnostic) {
+            std::fprintf(stderr, "[main] engine destroyed\n");
+            std::fflush(stderr);
         }
     }
 

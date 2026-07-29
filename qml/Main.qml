@@ -38,9 +38,12 @@ HusWindow {
         AppController.attachWindow(win);
     }
 
+    // Vetoing the close is also what quit() runs into: since Qt 6.6 it asks
+    // every window to close and abandons the quit if one refuses. So a real
+    // quit has to be let through, or the application can never exit.
     onClosing: (close) => {
         AppController.flushNow();
-        if (AppController.closeToTray && AppController.trayActive) {
+        if (!AppController.quitting && AppController.closeToTray && AppController.trayActive) {
             close.accepted = false;
             win.hide();
         }

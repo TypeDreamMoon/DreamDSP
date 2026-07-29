@@ -9,6 +9,7 @@
 #include "app/PresetStore.h"
 #include "core/AutoEqDatabase.h"
 #include "core/ImpulseResponse.h"
+#include "platform/ApoInstaller.h"
 #include "platform/ApoLocator.h"
 #include "platform/AudioDevices.h"
 #include "platform/HotkeyManager.h"
@@ -72,10 +73,19 @@ class AppController : public QObject
     Q_PROPERTY(bool autoEqLoaded READ autoEqLoaded NOTIFY autoEqChanged)
     Q_PROPERTY(int autoEqCount READ autoEqCount NOTIFY autoEqChanged)
 
+    // --- the DreamDSP APO, i.e. actually being in the audio path ----------
+    Q_PROPERTY(bool apoInstalled READ apoInstalled NOTIFY apoStateChanged)
+    Q_PROPERTY(bool apoUpToDate READ apoUpToDate NOTIFY apoStateChanged)
+    Q_PROPERTY(bool apoAttached READ apoAttached NOTIFY apoStateChanged)
+    Q_PROPERTY(QString apoSlotOwner READ apoSlotOwner NOTIFY apoStateChanged)
+    Q_PROPERTY(bool apoBusy READ apoBusy NOTIFY apoStateChanged)
+    Q_PROPERTY(bool apoRestartPending READ apoRestartPending NOTIFY apoStateChanged)
+
     Q_PROPERTY(bool trayActive READ trayActive NOTIFY trayActiveChanged)
     Q_PROPERTY(bool autostart READ autostart WRITE setAutostart NOTIFY autostartChanged)
     Q_PROPERTY(bool closeToTray READ closeToTray WRITE setCloseToTray NOTIFY closeToTrayChanged)
     Q_PROPERTY(bool startHidden READ startHidden CONSTANT)
+    Q_PROPERTY(bool quitting READ quitting NOTIFY quittingChanged)
 
 public:
     explicit AppController(QObject *parent = nullptr);
@@ -116,6 +126,28 @@ public:
     Q_INVOKABLE bool savePreset(const QString &name);
     Q_INVOKABLE bool deletePreset(int row);
 
+    // --- the DreamDSP APO -------------------------------------------------
+    //
+    // Two separable steps, which is why there are two states rather than one
+    // "installed" flag: registering the object machine-wide needs elevation and
+    // happens once, attaching it to a particular endpoint does not and happens
+    // per device. Neither becomes audible until the audio service restarts.
+    bool apoInstalled() const { return m_apoState.installed(); }
+    bool apoUpToDate() const { return m_apoState.upToDate; }
+    bool apoAttached() const { return m_apoSlot.isOurs; }
+    // Who holds the current device's post-mix slot: empty when free, our own
+    // name when attached, otherwise the product that would be displaced.
+    QString apoSlotOwner() const { return m_apoSlot.friendlyName; }
+    bool apoBusy() const { return m_apoBusy; }
+    // Set once a change has been made that only takes effect after a restart.
+    bool apoRestartPending() const { return m_apoRestartPending; }
+
+    Q_INVOKABLE void refreshApoState();
+    Q_INVOKABLE void installApo();
+    Q_INVOKABLE void uninstallApo();
+    Q_INVOKABLE void setApoAttached(bool on);
+    Q_INVOKABLE void restartAudio();
+
     bool trayActive() const;
     bool autostart() const;
     void setAutostart(bool on);
@@ -123,6 +155,15 @@ public:
     void setCloseToTray(bool on);
     // True when launched by the run-at-login entry, which passes --tray.
     bool startHidden() const { return m_startHidden; }
+
+    // Set once the application is genuinely on its way out.
+    //
+    // Since Qt 6.6 quit() asks every top-level window to close first and gives
+    // up if any of them refuses. The main window refuses whenever "close to
+    // tray" is on -- which meant that "Quit" in the tray menu only hid the
+    // window, and the process stayed alive forever. The close handler consults
+    // this to tell a real quit from a window close.
+    bool quitting() const { return m_quitting; }
 
     // Called once from QML with the main window, to hang the tray icon off it.
     Q_INVOKABLE void attachWindow(QObject *window);
@@ -202,6 +243,8 @@ signals:
     void perDeviceChanged();
     void autoEqChanged();
     void hotkeysChanged();
+    void apoStateChanged();
+    void quittingChanged();
 
     // Asked for by a hotkey; the window is QML's business, not the controller's.
     void toggleWindowRequested();
@@ -228,6 +271,15 @@ private:
     static constexpr const char *kIncludeFile = "dreamdsp.txt";
 
     ApoInstall m_apo;
+
+    // The endpoint an APO action applies to: the selected device, or the
+    // system default when the "all devices" entry is selected.
+    QString apoTargetDevice() const;
+
+    ApoState m_apoState;
+    ApoSlot m_apoSlot;
+    bool m_apoBusy = false;
+    bool m_apoRestartPending = false;
     EqBandModel m_bands;
     PresetStore m_presets;
     QVector<AudioDevice> m_devices;
@@ -281,6 +333,7 @@ private:
     bool m_metering = false;
     bool m_closeToTray = true;
     bool m_startHidden = false;
+    bool m_quitting = false;
 };
 
 } // namespace dreamdsp

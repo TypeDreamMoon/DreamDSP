@@ -53,6 +53,7 @@ qt_add_qml_module(DreamDSP
         src/core/ImpulseResponse.h     src/core/ImpulseResponse.cpp
         src/core/AutoEqDatabase.h      src/core/AutoEqDatabase.cpp
         src/platform/ApoLocator.h      src/platform/ApoLocator.cpp
+        src/platform/ApoInstaller.h    src/platform/ApoInstaller.cpp
         src/platform/AudioDevices.h    src/platform/AudioDevices.cpp
         src/platform/TrayIcon.h        src/platform/TrayIcon.cpp
         src/platform/Autostart.h       src/platform/Autostart.cpp
@@ -100,7 +101,8 @@ target_link_libraries(DreamDSP PRIVATE
     dreamdsp_core  # the host-neutral DSP layer
     ole32       # COM / MMDevice
     uuid        # PKEY_* / IID_* GUIDs
-    advapi32    # registry
+    advapi32    # registry, service control manager
+    shell32     # ShellExecuteEx, for the one elevation prompt the APO needs
     user32      # RegisterHotKey (later)
 )
 

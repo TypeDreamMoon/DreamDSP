@@ -91,6 +91,7 @@ AppController::AppController(QObject *parent)
     restoreSession();
     refreshDevices();
     refreshEngaged();
+    refreshApoState();
 
     // Make sure our include file exists from the start; it is inert until the
     // user engages it, so this cannot change what they hear.
@@ -134,6 +135,10 @@ void AppController::setCurrentDevice(int index)
 
     m_deviceRate = dreamdsp::deviceSampleRate(profileKeyForDevice(index));
     emit convolutionChanged();
+
+    // The APO attaches per endpoint, so which one is selected changes what the
+    // settings page has to say about it.
+    refreshApoState();
 
     emit currentDeviceChanged();
     emit generatedTextChanged();
@@ -350,6 +355,131 @@ void AppController::flushNow()
     saveSession();
 }
 
+// ----------------------------------------------------------------------- apo
+//
+// Getting DreamDSP's own processing object into the Windows mixing chain. This
+// is what makes the application affect audio directly rather than by writing a
+// configuration file for Equalizer APO to execute.
+
+QString AppController::apoTargetDevice() const
+{
+    // An APO attaches to one endpoint, so the "all devices" entry has no
+    // meaning here; fall back to whichever endpoint Windows is currently
+    // playing through.
+    const QString key = profileKeyForDevice(m_currentDevice);
+    if (!key.isEmpty())
+        return key;
+    for (const AudioDevice &d : m_devices) {
+        if (d.isDefault)
+            return d.id;
+    }
+    return m_devices.isEmpty() ? QString() : m_devices.first().id;
+}
+
+void AppController::refreshApoState()
+{
+    m_apoState = apoState();
+    m_apoSlot = apoSlotOf(apoTargetDevice());
+    emit apoStateChanged();
+}
+
+void AppController::installApo()
+{
+    if (m_apoBusy)
+        return;
+    m_apoBusy = true;
+    emit apoStateChanged();
+
+    // Staging the DLL fails while audiodg still has the previous copy mapped,
+    // so the install and the service restart go in one elevated pass -- one
+    // consent prompt, and the restart releases the file for the next one.
+    const QString err = runElevated({ QStringLiteral("--apo-install"),
+                                      QStringLiteral("--apo-restart-audio") });
+    m_apoBusy = false;
+
+    if (err.isEmpty()) {
+        m_apoRestartPending = false;
+        setMessage(QStringLiteral("DreamDSP 音频组件已安装"));
+    } else if (err == QStringLiteral("已取消")) {
+        setMessage(QStringLiteral("安装已取消"));
+    } else {
+        setError(QStringLiteral("安装失败:%1").arg(err));
+    }
+    refreshApoState();
+}
+
+void AppController::uninstallApo()
+{
+    if (m_apoBusy)
+        return;
+
+    // Detach from every endpoint first: those writes need no elevation, and
+    // leaving our CLSID in an endpoint's slot after unregistering it would give
+    // that device an effect chain pointing at nothing.
+    for (const AudioDevice &d : m_devices)
+        detachApo(d.id);
+
+    m_apoBusy = true;
+    emit apoStateChanged();
+
+    const QString err = runElevated({ QStringLiteral("--apo-uninstall"),
+                                      QStringLiteral("--apo-restart-audio") });
+    m_apoBusy = false;
+
+    if (err.isEmpty()) {
+        m_apoRestartPending = false;
+        setMessage(QStringLiteral("DreamDSP 音频组件已卸载,原有效果已还原"));
+    } else if (err == QStringLiteral("已取消")) {
+        setMessage(QStringLiteral("卸载已取消"));
+    } else {
+        setError(QStringLiteral("卸载失败:%1").arg(err));
+    }
+    refreshApoState();
+}
+
+void AppController::setApoAttached(bool on)
+{
+    const QString device = apoTargetDevice();
+    if (device.isEmpty()) {
+        setError(QStringLiteral("没有可用的输出设备"));
+        return;
+    }
+
+    // No elevation: BUILTIN\Users holds SetValue on an endpoint's FxProperties.
+    const QString err = on ? attachApo(device) : detachApo(device);
+    if (!err.isEmpty()) {
+        setError(err);
+        refreshApoState();
+        return;
+    }
+
+    m_apoRestartPending = true;
+    setMessage(on ? QStringLiteral("已挂载到当前设备 · 重启音频服务后生效")
+                  : QStringLiteral("已从当前设备移除 · 重启音频服务后生效"));
+    refreshApoState();
+}
+
+void AppController::restartAudio()
+{
+    if (m_apoBusy)
+        return;
+    m_apoBusy = true;
+    emit apoStateChanged();
+
+    const QString err = runElevated({ QStringLiteral("--apo-restart-audio") });
+    m_apoBusy = false;
+
+    if (err.isEmpty()) {
+        m_apoRestartPending = false;
+        setMessage(QStringLiteral("音频服务已重启,更改已生效"));
+    } else if (err == QStringLiteral("已取消")) {
+        setMessage(QStringLiteral("已取消"));
+    } else {
+        setError(err);
+    }
+    refreshApoState();
+}
+
 // ---------------------------------------------------------------------- tray
 
 bool AppController::trayActive() const
@@ -414,6 +544,14 @@ void AppController::quitApplication()
 {
     flushNow();
     m_tray.uninstall();
+
+    // Must be set before quit(): quit() asks the main window to close, and the
+    // window's close handler will veto that if it still thinks this is an
+    // ordinary close and "minimise to tray" is on. Without this the tray menu's
+    // Quit entry simply hid the window and the process never exited.
+    m_quitting = true;
+    emit quittingChanged();
+
     QCoreApplication::quit();
 }
 
