@@ -9,13 +9,10 @@ namespace dreamdsp::apo {
 const CLSID CLSID_DreamDspApo =
     { 0x6d2f1c55, 0x5e4b, 0x4a7e, { 0x9c, 0x31, 0x0d, 0x5a, 0x6c, 0x4b, 0x7e, 0x10 } };
 
-namespace {
-
 // Diagnostics. There is no debugger and no console inside audiodg.exe, so the
 // only way to know whether the APO was loaded at all -- and with what format --
-// is to leave a trace. Called from LockForProcess and UnlockForProcess only,
-// never from APOProcess: this opens a file.
-void trace(const wchar_t *what, unsigned a = 0, unsigned b = 0, unsigned c = 0)
+// is to leave a trace. Never called from APOProcess: this opens a file.
+void trace(const wchar_t *what, unsigned a, unsigned b, unsigned c)
 {
     HANDLE h = ::CreateFileW(L"C:\\ProgramData\\DreamDSP\\apo.log",
                              FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -38,11 +35,20 @@ void trace(const wchar_t *what, unsigned a = 0, unsigned b = 0, unsigned c = 0)
     ::CloseHandle(h);
 }
 
+namespace {
+
 // Registration properties are handed to the audio engine as a plain struct.
 // Static so nothing is allocated when the engine asks for them.
 APO_REG_PROPERTIES g_regProperties = {
     /* clsid              */ { 0x6d2f1c55, 0x5e4b, 0x4a7e, { 0x9c, 0x31, 0x0d, 0x5a, 0x6c, 0x4b, 0x7e, 0x10 } },
-    /* Flags              */ APO_FLAG_DEFAULT,
+    // INPLACE says the engine may hand us the same buffer for input and output.
+    // APOProcess copies through its own deinterleaved scratch, so that is safe,
+    // and it saves the engine a buffer. Channel count is deliberately not
+    // constrained: the DSP works for any count, so SAMPLESPERFRAME_MUST_MATCH
+    // (part of APO_FLAG_DEFAULT) would only refuse formats we can handle.
+    /* Flags              */ static_cast<APO_FLAG>(APO_FLAG_FRAMESPERSECOND_MUST_MATCH
+                                                   | APO_FLAG_BITSPERSAMPLE_MUST_MATCH
+                                                   | APO_FLAG_INPLACE),
     /* szFriendlyName     */ L"DreamDSP Effects",
     /* szCopyrightInfo    */ L"DreamDSP",
     /* u32MajorVersion    */ 0,
@@ -51,24 +57,59 @@ APO_REG_PROPERTIES g_regProperties = {
     /* u32MaxInputConnections   */ 1,
     /* u32MinOutputConnections  */ 1,
     /* u32MaxOutputConnections  */ 1,
-    /* u32MaxInstances    */ 0,
+    // Unlimited. Zero here does not mean "no limit", it means no instance may
+    // ever be created -- every APO on the system uses 0xFFFFFFFF.
+    /* u32MaxInstances    */ 0xFFFFFFFFu,
     /* u32NumAPOInterfaces*/ 1,
-    /* iidAPOInterfaceList*/ { __uuidof(IAudioSystemEffects) },
+    /* iidAPOInterfaceList*/ { __uuidof(IAudioProcessingObject) },
 };
 
 } // namespace
 
-DreamApo::DreamApo() = default;
-DreamApo::~DreamApo() = default;
+// Traced from the constructor onwards, not just from LockForProcess. An APO
+// that is instantiated and then rejected -- over its registration properties
+// or during format negotiation -- never reaches LockForProcess, so an absent
+// log would otherwise be indistinguishable from never having been created.
+DreamApo::DreamApo(IUnknown *outer)
+    : m_outer(outer)
+{
+    trace(L"ctor aggregated", outer ? 1u : 0u);
+}
+
+DreamApo::~DreamApo() { trace(L"dtor"); }
 
 // ------------------------------------------------------------------ IUnknown
+//
+// The delegating half. When the engine has aggregated us, every one of these
+// belongs to the outer object; answering them ourselves would hand a client two
+// different identities for what is supposed to be one COM object.
 
 ULONG DreamApo::AddRef()
+{
+    return m_outer ? m_outer->AddRef() : NonDelegatingAddRef();
+}
+
+ULONG DreamApo::Release()
+{
+    return m_outer ? m_outer->Release() : NonDelegatingRelease();
+}
+
+HRESULT DreamApo::QueryInterface(REFIID riid, void **ppv)
+{
+    return m_outer ? m_outer->QueryInterface(riid, ppv)
+                   : NonDelegatingQueryInterface(riid, ppv);
+}
+
+// The non-delegating half: our own identity and our own ref count. This is what
+// the class factory returns to the aggregator, and what the aggregator calls
+// once it has decided which of our interfaces it wants.
+
+ULONG DreamApo::NonDelegatingAddRef()
 {
     return m_ref.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
-ULONG DreamApo::Release()
+ULONG DreamApo::NonDelegatingRelease()
 {
     const ULONG n = m_ref.fetch_sub(1, std::memory_order_acq_rel) - 1;
     if (n == 0)
@@ -76,14 +117,16 @@ ULONG DreamApo::Release()
     return n;
 }
 
-HRESULT DreamApo::QueryInterface(REFIID riid, void **ppv)
+HRESULT DreamApo::NonDelegatingQueryInterface(REFIID riid, void **ppv)
 {
     if (!ppv)
         return E_POINTER;
     *ppv = nullptr;
 
+    // IUnknown must resolve to the *non-delegating* one, or the aggregator
+    // could never release the inner object it owns.
     if (riid == __uuidof(IUnknown))
-        *ppv = static_cast<IAudioProcessingObject *>(this);
+        *ppv = static_cast<INonDelegatingUnknown *>(this);
     else if (riid == __uuidof(IAudioProcessingObject))
         *ppv = static_cast<IAudioProcessingObject *>(this);
     else if (riid == __uuidof(IAudioProcessingObjectConfiguration))
@@ -95,7 +138,12 @@ HRESULT DreamApo::QueryInterface(REFIID riid, void **ppv)
     else
         return E_NOINTERFACE;
 
-    AddRef();
+    // AddRef through whatever was just handed out, not unconditionally through
+    // ours: INonDelegatingUnknown lands on NonDelegatingAddRef and counts this
+    // object, while every other interface belongs to the outer identity and
+    // must count that one instead. INonDelegatingUnknown is laid out exactly
+    // like IUnknown for the sake of this cast.
+    reinterpret_cast<IUnknown *>(*ppv)->AddRef();
     return S_OK;
 }
 
@@ -121,6 +169,7 @@ HRESULT DreamApo::GetRegistrationProperties(APO_REG_PROPERTIES **ppRegProps)
 {
     if (!ppRegProps)
         return E_POINTER;
+    trace(L"GetRegistrationProperties");
     auto *copy = static_cast<APO_REG_PROPERTIES *>(::CoTaskMemAlloc(sizeof(APO_REG_PROPERTIES)));
     if (!copy)
         return E_OUTOFMEMORY;
@@ -134,7 +183,7 @@ HRESULT DreamApo::Initialize(UINT32 cbDataSize, BYTE *pbyData)
     // No initialisation blob yet. Parameters will arrive over shared memory
     // once there is a control channel; a blob passed at construction time
     // could not be changed while streaming anyway.
-    (void)cbDataSize;
+    trace(L"Initialize bytes", cbDataSize);
     (void)pbyData;
     return S_OK;
 }
@@ -174,7 +223,13 @@ HRESULT DreamApo::IsInputFormatSupported(IAudioMediaType *pOppositeFormat,
     if (!pRequestedInputFormat)
         return E_POINTER;
 
-    if (formatAcceptable(pRequestedInputFormat, nullptr)) {
+    WAVEFORMATEX *wfx = nullptr;
+    const bool ok = formatAcceptable(pRequestedInputFormat, &wfx);
+    trace(ok ? L"IsFormatSupported ok tag/ch/rate" : L"IsFormatSupported REJECTED tag/ch/rate",
+          wfx ? wfx->wFormatTag : 0, wfx ? wfx->nChannels : 0,
+          wfx ? wfx->nSamplesPerSec : 0);
+
+    if (ok) {
         if (ppSupportedInputFormat) {
             *ppSupportedInputFormat = pRequestedInputFormat;
             pRequestedInputFormat->AddRef();

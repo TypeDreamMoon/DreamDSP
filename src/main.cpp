@@ -7,6 +7,7 @@
 #include "app/AppController.h"
 #include "app/SelfTest.h"
 #include "platform/SingleInstance.h"
+#include "platform/TonePlayer.h"
 
 #include <windows.h>
 #include <objbase.h>
@@ -56,7 +57,7 @@ int main(int argc, char *argv[])
     const QStringList args = app.arguments();
     const bool wantSelfTest = args.contains(QStringLiteral("--selftest"));
     const bool wantSliderTest = args.contains(QStringLiteral("--slidertest"));
-    if (wantSelfTest || wantSliderTest)
+    if (wantSelfTest || wantSliderTest || args.contains(QStringLiteral("--playtone")))
         attachConsoleIfNeeded();
 
     // Diagnostic runs deliberately bypass the single-instance guard so they can
@@ -73,6 +74,23 @@ int main(int argc, char *argv[])
     const bool comReady = SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE;
 
     int rc = -1;
+
+    // --playtone <endpointId|""> [seconds] renders a tone to one endpoint.
+    // A render stream is the only thing that makes the audio engine build a
+    // device's effect chain, so this is how you find out whether an APO loaded.
+    const int toneAt = args.indexOf(QStringLiteral("--playtone"));
+    if (toneAt >= 0) {
+        const QString id = (toneAt + 1 < args.size()) ? args.at(toneAt + 1) : QString();
+        const double secs = (toneAt + 2 < args.size()) ? args.at(toneAt + 2).toDouble() : 3.0;
+        std::printf("playing %.1f s of 440 Hz to \"%s\"\n",
+                    secs, id.isEmpty() ? "(default)" : id.toLocal8Bit().constData());
+        const QString err = dreamdsp::playTone(id, secs, 440.0);
+        std::printf("%s\n", err.isEmpty() ? "ok" : err.toLocal8Bit().constData());
+        std::fflush(stdout);
+        if (comReady && hr != RPC_E_CHANGED_MODE)
+            ::CoUninitialize();
+        return err.isEmpty() ? 0 : 1;
+    }
 
     if (wantSelfTest) {
         rc = dreamdsp::runSelfTest();

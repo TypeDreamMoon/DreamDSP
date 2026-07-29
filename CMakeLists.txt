@@ -60,6 +60,7 @@ qt_add_qml_module(DreamDSP
         src/platform/PeakMeter.h       src/platform/PeakMeter.cpp
         src/platform/SingleInstance.h  src/platform/SingleInstance.cpp
         src/platform/LoopbackCapture.h src/platform/LoopbackCapture.cpp
+        src/platform/TonePlayer.h      src/platform/TonePlayer.cpp
         src/app/EqBandModel.h          src/app/EqBandModel.cpp
         src/app/PresetStore.h          src/app/PresetStore.cpp
         src/app/AppController.h        src/app/AppController.cpp

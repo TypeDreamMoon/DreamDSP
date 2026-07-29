@@ -5,6 +5,11 @@
 // no elevation, and cannot affect audio: an APO only enters the audio graph
 // once its CLSID is written into an endpoint's FxProperties, which is a
 // separate, explicit step.
+//
+// It is also not enough to make the APO usable. audiodg.exe runs as LOCAL
+// SERVICE, so the per-user half of HKEY_CLASSES_ROOT it sees is not this user's
+// -- a real install has to mirror both the CLSID and the AudioEngine entry into
+// HKEY_LOCAL_MACHINE\SOFTWARE\Classes. scripts/apo-install.ps1 does that.
 
 #include "DreamApo.h"
 
@@ -16,6 +21,7 @@
 
 using dreamdsp::apo::CLSID_DreamDspApo;
 using dreamdsp::apo::DreamApo;
+using dreamdsp::apo::trace;
 
 namespace {
 
@@ -46,20 +52,25 @@ public:
         return E_NOINTERFACE;
     }
 
+    // The audio engine aggregates APOs. Refusing an outer IUnknown here is
+    // fatal and completely silent: the engine drops the APO, writes nothing to
+    // the event log, and the DLL is unloaded again before any of its code runs.
+    // Aggregation rules say only IUnknown may be asked for in that case, and it
+    // must be the inner object's non-delegating one.
     STDMETHOD(CreateInstance)(IUnknown *outer, REFIID riid, void **ppv) override
     {
         if (!ppv)
             return E_POINTER;
         *ppv = nullptr;
-        if (outer)
-            return CLASS_E_NOAGGREGATION;
+        if (outer && riid != __uuidof(IUnknown))
+            return E_NOINTERFACE;
 
-        auto *apo = new (std::nothrow) DreamApo();
+        auto *apo = new (std::nothrow) DreamApo(outer);
         if (!apo)
             return E_OUTOFMEMORY;
 
-        const HRESULT hr = apo->QueryInterface(riid, ppv);
-        apo->Release();
+        const HRESULT hr = apo->NonDelegatingQueryInterface(riid, ppv);
+        apo->NonDelegatingRelease();
         return hr;
     }
 
@@ -95,6 +106,52 @@ LSTATUS writeString(HKEY root, const std::wstring &subKey, const wchar_t *name,
     return rc;
 }
 
+LSTATUS writeDword(HKEY root, const std::wstring &subKey, const wchar_t *name, DWORD value)
+{
+    HKEY key = nullptr;
+    LSTATUS rc = ::RegCreateKeyExW(root, subKey.c_str(), 0, nullptr, 0,
+                                   KEY_WRITE, nullptr, &key, nullptr);
+    if (rc != ERROR_SUCCESS)
+        return rc;
+    rc = ::RegSetValueExW(key, name, 0, REG_DWORD,
+                          reinterpret_cast<const BYTE *>(&value), sizeof(value));
+    ::RegCloseKey(key);
+    return rc;
+}
+
+// Registering the CLSID is not enough to get an APO into the audio graph.
+//
+// The engine reads an endpoint's FxProperties, then looks each CLSID it finds
+// up in AudioEngine\AudioProcessingObjects. A CLSID missing from that database
+// is skipped in complete silence -- no attempt to load the DLL, no event log
+// entry, nothing to distinguish it from an endpoint with no effects at all.
+// Every APO on a Windows machine, Microsoft's included, has an entry here.
+//
+// This is what CRegAPOProperties::Register() writes for APOs built against the
+// WDK base classes; we hand-roll our COM, so we write it ourselves. The value
+// names are the fields of APO_REG_PROPERTIES.
+LSTATUS registerWithAudioEngine(HKEY root, const std::wstring &clsid)
+{
+    const std::wstring key = L"Software\\Classes\\AudioEngine\\AudioProcessingObjects\\" + clsid;
+
+    LSTATUS rc = writeString(root, key, L"FriendlyName", L"DreamDSP Effects");
+    if (rc == ERROR_SUCCESS) rc = writeString(root, key, L"Copyright", L"DreamDSP");
+    if (rc == ERROR_SUCCESS) rc = writeDword(root, key, L"MajorVersion", 0);
+    if (rc == ERROR_SUCCESS) rc = writeDword(root, key, L"MinorVersion", 1);
+    // INPLACE | FRAMESPERSECOND_MUST_MATCH | BITSPERSAMPLE_MUST_MATCH, matching
+    // APO_REG_PROPERTIES::Flags in DreamApo.cpp. The two must agree.
+    if (rc == ERROR_SUCCESS) rc = writeDword(root, key, L"Flags", 13);
+    if (rc == ERROR_SUCCESS) rc = writeDword(root, key, L"MinInputConnections", 1);
+    if (rc == ERROR_SUCCESS) rc = writeDword(root, key, L"MaxInputConnections", 1);
+    if (rc == ERROR_SUCCESS) rc = writeDword(root, key, L"MinOutputConnections", 1);
+    if (rc == ERROR_SUCCESS) rc = writeDword(root, key, L"MaxOutputConnections", 1);
+    if (rc == ERROR_SUCCESS) rc = writeDword(root, key, L"MaxInstances", 0xFFFFFFFFu);
+    if (rc == ERROR_SUCCESS) rc = writeDword(root, key, L"NumAPOInterfaces", 1);
+    if (rc == ERROR_SUCCESS)
+        rc = writeString(root, key, L"APOInterface0", guidToString(__uuidof(IAudioProcessingObject)));
+    return rc;
+}
+
 } // namespace
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
@@ -108,6 +165,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
 
 STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **ppv)
 {
+    trace(L"DllGetClassObject");
     if (!ppv)
         return E_POINTER;
     *ppv = nullptr;
@@ -146,6 +204,8 @@ STDAPI DllRegisterServer()
                     L"Both") != ERROR_SUCCESS) {
         return E_ACCESSDENIED;
     }
+    if (registerWithAudioEngine(HKEY_CURRENT_USER, clsid) != ERROR_SUCCESS)
+        return E_ACCESSDENIED;
     return S_OK;
 }
 
@@ -155,5 +215,7 @@ STDAPI DllUnregisterServer()
     const std::wstring base = L"Software\\Classes\\CLSID\\" + clsid;
     ::RegDeleteKeyW(HKEY_CURRENT_USER, (base + L"\\InprocServer32").c_str());
     ::RegDeleteKeyW(HKEY_CURRENT_USER, base.c_str());
+    ::RegDeleteKeyW(HKEY_CURRENT_USER,
+                    (L"Software\\Classes\\AudioEngine\\AudioProcessingObjects\\" + clsid).c_str());
     return S_OK;
 }

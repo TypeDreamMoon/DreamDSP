@@ -18,6 +18,27 @@ namespace dreamdsp::apo {
 // {6D2F1C55-5E4B-4A7E-9C31-0D5A6C4B7E10}
 extern const CLSID CLSID_DreamDspApo;
 
+// Appends a line to C:\ProgramData\DreamDSP\apo.log. There is no debugger and
+// no console inside audiodg.exe, and a rejected APO produces no event log entry
+// either, so this is the only way to see what happened. Opens a file -- safe
+// from the COM entry points, never callable from APOProcess.
+void trace(const wchar_t *what, unsigned a = 0, unsigned b = 0, unsigned c = 0);
+
+// The audio engine creates APOs *aggregated*: it passes its own outer IUnknown
+// to IClassFactory::CreateInstance and expects the inner object's
+// non-delegating IUnknown back. A class factory that answers
+// CLASS_E_NOAGGREGATION is skipped without a word -- no event log entry, and
+// the DLL is dropped again before anything in it runs. That is why this
+// separate, non-delegating interface exists alongside the normal IUnknown that
+// the three APO interfaces inherit.
+class INonDelegatingUnknown
+{
+public:
+    virtual HRESULT STDMETHODCALLTYPE NonDelegatingQueryInterface(REFIID riid, void **ppv) = 0;
+    virtual ULONG STDMETHODCALLTYPE NonDelegatingAddRef() = 0;
+    virtual ULONG STDMETHODCALLTYPE NonDelegatingRelease() = 0;
+};
+
 // The audio processing object itself.
 //
 // This runs inside audiodg.exe, which is the reason for every unusual rule in
@@ -31,16 +52,27 @@ extern const CLSID CLSID_DreamDspApo;
 class DreamApo final : public IAudioProcessingObjectRT,
                        public IAudioProcessingObjectConfiguration,
                        public IAudioProcessingObject,
-                       public IAudioSystemEffects
+                       public IAudioSystemEffects,
+                       public INonDelegatingUnknown
 {
 public:
-    DreamApo();
+    // outer is the engine's controlling IUnknown, or null when created
+    // stand-alone. It is deliberately not AddRef'd: the outer object owns this
+    // one, and a reference back would be a cycle neither side could break.
+    explicit DreamApo(IUnknown *outer);
     virtual ~DreamApo();
 
-    // --- IUnknown -------------------------------------------------------
+    // --- IUnknown (delegating) ------------------------------------------
+    // Once aggregated these must forward to the outer object, so that a client
+    // holding any interface of the pair sees one identity and one ref count.
     STDMETHOD_(ULONG, AddRef)() override;
     STDMETHOD_(ULONG, Release)() override;
     STDMETHOD(QueryInterface)(REFIID riid, void **ppv) override;
+
+    // --- INonDelegatingUnknown ------------------------------------------
+    STDMETHOD(NonDelegatingQueryInterface)(REFIID riid, void **ppv) override;
+    STDMETHOD_(ULONG, NonDelegatingAddRef)() override;
+    STDMETHOD_(ULONG, NonDelegatingRelease)() override;
 
     // --- IAudioProcessingObject -----------------------------------------
     STDMETHOD(Reset)() override;
@@ -73,6 +105,7 @@ public:
 private:
     bool formatAcceptable(IAudioMediaType *type, WAVEFORMATEX **out) const;
 
+    IUnknown *m_outer = nullptr;   // borrowed; see the constructor comment
     std::atomic<ULONG> m_ref{ 1 };
     bool m_locked = false;
 

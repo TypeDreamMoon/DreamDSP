@@ -19,21 +19,33 @@ Write-Host "DreamDSP APO uninstall"
 Write-Host "  endpoint $EndpointGuid"
 
 # --- 1. take the APO off the endpoint --------------------------------------
-$fx = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$EndpointGuid\FxProperties"
-if (Test-Path $fx) {
-    foreach ($pid_ in 0, 1, 2) {
-        $name = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},$pid_"
-        $val = (Get-ItemProperty $fx -Name $name -ErrorAction SilentlyContinue).$name
-        if ($val -and $val -eq $clsid) {
-            Remove-ItemProperty $fx -Name $name -Force -ErrorAction SilentlyContinue
-            Write-Host "  removed pid$pid_"
+# Opened with exactly the rights needed, for the same reason the installer
+# does: Administrators hold SetValue on these keys but not CreateSubKey, and a
+# broader request is refused outright.
+$subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$EndpointGuid\FxProperties"
+$rights = [System.Security.AccessControl.RegistryRights]'SetValue,QueryValues'
+$check  = [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree
+
+$key = $null
+try { $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, $check, $rights) } catch { }
+
+if ($key) {
+    try {
+        foreach ($slot in 0, 1, 2) {
+            $name = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},$slot"
+            $val = $key.GetValue($name)
+            # Only ever remove our own CLSID; another vendor's entry in the
+            # same slot is not ours to delete.
+            if ($val -and "$val" -eq $clsid) {
+                try { $key.DeleteValue($name, $false); Write-Host "  removed pid$slot" } catch { }
+            }
         }
+        try { $key.DeleteValue('{0f8412d3-dc5c-4db3-b174-dc47a859435c},0', $false) } catch { }
+    } finally {
+        $key.Close()
     }
-    # The enable flag is only ours if we created the key in the first place.
-    Remove-ItemProperty $fx -Name '{0f8412d3-dc5c-4db3-b174-dc47a859435c},0' `
-        -Force -ErrorAction SilentlyContinue
 } else {
-    Write-Host "  endpoint has no FxProperties (nothing to remove)"
+    Write-Host "  could not open FxProperties (already gone, or no rights)"
 }
 
 # --- 2. unregister the COM server -------------------------------------------
