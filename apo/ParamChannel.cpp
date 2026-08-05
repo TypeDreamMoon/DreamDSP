@@ -1,7 +1,12 @@
 #include "ParamChannel.h"
 #include "DreamApo.h"
 
+#include "Resampler.h"
+
+#include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace dreamdsp::apo {
 
@@ -86,6 +91,12 @@ bool ParamChannel::acquire(DreamApo *owner) noexcept
         m_stop = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (m_stop) {
             rearmNotify();
+            // Load synchronously before the watcher starts. LockForProcess runs
+            // on a normal thread and is allowed to take the time, and doing it
+            // here is what lets the caller find out -- immediately, rather than
+            // up to a poll interval later -- whether an impulse response is
+            // configured, which decides the latency it reports to Windows.
+            reloadIfChanged();
             m_thread = ::CreateThread(nullptr, 0, &ParamChannel::watcherEntry, this, 0, nullptr);
         }
         if (!m_thread) {
@@ -229,7 +240,18 @@ void ParamChannel::reloadIfChanged() noexcept
     // truncated, foreign or version-skewed all leave the previous parameters in
     // place -- reverting to silence or to defaults on a bad read would be a far
     // more startling failure than simply not changing.
-    m_slots.publish(dsp::sanitise(raw));
+    const dsp::ParamBlock clean = dsp::sanitise(raw);
+    m_slots.publish(clean);
+
+    // Building a convolution kernel means reading a file, resampling it, and
+    // running a few hundred transforms -- tens to hundreds of milliseconds.
+    //
+    // It happens here, on the watcher thread, rather than on a thread of its
+    // own. The cost is that the next parameter update is delayed by one build,
+    // once, right after the user picks a different impulse response. The
+    // benefit is one fewer thread and one fewer synchronisation problem inside
+    // audiodg. Neither arrangement touches the audio thread.
+    rebuildImpulseResponses(clean);
 
     m_loadedGeneration.store(raw.generation, std::memory_order_relaxed);
     m_loadCount.fetch_add(1, std::memory_order_relaxed);
@@ -241,6 +263,188 @@ void ParamChannel::reloadIfChanged() noexcept
 
     trace(L"params loaded gen/mask/count", raw.generation, raw.enableMask,
           m_loadCount.load(std::memory_order_relaxed));
+}
+
+// Reads the blob the parameters name. True when m_irSamples holds it.
+bool ParamChannel::loadImpulseBlob(const dsp::Convolution::Params &p) noexcept
+{
+    if (m_irLoaded && std::memcmp(m_irHash, p.irHash, 16) == 0)
+        return true;
+
+    m_irLoaded = false;
+    m_irSamples.clear();
+
+    // Content-addressed: the file is named after the hash of its own samples,
+    // so the parameters and the payload cannot be mismatched even though they
+    // are two separate writes with no atomicity between them.
+    wchar_t path[MAX_PATH];
+    int at = ::swprintf(path, MAX_PATH, L"C:\\ProgramData\\DreamDSP\\control\\ir\\");
+    if (at <= 0)
+        return false;
+    for (int i = 0; i < 16 && at < MAX_PATH - 8; ++i)
+        at += ::swprintf(path + at, size_t(MAX_PATH - at), L"%02x", p.irHash[i]);
+    if (at >= MAX_PATH - 8)
+        return false;
+    ::swprintf(path + at, size_t(MAX_PATH - at), L".irb");
+
+    HANDLE file = ::CreateFileW(path, GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        m_irStatus = uint32_t(dsp::IrBlobError::TooSmall);
+        return false;
+    }
+
+    LARGE_INTEGER size = {};
+    if (!::GetFileSizeEx(file, &size) || size.QuadPart <= 0
+        || size.QuadPart > LONGLONG(dsp::kIrMaxBytes)) {
+        ::CloseHandle(file);
+        m_irStatus = uint32_t(dsp::IrBlobError::BadGeometry);
+        return false;
+    }
+
+    std::vector<unsigned char> raw;
+    raw.resize(size_t(size.QuadPart));
+    DWORD got = 0;
+    const BOOL ok = ::ReadFile(file, raw.data(), DWORD(raw.size()), &got, nullptr);
+    ::CloseHandle(file);
+    if (!ok || got != raw.size()) {
+        m_irStatus = uint32_t(dsp::IrBlobError::SizeMismatch);
+        return false;
+    }
+
+    dsp::IrBlobError why = dsp::IrBlobError::None;
+    const float *samples = dsp::validateIrBlob(raw.data(), raw.size(), &m_irHeader, &why);
+    m_irStatus = uint32_t(why);
+    if (!samples) {
+        trace(L"impulse response rejected, reason", uint32_t(why));
+        return false;
+    }
+
+    const size_t count = size_t(m_irHeader.frames) * m_irHeader.channels;
+    m_irSamples.assign(samples, samples + count);
+    std::memcpy(m_irHash, p.irHash, 16);
+    m_irLoaded = true;
+    trace(L"impulse response loaded frames/ch/rate",
+          m_irHeader.frames, m_irHeader.channels, m_irHeader.sampleRate);
+    return true;
+}
+
+void ParamChannel::rebuildImpulseResponses(const dsp::ParamBlock &block) noexcept
+{
+    const dsp::Convolution::Params &p = block.convolution;
+
+    for (int i = 0; i < kMaxOwners; ++i) {
+        DreamApo *owner = m_owners[i];
+        if (!owner)
+            continue;
+
+        // Whatever the audio thread has finished with is freed here, on this
+        // thread, never on the callback.
+        dsp::destroyConvKernel(owner->chain().convolution().reclaimKernel());
+
+        if (p.irGeneration == 0u) {
+            m_built[i] = BuiltState{};
+            continue;
+        }
+
+        const uint32_t rate = uint32_t(owner->streamRate());
+        const uint32_t channels = uint32_t(owner->streamChannels());
+        if (rate == 0 || channels == 0)
+            continue;
+
+        if (m_built[i].valid && m_built[i].rate == rate
+            && m_built[i].channels == channels
+            && std::memcmp(m_built[i].hash, p.irHash, 16) == 0) {
+            continue;                          // already running exactly this
+        }
+
+        if (!loadImpulseBlob(p))
+            continue;
+
+        // Resampled to THIS instance's rate. Two endpoints can be running at
+        // different rates from the same file, which is the whole reason the
+        // conversion happens here rather than in the GUI: only the APO knows
+        // what rate each stream is actually at, right now.
+        const uint32_t irFrames = m_irHeader.frames;
+        const uint32_t irChannels = m_irHeader.channels;
+        const double srcRate = double(m_irHeader.sampleRate);
+
+        // Declared and then resized, rather than constructed with arguments.
+        // `converted(size_t(irChannels), std::vector<float>())` looks like a
+        // constructor call and is not: both arguments parse as parameter
+        // declarations, so the whole line becomes a function declaration.
+        std::vector<std::vector<float>> converted;
+        converted.resize(size_t(irChannels));
+        std::vector<const float *> planes(size_t(irChannels), nullptr);
+        bool ready = true;
+
+        for (uint32_t c = 0; c < irChannels; ++c) {
+            const float *src = m_irSamples.data() + size_t(c) * irFrames;
+            converted[c] = dsp::Resampler::resample(src, int(irFrames), srcRate, double(rate));
+            if (converted[c].empty()) {
+                ready = false;
+                break;
+            }
+            // A resampler preserves sample values, which is correct for a
+            // signal and wrong for a filter: the sum of the taps -- the
+            // filter's DC gain -- scales with the rate ratio. Compensating
+            // here rather than inside the resampler keeps its signal behaviour,
+            // which the offline renderer and the tests depend on.
+            const float scale = float(srcRate / double(rate));
+            for (auto &v : converted[c])
+                v *= scale;
+            planes[c] = converted[c].data();
+        }
+        if (!ready)
+            continue;
+
+        const int taps = int(converted[0].size());
+
+        // Normalised by the energy of the response, so a random file from the
+        // internet cannot arrive 30 dB hot. For a system-wide effect where the
+        // listener is not mixing, "cannot make anything much louder" is the
+        // right default.
+        double energy = 0.0;
+        for (uint32_t c = 0; c < irChannels; ++c) {
+            double sum = 0.0;
+            for (float v : converted[c])
+                sum += double(v) * double(v);
+            energy = std::max(energy, sum);
+        }
+        const float wetGain = (energy > 1e-12) ? float(1.0 / std::sqrt(energy)) : 1.0f;
+
+        dsp::ConvBuildRequest req;
+        req.irChannels = planes.data();
+        req.irChannelCount = int(irChannels);
+        req.tapCount = taps;
+        req.streamChannels = int(channels);
+        req.block = dsp::convBlockForRate(double(rate));
+        req.flags = p.flags;
+        req.channelMask = owner->channelMask();
+        req.wetGain = wetGain;
+        req.maxPartitions = 64;
+
+        dsp::ConvKernel *kernel = dsp::buildConvKernel(req);
+        if (!kernel) {
+            trace(L"impulse response does not fit the budget, taps", uint32_t(taps));
+            continue;
+        }
+
+        if (!owner->chain().convolution().offerKernel(kernel)) {
+            // A hand-off is still in flight. Drop this one and try again next
+            // pass rather than building a queue.
+            dsp::destroyConvKernel(kernel);
+            continue;
+        }
+
+        std::memcpy(m_built[i].hash, p.irHash, 16);
+        m_built[i].rate = rate;
+        m_built[i].channels = channels;
+        m_built[i].valid = true;
+        trace(L"convolution kernel built taps/partitions/rate",
+              uint32_t(taps), kernel->partitions, rate);
+    }
 }
 
 void ParamChannel::maybeWriteStatus() noexcept

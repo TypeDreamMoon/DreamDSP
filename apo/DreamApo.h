@@ -107,6 +107,14 @@ public:
     // between LockForProcess and UnlockForProcess.
     void fillStatus(dsp::StatusInstance &out) const noexcept;
 
+    // What the impulse-response builder needs to know. All fixed between
+    // LockForProcess and UnlockForProcess, so the builder thread can read them
+    // without synchronisation for as long as it holds a channel reference.
+    double streamRate() const noexcept { return m_sampleRate; }
+    int streamChannels() const noexcept { return int(m_channels); }
+    uint32_t channelMask() const noexcept { return m_channelMask; }
+    dsp::EffectChain &chain() noexcept { return m_chain; }
+
 private:
     bool formatAcceptable(IAudioMediaType *type, WAVEFORMATEX **out) const;
 
@@ -115,6 +123,9 @@ private:
     bool m_locked = false;
 
     UINT32 m_channels = 0;
+    // From WAVEFORMATEXTENSIBLE, so the builder can find the LFE channel and
+    // leave it alone. Zero when the format did not carry one.
+    uint32_t m_channelMask = 0;
     UINT32 m_maxFrames = 0;
     double m_sampleRate = 0.0;
 

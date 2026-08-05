@@ -177,8 +177,22 @@ HRESULT DreamApo::GetLatency(HNSTIME *pTime)
 {
     if (!pTime)
         return E_POINTER;
-    // Everything here is sample-by-sample; no lookahead, no block delay.
-    *pTime = 0;
+
+    // Zero until LockForProcess has established a rate: this is queried during
+    // format negotiation, before any rate or impulse response exists.
+    //
+    // Everything except convolution is sample-by-sample with no lookahead. The
+    // convolver delays by exactly one of its blocks, and that figure is fixed
+    // for the life of the lock -- which is why arming, rather than merely
+    // enabling, is what turns it on. Under-reporting causes no glitch, but
+    // clients sum this across the whole chain and feed it to video
+    // synchronisation, and the capture-path echo canceller uses the render
+    // stream as its reference; being wrong there is a synchronisation bug that
+    // shows up somewhere else entirely.
+    const uint32_t samples = m_locked ? m_chain.convolution().latencySamples() : 0u;
+    *pTime = (samples > 0 && m_sampleRate > 0.0)
+                 ? HNSTIME(std::llround(double(samples) * 10000000.0 / m_sampleRate))
+                 : 0;
     return S_OK;
 }
 
@@ -330,6 +344,22 @@ HRESULT DreamApo::LockForProcess(UINT32 u32NumInputConnections,
 
     m_channel = &ParamChannel::instance();
     m_channelHeld = m_channel->acquire(this);
+
+    // Arming is latched here and never changes for the life of the lock,
+    // because the alignment delay it introduces is what GetLatency reports and
+    // the engine asks for that once. An impulse response chosen for the first
+    // time therefore engages on the next stream rather than mid-playback --
+    // deferred rather than lied about.
+    if (m_channelHeld) {
+        dsp::ParamBlock initial;
+        std::memset(&initial, 0, sizeof initial);
+        m_channel->slots().read(&initial);
+        m_chain.convolution().setArmed(initial.convolution.irGeneration != 0u);
+        if (m_chain.convolution().armed()) {
+            trace(L"convolution armed, latency samples",
+                  m_chain.convolution().latencySamples());
+        }
+    }
 
     m_locked = true;
     trace(L"LockForProcess ch/rate/maxFrames",

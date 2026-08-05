@@ -4,6 +4,8 @@
 
 #include <atomic>
 
+#include "Convolver.h"
+#include "ImpulseBlob.h"
 #include "ParamSlots.h"
 #include "StatusBlock.h"
 
@@ -42,6 +44,8 @@ private:
     static DWORD WINAPI watcherEntry(void *self) noexcept;
     void watch() noexcept;
     void reloadIfChanged() noexcept;
+    void rebuildImpulseResponses(const dsp::ParamBlock &block) noexcept;
+    bool loadImpulseBlob(const dsp::Convolution::Params &p) noexcept;
     void maybeWriteStatus() noexcept;
     void rearmNotify() noexcept;
     void closeNotify() noexcept;
@@ -63,6 +67,25 @@ private:
     // container to reason about from two threads.
     static constexpr int kMaxOwners = 8;
     DreamApo *m_owners[kMaxOwners] = {};
+
+    // What each instance was last given, so a kernel is rebuilt only when the
+    // impulse response actually changed -- not on every parameter write.
+    struct BuiltState {
+        uint8_t hash[16] = {};
+        uint32_t rate = 0;
+        uint32_t channels = 0;
+        bool valid = false;
+    };
+    BuiltState m_built[kMaxOwners];
+
+    // The impulse response as it came off disk: planar, at its own rate. Held
+    // once for the whole process rather than per instance, because two
+    // endpoints running at different rates still start from the same file.
+    std::vector<float> m_irSamples;
+    dsp::IrBlobHeader m_irHeader{};
+    uint8_t m_irHash[16] = {};
+    bool m_irLoaded = false;
+    uint32_t m_irStatus = 0;      // dsp::IrBlobError of the last attempt
 
     // Change detection, so an unchanged file costs one stat and nothing else.
     DWORD m_stampLow = 0;
