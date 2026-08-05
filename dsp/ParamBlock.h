@@ -6,6 +6,7 @@
 #include <type_traits>
 
 #include "Compressor.h"
+#include "Convolver.h"
 #include "MultibandCompressor.h"
 #include "Reverb.h"
 #include "Saturation.h"
@@ -26,7 +27,7 @@ namespace dreamdsp::dsp {
 
 enum : uint32_t {
     kParamMagic = 0x42505244u,   // reads as DRPB in a hex dump
-    kParamVersion = 1u
+    kParamVersion = 2u
 };
 
 // One bit per effect. The dsp layer has no enable flag of its own; these eight
@@ -42,7 +43,11 @@ enum : uint32_t {
     kEnReverb    = 1u << 5,
     kEnWidth     = 1u << 6,
     kEnCrossfeed = 1u << 7,
-    kEnKnown     = 0x000000FFu
+    // Last in the chain deliberately: the primary use is room, headphone or
+    // HRTF correction, which models the transducer and belongs immediately
+    // before the DAC.
+    kEnConvolution = 1u << 8,
+    kEnKnown     = 0x000001FFu
 };
 
 // Byte-for-byte what is on disk. There is no serialisation step: every member is
@@ -69,9 +74,10 @@ struct ParamBlock {
     StereoWidener::Params       width;       // +128     8
     Crossfeed::Params           crossfeed;   // +136    12
     MultibandCompressor::Params multiband;   // +148   108
-};                                           // = 256
+    Convolution::Params         convolution; // +256    44
+};                                           // = 300
 
-static_assert(sizeof(ParamBlock) == 256, "wire layout changed; bump kParamVersion");
+static_assert(sizeof(ParamBlock) == 300, "wire layout changed; bump kParamVersion");
 static_assert(alignof(ParamBlock) == 4, "wire layout changed; bump kParamVersion");
 static_assert(std::is_trivially_copyable<ParamBlock>::value, "must be memcpy-able");
 static_assert(offsetof(ParamBlock, enableMask) == 16, "wire layout changed");
@@ -83,6 +89,7 @@ static_assert(offsetof(ParamBlock, bass) == 112, "wire layout changed");
 static_assert(offsetof(ParamBlock, width) == 128, "wire layout changed");
 static_assert(offsetof(ParamBlock, crossfeed) == 136, "wire layout changed");
 static_assert(offsetof(ParamBlock, multiband) == 148, "wire layout changed");
+static_assert(offsetof(ParamBlock, convolution) == 256, "wire layout changed");
 
 // --------------------------------------------------------------- sanitising
 

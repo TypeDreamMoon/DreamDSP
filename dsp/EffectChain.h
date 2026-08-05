@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Compressor.h"
+#include "Convolver.h"
 #include "MultibandCompressor.h"
 #include "ParamBlock.h"
 #include "Reverb.h"
@@ -26,6 +27,11 @@ public:
     // to process(), and resets all state.
     void prepare(double sampleRate, int channels, int maxFrames);
 
+    // The convolution stage, whose "parameter" is megabytes of impulse response
+    // and therefore cannot travel in a ParamBlock. Whoever owns the chain feeds
+    // it kernels directly.
+    ConvolutionStage &convolution() noexcept { return m_conv; }
+
     // Not real-time in the strict sense (it clears delay lines), but allocation
     // free -- safe from Reset().
     void reset();
@@ -42,7 +48,18 @@ public:
 
     // What is actually running. Zero means the chain is a no-op and the caller
     // should take its pass-through path rather than calling process() at all.
-    uint32_t appliedMask() const noexcept { return m_applied.enableMask; }
+    //
+    // The convolution stage counts as running whenever it is ARMED, not merely
+    // when it is enabled. An armed stage imposes a block of alignment delay
+    // whether or not the wet path is audible, and that delay is what the APO
+    // has reported to Windows -- so the stage has to run for the whole life of
+    // the stream, or enabling any unrelated effect would introduce the delay
+    // mid-stream against a latency figure the engine queried once.
+    uint32_t activeMask() const noexcept
+    {
+        return m_applied.enableMask | (m_conv.armed() ? kEnConvolution : 0u);
+    }
+    uint32_t appliedMask() const noexcept { return activeMask(); }
     uint32_t appliedGeneration() const noexcept { return m_applied.generation; }
 
     double sampleRate() const noexcept { return m_sampleRate; }
@@ -65,6 +82,7 @@ private:
     Reverb m_reverb;
     StereoWidener m_width;
     Crossfeed m_crossfeed;
+    ConvolutionStage m_conv;
 };
 
 } // namespace dreamdsp::dsp

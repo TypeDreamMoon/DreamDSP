@@ -60,6 +60,15 @@ inline uint32_t convBlockForRate(double sampleRate) noexcept
 }
 
 enum : uint32_t {
+    // 4 000 000 frames is 90 s at 44.1 kHz and 20 s at 192 kHz -- far past any
+    // real impulse response, and small enough that the frame count multiplied
+    // by the channel count cannot overflow anything downstream.
+    kIrMaxFrames = 4000000u,
+    kIrMaxSamples = 8000000u,
+    kIrMaxBytes = 32u * 1024u * 1024u
+};
+
+enum : uint32_t {
     kConvKernelMagic = 0x4B564E43u,          // "CNVK"
     kConvMaxChannels = 8u,
     kConvMaxPartitions = 1024u,

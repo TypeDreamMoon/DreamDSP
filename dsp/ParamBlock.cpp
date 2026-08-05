@@ -105,6 +105,22 @@ ParamBlock sanitise(const ParamBlock &in) noexcept
         o.multiband.bandEnabled[b] = sanB(in.multiband.bandEnabled[b]);
     }
 
+    o.convolution.mix = sanF(in.convolution.mix, 0.0f, 1.0f, 1.0f);
+    o.convolution.trimDb = sanF(in.convolution.trimDb, -24.0f, 12.0f, 0.0f);
+    o.convolution.irGeneration = in.convolution.irGeneration;
+    o.convolution.irFrames = in.convolution.irFrames > kIrMaxFrames
+                                 ? kIrMaxFrames : in.convolution.irFrames;
+    o.convolution.irChannels = in.convolution.irChannels > 8u ? 8u : in.convolution.irChannels;
+    // Zero means "unknown"; anything outside the plausible range is treated the
+    // same way rather than being clamped to a rate the file does not have.
+    o.convolution.irRateHz = (in.convolution.irRateHz >= 8000u
+                              && in.convolution.irRateHz <= 384000u)
+                                 ? in.convolution.irRateHz : 0u;
+    o.convolution.flags = in.convolution.flags & Convolution::kCfKnown;
+    // The hash is opaque bytes. Sanitising it would be meaningless -- it is
+    // verified against the blob's contents instead.
+    std::memcpy(o.convolution.irHash, in.convolution.irHash, sizeof o.convolution.irHash);
+
     return o;
 }
 

@@ -13,6 +13,7 @@
 #include "Denormals.h"
 #include "EffectChain.h"
 #include "Fft.h"
+#include "ImpulseBlob.h"
 #include "MultibandCompressor.h"
 #include "ParamBlock.h"
 #include "ParamSlots.h"
@@ -25,6 +26,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <thread>
 
 #include <cmath>
@@ -1290,6 +1292,83 @@ void testConvolver()
     }
 }
 
+// -------------------------------------------------------- impulse blob format
+
+void testImpulseBlob()
+{
+    std::printf("\n[impulse blob]\n");
+
+    check(sizeof(IrBlobHeader) == 64, "blob header is 64 bytes");
+
+    uint32_t seed = 0xB10Bu;
+    const uint32_t frames = 1000, channels = 2;
+    std::vector<float> samples(size_t(frames) * channels, 0.0f);
+    for (auto &v : samples)
+        v = float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f;
+
+    const IrBlobHeader header =
+        makeIrBlobHeader(samples.data(), frames, channels, 44100u);
+
+    std::vector<uint8_t> blob(sizeof(IrBlobHeader) + samples.size() * sizeof(float));
+    std::memcpy(blob.data(), &header, sizeof header);
+    std::memcpy(blob.data() + sizeof(IrBlobHeader), samples.data(),
+                samples.size() * sizeof(float));
+
+    // The round trip, which is the whole contract.
+    {
+        IrBlobHeader got;
+        IrBlobError why = IrBlobError::None;
+        const float *payload = validateIrBlob(blob.data(), blob.size(), &got, &why);
+        check(payload != nullptr && why == IrBlobError::None, "a well-formed blob validates");
+        check(payload && std::memcmp(payload, samples.data(),
+                                     samples.size() * sizeof(float)) == 0,
+              "the samples survive the round trip");
+        check(got.sampleRate == 44100u && got.frames == frames && got.channels == channels,
+              "the geometry survives the round trip");
+    }
+
+    // Every rejection path. A blob arrives from a directory the user can write
+    // to, so none of these may be assumed away.
+    {
+        struct Case { const char *what; IrBlobError expect; std::function<void(std::vector<uint8_t> &)> damage; };
+        int bad = 0;
+
+        auto expectRejected = [&](const char *what, IrBlobError expect,
+                                  std::vector<uint8_t> b) {
+            IrBlobError why = IrBlobError::None;
+            const float *p = validateIrBlob(b.data(), b.size(), nullptr, &why);
+            const bool ok = (p == nullptr) && (why == expect);
+            if (!ok)
+                ++bad;
+            check(ok, what);
+        };
+
+        { auto b = blob; b.resize(32); expectRejected("a truncated blob is rejected", IrBlobError::TooSmall, b); }
+        { auto b = blob; b[0] ^= 0xFF; expectRejected("a wrong magic is rejected", IrBlobError::BadMagic, b); }
+        { auto b = blob; b[4] = 99; expectRejected("a future version is rejected", IrBlobError::BadVersion, b); }
+        { auto b = blob; uint32_t z = 0; std::memcpy(b.data() + 16, &z, 4);
+          expectRejected("zero frames is rejected", IrBlobError::BadGeometry, b); }
+        { auto b = blob; uint32_t big = 99u; std::memcpy(b.data() + 20, &big, 4);
+          expectRejected("too many channels is rejected", IrBlobError::BadGeometry, b); }
+        { auto b = blob; b.push_back(0);
+          expectRejected("a size mismatch is rejected", IrBlobError::SizeMismatch, b); }
+        { auto b = blob; b[sizeof(IrBlobHeader) + 40] ^= 0x01;
+          expectRejected("a single flipped payload bit is caught", IrBlobError::HashMismatch, b); }
+        (void)bad;
+    }
+
+    // The hash has to actually distinguish. A generation counter alone would
+    // let a stale file masquerade as a new one.
+    {
+        std::vector<float> other = samples;
+        other[500] += 1e-6f;
+        uint8_t h1[16], h2[16];
+        irHash128(samples.data(), samples.size() * sizeof(float), h1);
+        irHash128(other.data(), other.size() * sizeof(float), h2);
+        check(std::memcmp(h1, h2, 16) != 0, "a 1e-6 change in one sample changes the hash");
+    }
+}
+
 // ---------------------------------------------------------- parameter channel
 
 // Offset of the first word that is a NaN or an infinity, or -1 if there is
@@ -1303,6 +1382,11 @@ int firstNonFiniteOffset(const ParamBlock &b)
 {
     const unsigned char *p = reinterpret_cast<const unsigned char *>(&b);
     for (size_t off = 24; off + 4 <= sizeof(ParamBlock); off += 4) {
+        // Everything in the convolution block past its two floats is integer:
+        // a generation counter, three cross-check fields, flags, and a 16-byte
+        // content hash. Reading a hash as an exponent is meaningless.
+        if (off >= offsetof(ParamBlock, convolution) + 8)
+            continue;
         // The four bool groups are not floats and must be skipped, or their
         // byte patterns get misread as exponents.
         if (off == offsetof(ParamBlock, comp) + 24
@@ -1327,7 +1411,7 @@ void testParamBlock()
 {
     std::printf("\n[parameter block]\n");
 
-    check(sizeof(ParamBlock) == 256, fmt("wire size is %.0f bytes", double(sizeof(ParamBlock))));
+    check(sizeof(ParamBlock) == 300, fmt("wire size is %.0f bytes", double(sizeof(ParamBlock))));
     check(sizeof(StatusBlock) == 296, "status block is 296 bytes");
 
     // The transparent default must not be the dsp defaults. This is the test
@@ -1336,6 +1420,16 @@ void testParamBlock()
     const ParamBlock t = transparentBlock();
     ParamBlock valueInit{};
     check(t.enableMask == 0u, "transparent block enables nothing");
+
+    // Adding an effect means widening kEnKnown as well as adding its bit.
+    // Forgetting masks the new bit to zero during sanitising, with no error
+    // anywhere -- the effect simply never runs and nothing says why.
+    {
+        ParamBlock b = transparentBlock();
+        b.enableMask = kEnConvolution;
+        check(sanitise(b).enableMask == kEnConvolution,
+              "the newest enable bit survives sanitising");
+    }
     check(isSane(t), "the transparent block is itself a sanitised block");
     check(t.reverb.wet == 0.0f, "transparent block has no reverb");
     check(std::memcmp(&t, &valueInit, sizeof t) != 0,
@@ -1608,6 +1702,7 @@ int runTests()
     testFft();
     testResampler();
     testConvolver();
+    testImpulseBlob();
     testParamBlock();
     testTransparency();
     testNoAllocation();

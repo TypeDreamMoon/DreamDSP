@@ -18,6 +18,10 @@ void EffectChain::prepare(double sampleRate, int channels, int maxFrames)
     m_reverb.prepare(sampleRate);
     m_width.prepare(sampleRate);
     m_crossfeed.prepare(sampleRate);
+    // 64 partitions is 340 ms at 48 kHz and 170 ms at 96 kHz, which covers
+    // headphone and room correction. Longer reverb impulse responses need a
+    // larger budget, granted by the caller.
+    m_conv.prepare(sampleRate, channels, 64);
 
     // Zeroed rather than value-initialised: the Params members carry default
     // member initialisers, and `m_applied = {}` would seed an always-on reverb.
@@ -38,6 +42,7 @@ void EffectChain::reset()
     m_reverb.reset();
     m_width.reset();
     m_crossfeed.reset();
+    m_conv.reset();
 }
 
 void EffectChain::apply(ParamBlock p) noexcept
@@ -76,6 +81,21 @@ void EffectChain::apply(ParamBlock p) noexcept
 
 #undef DREAMDSP_STAGE
 
+    // Deliberately outside the macro, for two structural reasons. The macro
+    // calls reset() on every 0 -> 1 enable transition, which here would be a
+    // multi-megabyte memset on the audio thread; and there is nothing to clear
+    // anyway -- the frequency-delay line holds input spectra and is independent
+    // of the impulse response, so an enable wants a crossfade, not a state
+    // clear. Clearing it would discard valid history and make the first
+    // partitions after every enable wrong.
+    if ((live & kEnConvolution)
+        && std::memcmp(&p.convolution, &m_applied.convolution,
+                       sizeof p.convolution) != 0) {
+        m_conv.setParams(p.convolution);
+        m_applied.convolution = p.convolution;
+    }
+    m_conv.setEnabled((p.enableMask & kEnConvolution) != 0u);
+
     // Resetting on the 0 -> 1 transition is what stops a ten-minute-old reverb
     // tail from bursting into the output the moment the effect is switched back
     // on. It costs one buffer fill per user toggle.
@@ -85,7 +105,7 @@ void EffectChain::apply(ParamBlock p) noexcept
 
 void EffectChain::process(const AudioBuffer &buf)
 {
-    const uint32_t mask = m_applied.enableMask;
+    const uint32_t mask = activeMask();
     if (mask == 0u || !buf.valid())
         return;
 
@@ -106,6 +126,7 @@ void EffectChain::process(const AudioBuffer &buf)
     if (mask & kEnReverb)    m_reverb.process(buf);
     if (mask & kEnWidth)     m_width.process(buf);
     if (mask & kEnCrossfeed) m_crossfeed.process(buf);
+    if (mask & kEnConvolution) m_conv.process(buf);
 }
 
 } // namespace dreamdsp::dsp
