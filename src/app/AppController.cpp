@@ -366,7 +366,140 @@ void AppController::resetAll()
 {
     m_bands.zeroGains();
     setPreamp(0.0);
-    setMessage(QStringLiteral("已全部归零"));
+
+    // The effects too. They used to be left alone because they lived in QML and
+    // this object could not reach them; now that it owns them, "reset
+    // everything" that quietly skipped half the application would be a lie --
+    // and it is the way back for anyone whose settings were damaged.
+    m_compressor.restore(dsp::Compressor::Params{}, false);
+    m_reverb.restore(dsp::Reverb::Params{}, false);
+    {
+        dsp::ParamBlock defaults;
+        std::memset(&defaults, 0, sizeof defaults);
+        defaults.tube = dsp::TubeStage::Params{};
+        defaults.bass = dsp::VirtualBass::Params{};
+        defaults.exciter = dsp::Exciter::Params{};
+        defaults.width = dsp::StereoWidener::Params{};
+        defaults.crossfeed = dsp::Crossfeed::Params{};
+        defaults.multiband = dsp::MultibandCompressor::Params{};
+        defaults.enableMask = 0;
+        m_effects.restore(defaults);
+    }
+
+    setMessage(QStringLiteral("已全部归零(均衡器与效果)"));
+}
+
+// ------------------------------------------------------------- full presets
+
+QString AppController::fullPresetPath(const QString &name) const
+{
+    return QDir(PresetStore::userDirectory())
+        .filePath(name + QStringLiteral(".dreamdsp"));
+}
+
+bool AppController::saveFullPreset(const QString &name)
+{
+    if (name.trimmed().isEmpty()) {
+        setError(QStringLiteral("预设名不能为空"));
+        return false;
+    }
+
+    DreamPreset p;
+    p.name = name;
+    p.eq = currentAsPreset();
+    p.eqEnabled = m_eqEnabled;
+    // Straight from the publisher, so a preset holds byte-for-byte what the
+    // DSP is running rather than a second reading of the same models.
+    p.params = blockFromModels(&m_compressor, &m_reverb, &m_effects,
+                               m_publisher.convolution(), m_convolutionEnabled);
+    p.convolutionFile = m_convolution.path;
+    p.convolutionName = m_convolution.name;
+    p.autoEqSource = m_autoEqSource;
+
+    QDir().mkpath(PresetStore::userDirectory());
+    QString err;
+    if (!saveDreamPreset(fullPresetPath(name), p, &err)) {
+        setError(QStringLiteral("保存失败:%1").arg(err));
+        return false;
+    }
+
+    setError({});
+    setMessage(QStringLiteral("已保存完整预设「%1」").arg(name));
+    emit fullPresetsChanged();
+    return true;
+}
+
+bool AppController::loadFullPreset(const QString &path)
+{
+    DreamPreset p;
+    QString err;
+    if (!loadDreamPreset(path, &p, &err)) {
+        setError(QStringLiteral("读取失败:%1").arg(err));
+        return false;
+    }
+
+    m_restoring = true;
+    m_bands.setBands(p.eq.bands);
+    setPreamp(p.eq.preamp);
+    m_restoring = false;
+    setEqEnabled(p.eqEnabled);
+
+    m_compressor.restore(p.params.comp, (p.params.enableMask & dsp::kEnComp) != 0);
+    m_reverb.restore(p.params.reverb, (p.params.enableMask & dsp::kEnReverb) != 0);
+    m_effects.restore(p.params);
+    m_autoEqSource = p.autoEqSource;
+
+    m_publisher.setConvolutionMix(p.params.convolution.mix);
+    m_publisher.setConvolutionTrimDb(p.params.convolution.trimDb);
+
+    // The impulse response is referred to by path. A preset moved between
+    // machines can name a file that is not here, which is worth saying rather
+    // than silently dropping.
+    const bool wantConvolution = (p.params.enableMask & dsp::kEnConvolution) != 0;
+    if (!p.convolutionFile.isEmpty() && QFileInfo::exists(p.convolutionFile)) {
+        applyImpulseFile(p.convolutionFile);
+        m_publisher.setConvolutionEnabled(wantConvolution);
+        setConvolutionEnabled(wantConvolution);
+    } else if (!p.convolutionFile.isEmpty()) {
+        setError(QStringLiteral("预设里的脉冲响应不在这台机器上:%1").arg(p.convolutionFile));
+    }
+
+    setCurrentPreset(p.name);
+    markDirty(false);
+    m_publisher.publishNow();
+    emit generatedTextChanged();
+    scheduleWrite();
+
+    if (lastError().isEmpty())
+        setMessage(QStringLiteral("已载入完整预设「%1」").arg(p.name));
+    return true;
+}
+
+QVariantList AppController::fullPresets() const
+{
+    QVariantList out;
+    QDir dir(PresetStore::userDirectory());
+    const QStringList files = dir.entryList({ QStringLiteral("*.dreamdsp") },
+                                            QDir::Files, QDir::Name);
+    for (const QString &f : files) {
+        const QString path = dir.filePath(f);
+        out.append(QVariantMap{
+            { QStringLiteral("name"), QFileInfo(f).completeBaseName() },
+            { QStringLiteral("path"), path },
+        });
+    }
+    return out;
+}
+
+bool AppController::deleteFullPreset(const QString &path)
+{
+    if (!QFile::remove(path)) {
+        setError(QStringLiteral("无法删除 %1").arg(path));
+        return false;
+    }
+    setMessage(QStringLiteral("已删除预设"));
+    emit fullPresetsChanged();
+    return true;
 }
 
 void AppController::openConfigFolder()
@@ -1142,6 +1275,7 @@ bool AppController::importAutoEq(int entryIndex, bool fixedBand)
     setPreamp(p.preamp);
     m_restoring = false;
 
+    m_autoEqSource = e.device;
     setCurrentPreset(e.device);
     markDirty(true);
     setError({});

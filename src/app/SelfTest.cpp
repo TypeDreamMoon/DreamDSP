@@ -7,6 +7,7 @@
 #include "core/AutoEqDatabase.h"
 #include "core/Biquad.h"
 #include "core/Fft.h"
+#include "core/DreamPreset.h"
 #include "core/PeacePreset.h"
 #include "platform/ApoLocator.h"
 #include "platform/AudioDevices.h"
@@ -23,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <functional>
 
 namespace dreamdsp {
@@ -386,6 +388,107 @@ void testAutoEq(const ApoInstall &apo)
     }
 }
 
+// A preset that silently dropped half of what it claims to save would be worse
+// than not offering one, so what comes back is compared field by field against
+// what went in -- not merely "it parsed".
+void testFullPreset()
+{
+    out() << "\n[full preset]" << Qt::endl;
+
+    QTemporaryDir dir;
+    if (!dir.isValid()) {
+        check(false, QStringLiteral("temporary directory"));
+        return;
+    }
+    const QString path = dir.filePath(QStringLiteral("test.dreamdsp"));
+
+    DreamPreset in;
+    in.name = QStringLiteral("测试预设");
+    in.eqEnabled = false;
+    in.eq.preamp = -6.5;
+    in.eq.bands = {
+        { 105.0, 5.5, 0.70, FilterType::LSC, true },
+        { 3842.0, -3.3, 3.05, FilterType::PK, false },
+        { 10000.0, 1.25, 0.71, FilterType::HSQ, true },
+    };
+
+    in.params = dsp::transparentBlock();
+    in.params.enableMask = dsp::kEnComp | dsp::kEnTube | dsp::kEnConvolution;
+    in.params.comp.thresholdDb = -18.5f;
+    in.params.comp.ratio = 3.5f;
+    in.params.comp.autoMakeup = true;
+    in.params.reverb.wet = 0.42f;
+    in.params.tube.drive = 4.25f;
+    in.params.tube.bias = 0.35f;
+    in.params.exciter.frequencyHz = 5500.0f;
+    in.params.bass.removeOriginal = true;
+    in.params.width.width = 1.4f;
+    in.params.crossfeed.feedDb = -7.5f;
+    in.params.multiband.lowCrossHz = 180.0f;
+    in.params.multiband.band[1].ratio = 2.5f;
+    in.params.multiband.bandGainDb[2] = -3.5f;
+    in.params.multiband.bandEnabled[1] = false;
+    in.params.convolution.mix = 0.75f;
+    in.params.convolution.trimDb = -2.5f;
+    in.params = dsp::sanitise(in.params);
+
+    in.convolutionFile = QStringLiteral("C:/somewhere/room.wav");
+    in.convolutionName = QStringLiteral("room");
+    in.autoEqSource = QStringLiteral("1Custom SA02 · crinacle");
+
+    QString err;
+    if (!saveDreamPreset(path, in, &err)) {
+        check(false, QStringLiteral("save: %1").arg(err));
+        return;
+    }
+    check(true, QStringLiteral("saved"));
+
+    DreamPreset back;
+    if (!loadDreamPreset(path, &back, &err)) {
+        check(false, QStringLiteral("load: %1").arg(err));
+        return;
+    }
+
+    check(back.name == in.name, QStringLiteral("name survives"));
+    check(back.eqEnabled == in.eqEnabled, QStringLiteral("equalizer enable survives"));
+    check(std::abs(back.eq.preamp - in.eq.preamp) < 1e-9, QStringLiteral("preamp survives"));
+    check(back.eq.bands.size() == in.eq.bands.size(), QStringLiteral("band count survives"));
+
+    bool bandsMatch = back.eq.bands.size() == in.eq.bands.size();
+    for (int i = 0; bandsMatch && i < in.eq.bands.size(); ++i) {
+        const PresetBand &a = in.eq.bands[i];
+        const PresetBand &b = back.eq.bands[i];
+        bandsMatch = a.type == b.type && a.enabled == b.enabled
+                     && std::abs(a.frequency - b.frequency) < 1e-6
+                     && std::abs(a.gainDb - b.gainDb) < 1e-6
+                     && std::abs(a.q - b.q) < 1e-6;
+    }
+    check(bandsMatch, QStringLiteral("every band survives, type and enable included"));
+
+    // The whole effect block, compared as bytes. Anything the serialiser
+    // forgets shows up here rather than as a field nobody thought to check.
+    check(std::memcmp(&in.params, &back.params, sizeof(dsp::ParamBlock)) == 0,
+          QStringLiteral("the effect block round-trips byte for byte"));
+
+    check(back.convolutionFile == in.convolutionFile
+              && back.convolutionName == in.convolutionName,
+          QStringLiteral("the impulse response reference survives"));
+    check(back.autoEqSource == in.autoEqSource, QStringLiteral("the AutoEQ source survives"));
+
+    // A file that is not one of ours has to be refused rather than
+    // half-interpreted.
+    {
+        const QString junk = dir.filePath(QStringLiteral("junk.dreamdsp"));
+        QFile f(junk);
+        f.open(QIODevice::WriteOnly);
+        f.write("{\"format\":\"something-else\"}");
+        f.close();
+        DreamPreset ignored;
+        check(!loadDreamPreset(junk, &ignored, nullptr),
+              QStringLiteral("a foreign file is refused"));
+    }
+}
+
 void testAutostart()
 {
     out() << "\n[autostart]" << Qt::endl;
@@ -611,6 +714,7 @@ int runSelfTest()
     testFft();
     testApoConfig();
     testAutostart();
+    testFullPreset();
     testPresets(apo);
     testAutoEq(apo);
 

@@ -14,8 +14,13 @@ RowLayout {
     // Rebuild the plain array HusSelect wants whenever the store changes.
     property var entries: []
 
+    // Presets that keep everything -- bands, effects, convolution, AutoEQ --
+    // rather than only the bands, which is all the .peace format can hold.
+    property var fullEntries: []
+
     function reload() {
         entries = AppController.presets.entries();
+        fullEntries = AppController.fullPresets();
         // Assigning a model makes ComboBox write currentIndex itself, which
         // breaks any declarative binding on it -- so drive it imperatively,
         // after the model change has settled.
@@ -45,6 +50,7 @@ RowLayout {
     Connections {
         target: AppController
         function onCurrentPresetChanged() { root.syncSelection(); }
+        function onFullPresetsChanged() { root.fullEntries = AppController.fullPresets(); }
     }
 
     HusText {
@@ -55,7 +61,11 @@ RowLayout {
 
     HusSelect {
         id: presetSelect
-        Layout.preferredWidth: 240
+        // Both selects share what is left after the fixed controls, so adding
+        // the full-preset row did not simply push the last button off the edge.
+        Layout.fillWidth: true
+        Layout.minimumWidth: 130
+        Layout.preferredWidth: 200
         model: root.entries
         // Start unselected so the placeholder shows -- otherwise the first
         // preset in the list looks active when nothing has been loaded.
@@ -82,7 +92,7 @@ RowLayout {
 
     HusInput {
         id: nameField
-        Layout.preferredWidth: 160
+        Layout.preferredWidth: 120
         placeholderText: '预设名'
         text: AppController.currentPreset
         onAccepted: saveButton.doSave()
@@ -99,6 +109,54 @@ RowLayout {
                 AppController.savePreset(nameField.text);
         }
         onClicked: doSave()
+    }
+
+    HusDivider {
+        Layout.preferredHeight: 22
+        orientation: Qt.Vertical
+    }
+
+    // The full preset, kept visibly separate from the .peace one. They are not
+    // interchangeable: a .peace file opens in Peace and holds only the bands,
+    // this one holds the whole application and does not.
+    HusSelect {
+        id: fullSelect
+        Layout.fillWidth: true
+        Layout.minimumWidth: 110
+        Layout.preferredWidth: 170
+        model: root.fullEntries
+        textRole: 'name'
+        currentIndex: -1
+        placeholderText: root.fullEntries.length > 0 ? '完整预设…' : '暂无完整预设'
+        onActivated: (index) => {
+            if (index >= 0 && index < root.fullEntries.length)
+                AppController.loadFullPreset(root.fullEntries[index].path);
+        }
+    }
+
+    HusButton {
+        text: '保存全部'
+        enabled: nameField.text.trim().length > 0
+        onClicked: {
+            if (nameField.text.trim().length > 0)
+                AppController.saveFullPreset(nameField.text);
+        }
+
+        HusToolTip {
+            parent: parent
+            visible: parent.hovered
+            text: '保存均衡器、效果、卷积与 AutoEQ 来源的全部设置'
+        }
+    }
+
+    HusIconButton {
+        iconSource: HusIcon.DeleteOutlined
+        enabled: fullSelect.currentIndex >= 0
+                 && fullSelect.currentIndex < root.fullEntries.length
+        onClicked: {
+            if (AppController.deleteFullPreset(root.fullEntries[fullSelect.currentIndex].path))
+                fullSelect.currentIndex = -1;
+        }
     }
 
     HusIconButton {

@@ -48,6 +48,7 @@ qt_add_qml_module(DreamDSP
         src/core/Biquad.h              src/core/Biquad.cpp
         src/core/ApoConfig.h           src/core/ApoConfig.cpp
         src/core/PeacePreset.h         src/core/PeacePreset.cpp
+        src/core/DreamPreset.h         src/core/DreamPreset.cpp
         src/core/AutoEqDatabase.h      src/core/AutoEqDatabase.cpp
         src/core/Fft.h                 src/core/Fft.cpp
         src/core/ImpulseResponse.h     src/core/ImpulseResponse.cpp

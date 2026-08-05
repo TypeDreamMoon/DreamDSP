@@ -9,6 +9,7 @@
 #include "app/ParamPublisher.h"
 #include "app/PresetStore.h"
 #include "core/AutoEqDatabase.h"
+#include "core/DreamPreset.h"
 #include "core/ImpulseResponse.h"
 #include "platform/ApoInstaller.h"
 #include "platform/ApoLocator.h"
@@ -160,6 +161,15 @@ public:
     Q_INVOKABLE bool savePreset(const QString &name);
     Q_INVOKABLE bool deletePreset(int row);
 
+    // A preset that keeps everything, not just the bands: the effect rack, the
+    // convolution and what an AutoEQ import came from. Saved beside the .peace
+    // files rather than instead of them -- .peace still opens in Peace, and
+    // cannot describe any of the rest.
+    Q_INVOKABLE bool saveFullPreset(const QString &name);
+    Q_INVOKABLE bool loadFullPreset(const QString &path);
+    Q_INVOKABLE QVariantList fullPresets() const;
+    Q_INVOKABLE bool deleteFullPreset(const QString &path);
+
     // --- the DreamDSP APO -------------------------------------------------
     //
     // Two separable steps, which is why there are two states rather than one
@@ -293,6 +303,7 @@ signals:
     void convolutionChanged();
     void impulsesChanged();
     void impulseCurveChanged();
+    void fullPresetsChanged();
     void perDeviceChanged();
     void autoEqChanged();
     void hotkeysChanged();
@@ -328,6 +339,8 @@ private:
 
     // The endpoint an APO action applies to: the selected device, or the
     // system default when the "all devices" entry is selected.
+    QString fullPresetPath(const QString &name) const;
+
     QString apoTargetDevice() const;
 
     // Recomputes m_impulseCurve from the selected file.
@@ -343,6 +356,8 @@ private:
     ParamPublisher m_publisher;
 
     QVector<float> m_impulseCurve;
+    // What the last AutoEQ import was, carried into a full preset.
+    QString m_autoEqSource;
     double m_impulseCurveFloor = -30.0;
 
     ApoState m_apoState;

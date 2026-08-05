@@ -36,21 +36,39 @@ dsp::ParamBlock blockFromModels(const CompressorModel *comp,
     // block with the reverb already at wet 0.3.
     dsp::ParamBlock b = dsp::transparentBlock();
 
-    if (comp && comp->enabled()) {
-        b.enableMask |= dsp::kEnComp;
+    // Parameters are carried unconditionally; only the mask depends on whether
+    // an effect is switched on.
+    //
+    // Copying them only for enabled effects seemed harmless -- the APO ignores
+    // the rest -- but this block doubles as the session store, so a disabled
+    // effect's settings were being replaced by the sanitiser's fallbacks and
+    // read back as those on the next launch. Switching an effect off lost
+    // everything you had set on it, and the values it came back with were not
+    // even the model's defaults.
+    if (comp) {
         b.comp = comp->dspParams();
+        if (comp->enabled())
+            b.enableMask |= dsp::kEnComp;
     }
-    if (reverb && reverb->enabled()) {
-        b.enableMask |= dsp::kEnReverb;
+    if (reverb) {
         b.reverb = reverb->dspParams();
+        if (reverb->enabled())
+            b.enableMask |= dsp::kEnReverb;
     }
     if (effects) {
-        if (effects->bassOn())      { b.enableMask |= dsp::kEnBass;      b.bass = effects->bassParams(); }
-        if (effects->exciterOn())   { b.enableMask |= dsp::kEnExciter;   b.exciter = effects->exciterParams(); }
-        if (effects->tubeOn())      { b.enableMask |= dsp::kEnTube;      b.tube = effects->tubeParams(); }
-        if (effects->multibandOn()) { b.enableMask |= dsp::kEnMultiband; b.multiband = effects->multibandParams(); }
-        if (effects->widthOn())     { b.enableMask |= dsp::kEnWidth;     b.width = effects->widthParams(); }
-        if (effects->crossfeedOn()) { b.enableMask |= dsp::kEnCrossfeed; b.crossfeed = effects->crossfeedParams(); }
+        b.bass = effects->bassParams();
+        b.exciter = effects->exciterParams();
+        b.tube = effects->tubeParams();
+        b.multiband = effects->multibandParams();
+        b.width = effects->widthParams();
+        b.crossfeed = effects->crossfeedParams();
+
+        if (effects->bassOn())      b.enableMask |= dsp::kEnBass;
+        if (effects->exciterOn())   b.enableMask |= dsp::kEnExciter;
+        if (effects->tubeOn())      b.enableMask |= dsp::kEnTube;
+        if (effects->multibandOn()) b.enableMask |= dsp::kEnMultiband;
+        if (effects->widthOn())     b.enableMask |= dsp::kEnWidth;
+        if (effects->crossfeedOn()) b.enableMask |= dsp::kEnCrossfeed;
     }
 
     // Carried whether or not it is enabled: the impulse response's identity is
