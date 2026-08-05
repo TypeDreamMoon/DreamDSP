@@ -29,6 +29,12 @@ constexpr DWORD kCoalesceMs = 15;
 
 constexpr ULONGLONG kStatusIntervalMs = 1000;
 
+// The frequency-delay line is sized for this in EffectChain::prepare, so the
+// two have to agree. 64 partitions is 340 ms at 48 kHz and 170 ms at 96 kHz --
+// enough for room, headphone and HRTF correction, which is what convolution is
+// mostly used for; a long reverb tail is truncated rather than refused.
+constexpr uint32_t kMaxPartitions = 64;
+
 // Constant-initialised, at namespace scope, deliberately. A function-local
 // static would emit a guard variable and run its constructor lazily -- under
 // the loader lock if the first call ever happened during DLL initialisation.
@@ -399,7 +405,35 @@ void ParamChannel::rebuildImpulseResponses(const dsp::ParamBlock &block) noexcep
         if (!ready)
             continue;
 
-        const int taps = int(converted[0].size());
+        int taps = int(converted[0].size());
+
+        // Too long for the budget? Shorten it rather than refusing it.
+        //
+        // A user who points at a six-second cathedral gets a shorter
+        // cathedral, which is audibly what they asked for. Refusing gives them
+        // silence and a message, which is not.
+        //
+        // The cut is faded out over its last few milliseconds with a raised
+        // cosine. A hard cut leaves a step in the impulse response, and a step
+        // is broadband -- it would spray a click across the whole spectrum on
+        // every transient.
+        const uint32_t block = dsp::convBlockForRate(double(rate));
+        const int maxTaps = int(kMaxPartitions * block);
+        if (taps > maxTaps) {
+            const int fade = std::min(int(0.005 * double(rate)), maxTaps / 10);
+            for (uint32_t c = 0; c < irChannels; ++c) {
+                converted[c].resize(size_t(maxTaps));
+                for (int i = 0; i < fade; ++i) {
+                    const double t = double(i) / double(fade > 1 ? fade - 1 : 1);
+                    const float w = float(0.5 * (1.0 + std::cos(3.14159265358979323846 * t)));
+                    converted[c][size_t(maxTaps - fade + i)] *= w;
+                }
+                planes[c] = converted[c].data();
+            }
+            trace(L"impulse response truncated taps/to/fade",
+                  uint32_t(taps), uint32_t(maxTaps), uint32_t(fade));
+            taps = maxTaps;
+        }
 
         // Normalised by the energy of the response, so a random file from the
         // internet cannot arrive 30 dB hot. For a system-wide effect where the
@@ -419,11 +453,11 @@ void ParamChannel::rebuildImpulseResponses(const dsp::ParamBlock &block) noexcep
         req.irChannelCount = int(irChannels);
         req.tapCount = taps;
         req.streamChannels = int(channels);
-        req.block = dsp::convBlockForRate(double(rate));
+        req.block = block;
         req.flags = p.flags;
         req.channelMask = owner->channelMask();
         req.wetGain = wetGain;
-        req.maxPartitions = 64;
+        req.maxPartitions = kMaxPartitions;
 
         dsp::ConvKernel *kernel = dsp::buildConvKernel(req);
         if (!kernel) {

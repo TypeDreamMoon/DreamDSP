@@ -73,6 +73,13 @@ class AppController : public QObject
     Q_PROPERTY(bool nativeConvolution READ nativeConvolution NOTIFY convolutionChanged)
     Q_PROPERTY(int impulseCount READ impulseCount NOTIFY impulsesChanged)
 
+    // The selected impulse response's magnitude response, so the user can see
+    // what a file does instead of guessing from its name.
+    Q_PROPERTY(QVector<float> impulseCurve READ impulseCurve NOTIFY impulseCurveChanged)
+    Q_PROPERTY(double impulseCurveFloor READ impulseCurveFloor NOTIFY impulseCurveChanged)
+    Q_PROPERTY(double convolutionMix READ convolutionMix WRITE setConvolutionMix NOTIFY convolutionChanged)
+    Q_PROPERTY(double convolutionTrim READ convolutionTrim WRITE setConvolutionTrim NOTIFY convolutionChanged)
+
     Q_PROPERTY(bool spectrumEnabled READ spectrumEnabled WRITE setSpectrumEnabled NOTIFY spectrumEnabledChanged)
     Q_PROPERTY(QVector<float> spectrum READ spectrum NOTIFY spectrumChanged)
     Q_PROPERTY(bool spectrumLive READ spectrumLive NOTIFY spectrumChanged)
@@ -213,6 +220,13 @@ public:
     // rate, because it converts the file to whatever the endpoint is running
     // at. Otherwise the work falls back to Equalizer APO's Convolution:.
     bool nativeConvolution() const;
+
+    QVector<float> impulseCurve() const { return m_impulseCurve; }
+    double impulseCurveFloor() const { return m_impulseCurveFloor; }
+    double convolutionMix() const { return m_publisher.convolution().mix; }
+    void setConvolutionMix(double v);
+    double convolutionTrim() const { return m_publisher.convolution().trimDb; }
+    void setConvolutionTrim(double v);
     int impulseCount() const { return m_impulses.size(); }
 
     Q_INVOKABLE bool loadImpulses();
@@ -278,6 +292,7 @@ signals:
     void spectrumEnabledChanged();
     void convolutionChanged();
     void impulsesChanged();
+    void impulseCurveChanged();
     void perDeviceChanged();
     void autoEqChanged();
     void hotkeysChanged();
@@ -315,6 +330,9 @@ private:
     // system default when the "all devices" entry is selected.
     QString apoTargetDevice() const;
 
+    // Recomputes m_impulseCurve from the selected file.
+    void refreshImpulseCurve();
+
     // The elevated helper's own account of what went wrong, since it runs
     // hidden and cannot report anything directly.
     QString installLogTail(const QString &fallback) const;
@@ -323,6 +341,9 @@ private:
     ReverbModel m_reverb;
     EffectsModel m_effects;
     ParamPublisher m_publisher;
+
+    QVector<float> m_impulseCurve;
+    double m_impulseCurveFloor = -30.0;
 
     ApoState m_apoState;
     ApoSlot m_apoSlot;

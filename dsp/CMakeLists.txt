@@ -16,6 +16,7 @@ set(DREAMDSP_CORE_SOURCES
     Fft.h                 Fft.cpp
     Convolver.h           Convolver.cpp
     ImpulseBlob.h         ImpulseBlob.cpp
+    ImpulseAnalysis.h     ImpulseAnalysis.cpp
     Resampler.h           Resampler.cpp
     ParamBlock.h          ParamBlock.cpp
     ParamSlots.h

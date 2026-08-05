@@ -13,6 +13,7 @@
 #include "Denormals.h"
 #include "EffectChain.h"
 #include "Fft.h"
+#include "ImpulseAnalysis.h"
 #include "ImpulseBlob.h"
 #include "MultibandCompressor.h"
 #include "ParamBlock.h"
@@ -1292,6 +1293,93 @@ void testConvolver()
     }
 }
 
+// ------------------------------------------------------------ impulse analysis
+
+void testImpulseAnalysis()
+{
+    std::printf("\n[impulse analysis]\n");
+
+    constexpr double sr = 48000.0;
+    const int taps = 8192;
+
+    // The impulse response of a filter whose magnitude response is known in
+    // closed form, so the measured curve has something exact to be wrong
+    // against.
+    auto responseOf = [&](BiquadFilter::Kind kind, double freq, double q, double gainDb) {
+        BiquadFilter f;
+        f.design(kind, freq, q, gainDb, sr);
+        f.reset();
+        std::vector<float> ir(size_t(taps), 0.0f);
+        ir[0] = f.process(1.0f);
+        for (int i = 1; i < taps; ++i)
+            ir[size_t(i)] = f.process(0.0f);
+        return ir;
+    };
+
+    // A flat filter must measure flat.
+    {
+        std::vector<float> ir(size_t(taps), 0.0f);
+        ir[0] = 1.0f;
+        const ImpulseCurve c = impulseMagnitudeResponse(ir.data(), taps, sr);
+        float worst = 0.0f;
+        for (float v : c.magnitudeDb)
+            worst = std::max(worst, std::fabs(v));
+        check(c.valid() && worst < 0.05f,
+              fmt("a bare impulse measures flat (worst %.3f dB)", double(worst)));
+    }
+
+    // A peaking filter must show its peak at the right frequency and height.
+    {
+        const std::vector<float> ir = responseOf(BiquadFilter::Kind::Peak, 1000.0, 2.0, 9.0);
+        const ImpulseCurve c = impulseMagnitudeResponse(ir.data(), taps, sr, 512);
+
+        // Referred to the peak, so the peak itself is 0 dB and the flat parts
+        // sit at -9. Find where the maximum is.
+        int peakAt = 0;
+        for (size_t i = 0; i < c.magnitudeDb.size(); ++i)
+            if (c.magnitudeDb[i] > c.magnitudeDb[size_t(peakAt)])
+                peakAt = int(i);
+        const double t = double(peakAt) / double(c.magnitudeDb.size() - 1);
+        const double hz = c.minFreqHz * std::pow(double(c.maxFreqHz) / c.minFreqHz, t);
+        check(std::fabs(hz - 1000.0) < 60.0,
+              fmt("a 1 kHz peak is measured at %.0f Hz", hz));
+
+        // Well below the peak the response is flat, and 9 dB down from it.
+        const double lowT = std::log(100.0 / c.minFreqHz)
+                            / std::log(double(c.maxFreqHz) / c.minFreqHz);
+        const int lowAt = int(lowT * double(c.magnitudeDb.size() - 1));
+        check(std::fabs(double(c.magnitudeDb[size_t(lowAt)]) + 9.0) < 0.6,
+              fmt("100 Hz sits %.2f dB below the peak (want -9)",
+                  double(c.magnitudeDb[size_t(lowAt)])));
+    }
+
+    // A high shelf must be low at the bottom and flat at the top.
+    {
+        const std::vector<float> ir =
+            responseOf(BiquadFilter::Kind::HighShelf, 4000.0, 0.707, 12.0);
+        const ImpulseCurve c = impulseMagnitudeResponse(ir.data(), taps, sr, 512);
+        check(c.magnitudeDb.front() < -10.0f && c.magnitudeDb.back() > -0.5f,
+              fmt("a +12 dB high shelf runs from %.1f dB to %.1f dB",
+                  double(c.magnitudeDb.front()), double(c.magnitudeDb.back())));
+    }
+
+    // Two identical channels must measure the same as one.
+    {
+        const std::vector<float> one = responseOf(BiquadFilter::Kind::Peak, 2000.0, 1.0, 6.0);
+        std::vector<float> two(one.size() * 2, 0.0f);
+        std::copy(one.begin(), one.end(), two.begin());
+        std::copy(one.begin(), one.end(), two.begin() + long(one.size()));
+
+        const ImpulseCurve a = impulseMagnitudeResponse(one.data(), taps, sr, 256);
+        const ImpulseCurve b = impulseMagnitudeResponsePlanar(two.data(), taps, 2, sr, 256);
+        double worst = 0.0;
+        for (size_t i = 0; i < a.magnitudeDb.size(); ++i)
+            worst = std::max(worst, double(std::fabs(a.magnitudeDb[i] - b.magnitudeDb[i])));
+        check(worst < 1e-3,
+              fmt("a duplicated channel measures identically (worst %.2e dB)", worst));
+    }
+}
+
 // -------------------------------------------------------- impulse blob format
 
 void testImpulseBlob()
@@ -1702,6 +1790,7 @@ int runTests()
     testFft();
     testResampler();
     testConvolver();
+    testImpulseAnalysis();
     testImpulseBlob();
     testParamBlock();
     testTransparency();

@@ -68,6 +68,7 @@ qt_add_qml_module(DreamDSP
         src/app/SelfTest.h             src/app/SelfTest.cpp
         src/ui/ResponseCurveItem.h     src/ui/ResponseCurveItem.cpp
         src/ui/TransferCurveItem.h     src/ui/TransferCurveItem.cpp
+        src/ui/ImpulseCurveItem.h      src/ui/ImpulseCurveItem.cpp
         src/app/CompressorModel.h      src/app/CompressorModel.cpp
         src/app/ReverbModel.h          src/app/ReverbModel.cpp
         src/app/OfflineRender.h        src/app/OfflineRender.cpp

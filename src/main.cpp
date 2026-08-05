@@ -6,6 +6,7 @@
 #include <QQuickWindow>
 #include <QStringList>
 #include <QTextStream>
+#include <QLoggingCategory>
 #include <QTimer>
 
 #include "app/AppController.h"
@@ -38,6 +39,25 @@ void attachConsoleIfNeeded()
         freopen_s(&dummy, "CONOUT$", "w", stdout);
         freopen_s(&dummy, "CONOUT$", "w", stderr);
     }
+}
+
+// Qt's default handler sends messages to OutputDebugString in a WIN32-subsystem
+// application, not to stderr. That means a QML error -- the single most likely
+// reason a diagnostic run produces nothing -- is invisible unless a debugger is
+// attached. Redirecting them costs nothing and turns "it exited with no output"
+// into an actual message.
+void logToStderr(QtMsgType type, const QMessageLogContext &, const QString &text)
+{
+    const char *level = "";
+    switch (type) {
+    case QtDebugMsg:    level = "debug"; break;
+    case QtInfoMsg:     level = "info"; break;
+    case QtWarningMsg:  level = "warning"; break;
+    case QtCriticalMsg: level = "critical"; break;
+    case QtFatalMsg:    level = "fatal"; break;
+    }
+    std::fprintf(stderr, "[qt %s] %s\n", level, text.toLocal8Bit().constData());
+    std::fflush(stderr);
 }
 
 } // namespace
@@ -134,6 +154,9 @@ int main(int argc, char *argv[])
     const bool diagnostic = wantSelfTest || wantSliderTest
                             || args.contains(QStringLiteral("--grab"))
                             || args.contains(QStringLiteral("--applyir"));
+
+    if (diagnostic || args.contains(QStringLiteral("--playtone")))
+        qInstallMessageHandler(logToStderr);
 
     dreamdsp::SingleInstance instance;
     if (!diagnostic && !instance.acquire())

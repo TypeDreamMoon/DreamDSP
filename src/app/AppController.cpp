@@ -1,5 +1,8 @@
 #include "app/AppController.h"
 
+#include "ImpulseAnalysis.h"
+#include "WavFile.h"
+
 #include "core/ApoConfig.h"
 #include "platform/Autostart.h"
 
@@ -116,6 +119,7 @@ AppController::AppController(QObject *parent)
     // QSettings -- the blob is content-addressed and does not carry one.
     m_convolutionEnabled = m_publisher.convolutionEnabled();
     m_publisher.publishNow();
+    refreshImpulseCurve();
 
     // Make sure our include file exists from the start; it is inert until the
     // user engages it, so this cannot change what they hear.
@@ -724,6 +728,53 @@ QVariantList AppController::searchImpulses(const QString &needle, int limit)
     return out;
 }
 
+void AppController::setConvolutionMix(double v)
+{
+    m_publisher.setConvolutionMix(v);
+    emit convolutionChanged();
+}
+
+void AppController::setConvolutionTrim(double v)
+{
+    m_publisher.setConvolutionTrimDb(v);
+    emit convolutionChanged();
+}
+
+// Measures what the selected impulse response does to the spectrum.
+//
+// Runs on the GUI thread on purpose. A transform of a few tens of thousands of
+// points takes single-digit milliseconds, and it happens once per selection --
+// pushing it onto a worker would buy nothing and cost a synchronisation
+// problem.
+void AppController::refreshImpulseCurve()
+{
+    m_impulseCurve.clear();
+
+    if (!m_convolution.path.isEmpty()) {
+        dsp::WavData wav;
+        std::string err;
+        if (dsp::readWav(m_convolution.path.toStdString(), &wav, &err)
+            && wav.frames() > 0 && wav.channelCount() > 0) {
+            // Planar, contiguous, which is what the analyser wants.
+            std::vector<float> planar(size_t(wav.frames()) * wav.channelCount(), 0.0f);
+            for (int c = 0; c < wav.channelCount(); ++c) {
+                std::copy(wav.channels[size_t(c)].begin(), wav.channels[size_t(c)].end(),
+                          planar.begin() + qsizetype(c) * wav.frames());
+            }
+            const dsp::ImpulseCurve curve = dsp::impulseMagnitudeResponsePlanar(
+                planar.data(), wav.frames(), wav.channelCount(), wav.sampleRate, 256);
+            if (curve.valid()) {
+                m_impulseCurve.reserve(int(curve.magnitudeDb.size()));
+                for (float v : curve.magnitudeDb)
+                    m_impulseCurve.append(v);
+                m_impulseCurveFloor = curve.suggestedFloorDb;
+            }
+        }
+    }
+
+    emit impulseCurveChanged();
+}
+
 bool AppController::applyImpulseFile(const QString &path)
 {
     ImpulseResponse ir;
@@ -771,6 +822,7 @@ bool AppController::selectImpulse(int index)
         setMessage(QStringLiteral("已应用卷积「%1」").arg(m_convolution.name));
     }
 
+    refreshImpulseCurve();
     emit convolutionChanged();
     emit generatedTextChanged();
     scheduleWrite();
@@ -782,6 +834,7 @@ void AppController::clearConvolution()
     m_convolution = ImpulseResponse{};
     m_convolutionEnabled = false;
     m_publisher.clearImpulse();
+    refreshImpulseCurve();
     emit convolutionChanged();
     emit generatedTextChanged();
     scheduleWrite();

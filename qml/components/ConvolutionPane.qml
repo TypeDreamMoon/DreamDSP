@@ -101,6 +101,108 @@ Item {
             }
         }
 
+        // ----------------------------------------------- what the file does
+        //
+        // Several hundred impulse responses whose names are things like
+        // "Jazz Club" or "01.Acoustic" cannot be chosen between by name. The
+        // curve says in one glance what the name does not.
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 6
+            visible: AppController.impulseCurve.length > 0
+
+            HusText {
+                text: '频响曲线'
+                font.pixelSize: 12
+                font.weight: Font.DemiBold
+                opacity: 0.75
+            }
+
+            ImpulseCurveItem {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 140
+                curve: AppController.impulseCurve
+                floorDb: AppController.impulseCurveFloor
+                curveColor: HusTheme.Primary.colorPrimary
+                gridColor: HusTheme.isDark ? Qt.rgba(1, 1, 1, 0.08)
+                                           : Qt.rgba(0, 0, 0, 0.08)
+                labelColor: HusTheme.Primary.colorTextQuaternary
+            }
+
+            HusText {
+                Layout.fillWidth: true
+                text: '相对自身峰值,纵轴 0 至 ' + Math.round(AppController.impulseCurveFloor)
+                      + ' dB(按曲线自动取范围)。电平由程序自动归一化,这里只看形状。'
+                font.pixelSize: 10
+                opacity: 0.45
+                wrapMode: Text.WordWrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: 4
+                spacing: 12
+                enabled: AppController.nativeConvolution
+
+                HusText {
+                    text: '干湿比'
+                    font.pixelSize: 12
+                    Layout.preferredWidth: 48
+                }
+                Fader {
+                    Layout.fillWidth: true
+                    min: 0
+                    max: 1
+                    stepSize: 0.01
+                    value: AppController.convolutionMix
+                    onFirstMoved: AppController.convolutionMix = currentValue
+                }
+                HusText {
+                    text: Math.round(AppController.convolutionMix * 100) + '%'
+                    font.pixelSize: 11
+                    opacity: 0.6
+                    Layout.preferredWidth: 44
+                    horizontalAlignment: Text.AlignRight
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                enabled: AppController.nativeConvolution
+
+                HusText {
+                    text: '增益'
+                    font.pixelSize: 12
+                    Layout.preferredWidth: 48
+                }
+                Fader {
+                    Layout.fillWidth: true
+                    min: -24
+                    max: 12
+                    stepSize: 0.5
+                    value: AppController.convolutionTrim
+                    onFirstMoved: AppController.convolutionTrim = currentValue
+                }
+                HusText {
+                    text: AppController.convolutionTrim.toFixed(1) + ' dB'
+                    font.pixelSize: 11
+                    opacity: 0.6
+                    Layout.preferredWidth: 44
+                    horizontalAlignment: Text.AlignRight
+                }
+            }
+
+            HusText {
+                Layout.fillWidth: true
+                visible: !AppController.nativeConvolution
+                text: '干湿比与增益需要 DreamDSP 音频组件 —— Equalizer APO 的卷积没有这两个参数。'
+                font.pixelSize: 10
+                opacity: 0.5
+                wrapMode: Text.WordWrap
+            }
+        }
+
         // ------------------------------------------------------------ search
         RowLayout {
             Layout.fillWidth: true
