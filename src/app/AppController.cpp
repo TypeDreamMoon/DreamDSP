@@ -111,6 +111,10 @@ AppController::AppController(QObject *parent)
     // go backwards. Then publish once, so a fresh audiodg has something to read
     // even if the user never touches a control.
     m_publisher.load();
+    // params.bin is what the APO is actually running, so it wins over the
+    // QSettings copy for the switch's position. The file name still comes from
+    // QSettings -- the blob is content-addressed and does not carry one.
+    m_convolutionEnabled = m_publisher.convolutionEnabled();
     m_publisher.publishNow();
 
     // Make sure our include file exists from the start; it is inert until the
@@ -128,6 +132,9 @@ AppController::~AppController()
         m_writeTimer.stop();
         writeNow();
     }
+    // The same reasoning for the parameter channel: a slider moved in the last
+    // 30 ms would otherwise be lost, and it is the session store as well.
+    m_publisher.publishNow();
     saveSession();
 }
 
@@ -277,7 +284,10 @@ QString AppController::generatedText() const
         return out;
     }
 
-    const QString conv = (m_convolutionEnabled && !m_convolution.path.isEmpty())
+    // Nothing goes into Equalizer APO's config when DreamDSP is convolving it
+    // itself -- doing both would apply the impulse response twice.
+    const QString conv = (m_convolutionEnabled && !m_convolution.path.isEmpty()
+                          && !nativeConvolution())
                              ? m_convolution.path
                              : QString();
 
@@ -646,8 +656,23 @@ void AppController::quitApplication()
 
 // -------------------------------------------------------------- convolution
 
+bool AppController::nativeConvolution() const
+{
+    // DreamDSP convolves it itself whenever its own processing object is
+    // actually in this endpoint's chain. Otherwise the work has to be handed to
+    // Equalizer APO, which is the fallback rather than the default because its
+    // Convolution: command requires the file to be at exactly the device rate
+    // and is silently wrong when it is not.
+    return m_apoState.installed() && m_apoSlot.isOurs;
+}
+
 bool AppController::rateMismatch() const
 {
+    // Meaningless once DreamDSP is doing the convolution: the impulse response
+    // is converted to whatever rate the endpoint is running at, inside the APO,
+    // which is the point of doing it ourselves.
+    if (nativeConvolution())
+        return false;
     // Only meaningful once both rates are known; an unreadable impulse
     // response (flac/ogg) reports rate 0 and cannot be pre-checked.
     return m_convolution.sampleRate > 0 && m_deviceRate > 0
@@ -699,6 +724,17 @@ QVariantList AppController::searchImpulses(const QString &needle, int limit)
     return out;
 }
 
+bool AppController::applyImpulseFile(const QString &path)
+{
+    ImpulseResponse ir;
+    if (!readWaveHeader(path, &ir)) {
+        setError(QStringLiteral("无法读取 %1").arg(path));
+        return false;
+    }
+    m_impulses.append(ir);
+    return selectImpulse(int(m_impulses.size()) - 1);
+}
+
 bool AppController::selectImpulse(int index)
 {
     if (index < 0 || index >= m_impulses.size())
@@ -707,17 +743,37 @@ bool AppController::selectImpulse(int index)
     m_convolution = m_impulses.at(index);
     m_convolutionEnabled = true;
 
-    emit convolutionChanged();
-    emit generatedTextChanged();
-    scheduleWrite();
-
-    if (rateMismatch()) {
-        setError(QStringLiteral("采样率不匹配:该脉冲响应是 %1 Hz,设备是 %2 Hz —— APO 要求两者一致,卷积不会正确工作")
+    if (nativeConvolution()) {
+        // Hand the samples to our own engine. The file goes across at its own
+        // rate; the APO converts it to whatever the endpoint is running at.
+        // Set first: publishImpulse writes params.bin straight away, and a
+        // scheduled enable arriving 30 ms later would miss that write -- and
+        // never happen at all if the process exits in between.
+        m_publisher.setConvolutionEnabled(true);
+        QString err;
+        if (!m_publisher.publishImpulse(m_convolution.path, &err)) {
+            m_convolutionEnabled = false;
+            emit convolutionChanged();
+            m_publisher.setConvolutionEnabled(false);
+            setError(QStringLiteral("无法使用「%1」:%2").arg(m_convolution.name, err));
+            return false;
+        }
+        setError({});
+        setMessage(QStringLiteral("已应用卷积「%1」(%2 Hz,将自动重采样到设备速率)")
+                       .arg(m_convolution.name)
+                       .arg(m_convolution.sampleRate));
+    } else if (rateMismatch()) {
+        setError(QStringLiteral("采样率不匹配:该脉冲响应是 %1 Hz,设备是 %2 Hz —— "
+                                "Equalizer APO 要求两者一致。装上 DreamDSP 音频组件即可任意采样率")
                      .arg(m_convolution.sampleRate).arg(m_deviceRate));
     } else {
         setError({});
         setMessage(QStringLiteral("已应用卷积「%1」").arg(m_convolution.name));
     }
+
+    emit convolutionChanged();
+    emit generatedTextChanged();
+    scheduleWrite();
     return true;
 }
 
@@ -725,6 +781,7 @@ void AppController::clearConvolution()
 {
     m_convolution = ImpulseResponse{};
     m_convolutionEnabled = false;
+    m_publisher.clearImpulse();
     emit convolutionChanged();
     emit generatedTextChanged();
     scheduleWrite();
@@ -736,6 +793,7 @@ void AppController::setConvolutionEnabled(bool on)
     if (m_convolutionEnabled == on)
         return;
     m_convolutionEnabled = on;
+    m_publisher.setConvolutionEnabled(on);
     emit convolutionChanged();
     emit generatedTextChanged();
     scheduleWrite();

@@ -130,7 +130,12 @@ void OfflineRender::renderUrl(const QUrl &url)
 
     // Built by the same function the publisher uses, so the preview cannot be
     // assembled differently from what is sent to audiodg.
-    job.params = blockFromModels(m_compressor, m_reverb, m_effects);
+    // Convolution is deliberately left out of the preview: the impulse
+    // response is chosen against a live endpoint and converted to that
+    // endpoint's rate inside the APO, which an offline render of an arbitrary
+    // file has no equivalent of.
+    job.params = blockFromModels(m_compressor, m_reverb, m_effects,
+                                 dsp::Convolution::Params{}, false);
 
     if (!job.anything()) {
         setStatus(QStringLiteral("没有启用任何效果 —— 先打开一个"), true);

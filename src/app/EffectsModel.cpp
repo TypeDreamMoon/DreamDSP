@@ -65,4 +65,23 @@ void EffectsModel::setCrossfeedLevel(double v)  { if (put(m_crossfeed.feedDb, v,
 void EffectsModel::setLowCross(double v)  { if (put(m_multiband.lowCrossHz, v, 60.0, 800.0))     emit changed(); }
 void EffectsModel::setHighCross(double v) { if (put(m_multiband.highCrossHz, v, 1000.0, 12000.0)) emit changed(); }
 
+void EffectsModel::restore(const dsp::ParamBlock &b)
+{
+    m_tube = b.tube;
+    m_bass = b.bass;
+    m_exciter = b.exciter;
+    m_width = b.width;
+    m_crossfeed = b.crossfeed;
+    m_multiband = b.multiband;
+
+    m_tubeEnabled = (b.enableMask & dsp::kEnTube) != 0;
+    m_bassEnabled = (b.enableMask & dsp::kEnBass) != 0;
+    m_exciterEnabled = (b.enableMask & dsp::kEnExciter) != 0;
+    m_widthEnabled = (b.enableMask & dsp::kEnWidth) != 0;
+    m_crossfeedEnabled = (b.enableMask & dsp::kEnCrossfeed) != 0;
+    m_multibandEnabled = (b.enableMask & dsp::kEnMultiband) != 0;
+
+    emit changed();
+}
+
 } // namespace dreamdsp

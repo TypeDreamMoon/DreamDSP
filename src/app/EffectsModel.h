@@ -4,6 +4,7 @@
 #include <QtQml/qqmlregistration.h>
 
 #include "MultibandCompressor.h"
+#include "ParamBlock.h"
 #include "Saturation.h"
 #include "Stereo.h"
 
@@ -99,6 +100,11 @@ public:
     dsp::StereoWidener::Params widthParams() const      { return m_width; }
     dsp::Crossfeed::Params crossfeedParams() const      { return m_crossfeed; }
     dsp::MultibandCompressor::Params multibandParams() const { return m_multiband; }
+
+    // Bulk restore, for reloading a saved session. Takes the whole block
+    // because the enable bits live in its mask rather than beside each set of
+    // parameters.
+    void restore(const dsp::ParamBlock &b);
 
 signals:
     void changed();

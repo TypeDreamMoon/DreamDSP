@@ -76,11 +76,21 @@ Item {
                         opacity: 0.6
                         color: AppController.rateMismatch ? HusTheme.Primary.colorError
                                                           : HusTheme.Primary.colorTextBase
-                        text: AppController.rateMismatch
-                              ? '⚠ 采样率不匹配:脉冲响应 ' + AppController.convolutionRate
-                                + ' Hz,设备 ' + AppController.deviceRate
-                                + ' Hz。APO 要求两者一致,否则卷积不会正确工作。'
-                              : AppController.convolutionRate + ' Hz · 与设备一致'
+                        text: {
+                            if (AppController.nativeConvolution) {
+                                var same = AppController.convolutionRate === AppController.deviceRate;
+                                return AppController.convolutionRate + ' Hz'
+                                       + (same ? ' · 与设备一致'
+                                               : ' → 自动重采样到 ' + AppController.deviceRate + ' Hz')
+                                       + ' · 由 DreamDSP 卷积';
+                            }
+                            if (AppController.rateMismatch) {
+                                return '⚠ 采样率不匹配:脉冲响应 ' + AppController.convolutionRate
+                                       + ' Hz,设备 ' + AppController.deviceRate
+                                       + ' Hz。Equalizer APO 要求两者一致 —— 安装 DreamDSP 音频组件即可任意采样率。';
+                            }
+                            return AppController.convolutionRate + ' Hz · 与设备一致 · 由 Equalizer APO 卷积';
+                        }
                     }
                 }
 
@@ -176,11 +186,12 @@ Item {
                         opacity: 0.5
                     }
 
-                    // Wrong sample rate for the current device: APO would load
-                    // it but the result is not what the file describes.
+                    // Only a problem when Equalizer APO is doing the work: it
+                    // would load the file but produce something other than what
+                    // the file describes. DreamDSP converts it instead.
                     HusTag {
                         text: '采样率不符'
-                        visible: row.modelData.mismatch
+                        visible: row.modelData.mismatch && !AppController.nativeConvolution
                         colorText: HusTheme.Primary.colorError
                     }
 

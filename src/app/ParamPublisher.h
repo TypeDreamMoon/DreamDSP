@@ -23,7 +23,9 @@ namespace dreamdsp {
 // divergence this design is trying to prevent.
 dsp::ParamBlock blockFromModels(const CompressorModel *comp,
                                 const ReverbModel *reverb,
-                                const EffectsModel *effects);
+                                const EffectsModel *effects,
+                                const dsp::Convolution::Params &convolution,
+                                bool convolutionEnabled);
 
 // Publishes parameters to the copy of the DSP running inside audiodg.exe, and
 // reads back what that copy says it is doing.
@@ -43,6 +45,36 @@ public:
 
     // The models to read. Not owned.
     void setSources(CompressorModel *comp, ReverbModel *reverb, EffectsModel *effects);
+
+    // Decodes an impulse response file, writes it into the control directory as
+    // a content-addressed blob, and returns the parameters that name it.
+    //
+    // The blob is committed before the parameters that reference it ever
+    // reach disk, and it is named after a hash of its own samples -- so the two
+    // files can never describe different impulse responses, however they
+    // interleave, and a leftover from a previous run cannot masquerade as the
+    // current one.
+    //
+    // No resampling happens here. The file goes across at its own rate and the
+    // APO converts it, because only the APO knows what rate the endpoint is
+    // actually running at.
+    bool publishImpulse(const QString &wavPath, QString *error);
+
+    // Forgets the current impulse response. Does not delete the blob: another
+    // endpoint may still be using it, and they are small and content-addressed.
+    void clearImpulse();
+
+    // What the convolution stage should be told. Enabled is separate from
+    // configured: an impulse response can be loaded and switched off.
+    void setConvolutionEnabled(bool on);
+    void setConvolutionMix(double mix);
+    void setConvolutionTrimDb(double db);
+
+    const dsp::Convolution::Params &convolution() const { return m_convolution; }
+    bool convolutionEnabled() const { return m_convolutionEnabled; }
+    QString impulseName() const { return m_impulseName; }
+
+    static QString impulseDirectory();
 
     // Coalesces a burst of slider movement into one write. Safe to call from
     // every valueChanged.
@@ -82,6 +114,10 @@ private:
     QTimer m_statusTimer;
 
     quint32 m_generation = 0;
+    dsp::Convolution::Params m_convolution;
+    bool m_convolutionEnabled = false;
+    QString m_impulseName;
+
     dsp::StatusBlock m_status{};
     bool m_statusFresh = false;
     QString m_lastError;

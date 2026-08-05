@@ -48,6 +48,9 @@ public:
     // For handing a copy to a worker thread.
     dsp::Reverb::Params dspParams() const { return m_p; }
 
+    // Bulk restore, for reloading a saved session.
+    void restore(const dsp::Reverb::Params &p, bool enabled);
+
 signals:
     void paramsChanged();
 

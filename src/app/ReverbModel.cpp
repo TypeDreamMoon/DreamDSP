@@ -45,4 +45,11 @@ void ReverbModel::setWidth(double v)     { if (assign(m_p.width, v, 0.0, 1.0))  
 void ReverbModel::setWet(double v)       { if (assign(m_p.wet, v, 0.0, 1.0))         emit paramsChanged(); }
 void ReverbModel::setDry(double v)       { if (assign(m_p.dry, v, 0.0, 1.0))         emit paramsChanged(); }
 
+void ReverbModel::restore(const dsp::Reverb::Params &p, bool enabled)
+{
+    m_p = p;
+    m_enabled = enabled;
+    emit paramsChanged();
+}
+
 } // namespace dreamdsp

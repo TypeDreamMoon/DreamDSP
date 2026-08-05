@@ -70,6 +70,7 @@ class AppController : public QObject
     Q_PROPERTY(int convolutionRate READ convolutionRate NOTIFY convolutionChanged)
     Q_PROPERTY(int deviceRate READ deviceRate NOTIFY convolutionChanged)
     Q_PROPERTY(bool rateMismatch READ rateMismatch NOTIFY convolutionChanged)
+    Q_PROPERTY(bool nativeConvolution READ nativeConvolution NOTIFY convolutionChanged)
     Q_PROPERTY(int impulseCount READ impulseCount NOTIFY impulsesChanged)
 
     Q_PROPERTY(bool spectrumEnabled READ spectrumEnabled WRITE setSpectrumEnabled NOTIFY spectrumEnabledChanged)
@@ -203,14 +204,25 @@ public:
     int convolutionRate() const { return m_convolution.sampleRate; }
     int deviceRate() const { return m_deviceRate; }
     // APO requires the impulse response to be at the device's sample rate.
-    // A mismatch is silently wrong rather than an error, so it is surfaced.
+    // A mismatch is silently wrong rather than an error, so it is surfaced --
+    // but only when Equalizer APO is the one doing the convolution.
     bool rateMismatch() const;
+
+    // True when DreamDSP's own processing object is in this endpoint's chain,
+    // and therefore convolving the impulse response itself -- at any sample
+    // rate, because it converts the file to whatever the endpoint is running
+    // at. Otherwise the work falls back to Equalizer APO's Convolution:.
+    bool nativeConvolution() const;
     int impulseCount() const { return m_impulses.size(); }
 
     Q_INVOKABLE bool loadImpulses();
     // [{ index, name, category, rate, channels, ms, ok }]
     Q_INVOKABLE QVariantList searchImpulses(const QString &needle, int limit = 200);
     Q_INVOKABLE bool selectImpulse(int index);
+    // Applies an impulse response by path rather than by list position, so a
+    // file outside the scanned directories can be used -- and so the whole
+    // publish-and-load path can be exercised from the command line.
+    Q_INVOKABLE bool applyImpulseFile(const QString &path);
     Q_INVOKABLE void clearConvolution();
 
     // --- spectrum ---------------------------------------------------------

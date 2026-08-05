@@ -124,13 +124,16 @@ int main(int argc, char *argv[])
 
     const bool wantSelfTest = args.contains(QStringLiteral("--selftest"));
     const bool wantSliderTest = args.contains(QStringLiteral("--slidertest"));
-    if (wantSelfTest || wantSliderTest || args.contains(QStringLiteral("--playtone")))
+    if (wantSelfTest || wantSliderTest || args.contains(QStringLiteral("--playtone"))
+        || args.contains(QStringLiteral("--applyir"))) {
         attachConsoleIfNeeded();
+    }
 
     // Diagnostic runs deliberately bypass the single-instance guard so they can
     // be used while a normal copy is running.
     const bool diagnostic = wantSelfTest || wantSliderTest
-                            || args.contains(QStringLiteral("--grab"));
+                            || args.contains(QStringLiteral("--grab"))
+                            || args.contains(QStringLiteral("--applyir"));
 
     dreamdsp::SingleInstance instance;
     if (!diagnostic && !instance.acquire())
@@ -219,6 +222,26 @@ int main(int argc, char *argv[])
                 const int viewAt = args.indexOf(QStringLiteral("--view"));
                 if (viewAt >= 0 && viewAt + 1 < args.size())
                     root->setProperty("page", args.at(viewAt + 1).toInt());
+
+                // --applyir <wav> selects an impulse response and exits, so
+                // the whole publish-convert-install path can be exercised
+                // without driving the interface -- and so a support request
+                // can be reproduced from a command line.
+                const int irAt = args.indexOf(QStringLiteral("--applyir"));
+                if (irAt >= 0 && irAt + 1 < args.size()) {
+                    const QString irPath = args.at(irAt + 1);
+                    QTimer::singleShot(300, &app, [controller, irPath, leave] {
+                        if (controller) {
+                            const bool ok = controller->applyImpulseFile(irPath);
+                            std::printf("%s: %s\n", ok ? "applied" : "failed",
+                                        controller->lastError().isEmpty()
+                                            ? controller->lastMessage().toLocal8Bit().constData()
+                                            : controller->lastError().toLocal8Bit().constData());
+                            std::fflush(stdout);
+                        }
+                        leave();
+                    });
+                }
 
                 // --spectrum turns the analyser on before the grab, so a
                 // screenshot can show it with audio actually playing.

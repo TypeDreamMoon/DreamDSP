@@ -76,6 +76,10 @@ public:
     // For handing a copy to a worker thread.
     dsp::Compressor::Params dspParams() const { return m_p; }
 
+    // Bulk restore, for reloading a saved session. One signal rather than a
+    // dozen, so nothing downstream sees a half-restored state.
+    void restore(const dsp::Compressor::Params &p, bool enabled);
+
 signals:
     void paramsChanged();
 

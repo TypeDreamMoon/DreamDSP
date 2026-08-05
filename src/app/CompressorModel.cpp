@@ -86,4 +86,11 @@ double CompressorModel::outputFor(double inputDb) const
     return m_comp.outputForInputDb(float(inputDb));
 }
 
+void CompressorModel::restore(const dsp::Compressor::Params &p, bool enabled)
+{
+    m_p = p;
+    m_enabled = enabled;
+    emit paramsChanged();
+}
+
 } // namespace dreamdsp
