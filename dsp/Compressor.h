@@ -55,6 +55,7 @@ public:
     float effectiveKneeDb() const;
     float effectiveMakeupDb() const;
 
+
 private:
     float computeReductionDb(float inputDb) const;   // >= 0, amount to subtract
     void updateAdaptiveTimes(float inputDb);

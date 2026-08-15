@@ -90,7 +90,14 @@ void CompressorModel::restore(const dsp::Compressor::Params &p, bool enabled)
 {
     m_p = p;
     m_enabled = enabled;
-    emit paramsChanged();
+    // apply(), not a bare signal: the DSP object has to be told too.
+    //
+    // Without it the model's parameters and m_comp's disagree, and everything
+    // derived from m_comp keeps answering from the old ones -- the transfer
+    // curve, and the resolved knee and makeup shown while the automatic modes
+    // are on. Those are the only place those numbers exist, so a restore
+    // looked exactly like the settings had been lost.
+    apply();
 }
 
 } // namespace dreamdsp

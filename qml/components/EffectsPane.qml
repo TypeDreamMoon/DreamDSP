@@ -38,6 +38,9 @@ Item {
         property bool autoMode: false
         property bool hasAuto: false
         property real autoValue: 0
+        // Shown instead of a number while the automatic mode is on, for the
+        // parameters whose resolved value this process genuinely cannot know.
+        property string autoText: ''
 
         signal edited(real v)
         signal autoToggled(bool on)
@@ -68,8 +71,10 @@ Item {
             horizontalAlignment: Text.AlignRight
             font.pixelSize: 12
             opacity: prow.autoMode ? 0.55 : 0.9
-            text: (prow.autoMode ? prow.autoValue : prow.value).toFixed(prow.decimals)
-                  + ' ' + prow.unit
+            text: (prow.autoMode && prow.autoText !== '')
+                  ? prow.autoText
+                  : (prow.autoMode ? prow.autoValue : prow.value).toFixed(prow.decimals)
+                    + ' ' + prow.unit
         }
 
         HusButton {
@@ -129,16 +134,19 @@ Item {
                     spacing: 8
 
                     HusTag {
-                        text: '尚未接入系统音频'
-                        presetColor: '#d48806'
+                        text: AppController.apoAttached ? '已接入系统音频' : '尚未接入系统音频'
+                        presetColor: AppController.apoAttached ? '#389e0d' : '#d48806'
                     }
                     HusText {
                         Layout.fillWidth: true
                         wrapMode: Text.WordWrap
                         font.pixelSize: 12
                         opacity: 0.85
-                        text: '下面的开关只改参数,不会影响你正在听的声音 —— Equalizer APO 的配置语言'
-                              + '无法表达非线性处理,宿主方案待定。DSP 本身已实现并通过离线验证。'
+                        text: AppController.apoAttached
+                              ? '下面的改动会实时作用到系统里所有声音上,约 100 ms 内到位。'
+                                + AppController.apoStatusText
+                              : '下面的开关只改参数,不会影响你正在听的声音 —— DreamDSP 的音频组件'
+                                + '还没接入这台设备。到「设置 → 系统音效」安装并接入即可。'
                     }
                 }
 
@@ -215,14 +223,14 @@ Item {
                     ParamRow {
                         label: '压缩时间'; unit: 'ms'; from: 0.1; to: 200; step: 0.1; decimals: 2
                         value: comp.attack; hasAuto: true
-                        autoMode: comp.autoAttack; autoValue: comp.attack
+                        autoMode: comp.autoAttack; autoText: '随素材自适应'
                         onEdited: (v) => comp.attack = v
                         onAutoToggled: (on) => comp.autoAttack = on
                     }
                     ParamRow {
                         label: '释放时间'; unit: 'ms'; from: 5; to: 2000; step: 1; decimals: 0
                         value: comp.release; hasAuto: true
-                        autoMode: comp.autoRelease; autoValue: comp.release
+                        autoMode: comp.autoRelease; autoText: '随素材自适应'
                         onEdited: (v) => comp.release = v
                         onAutoToggled: (on) => comp.autoRelease = on
                     }

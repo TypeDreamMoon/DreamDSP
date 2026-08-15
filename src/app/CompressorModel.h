@@ -70,6 +70,7 @@ public:
     double effectiveKnee() const;
     double effectiveMakeup() const;
 
+
     // dBFS in -> dBFS out, straight from the real gain computer.
     Q_INVOKABLE double outputFor(double inputDb) const;
 

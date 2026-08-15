@@ -49,6 +49,8 @@ void ReverbModel::restore(const dsp::Reverb::Params &p, bool enabled)
 {
     m_p = p;
     m_enabled = enabled;
+    // No DSP object to update here, unlike CompressorModel: this model holds
+    // parameters and nothing else, so the signal is the whole of it.
     emit paramsChanged();
 }
 
