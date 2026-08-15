@@ -6,9 +6,15 @@
 #include <type_traits>
 
 #include "Compressor.h"
+#include "BassBoost.h"
 #include "Convolver.h"
+#include "Equalizer.h"
+#include "GraphicEq.h"
+#include "Limiter.h"
+#include "Loudness.h"
 #include "MultibandCompressor.h"
 #include "Reverb.h"
+#include "Routing.h"
 #include "Saturation.h"
 #include "Stereo.h"
 
@@ -27,13 +33,14 @@ namespace dreamdsp::dsp {
 
 enum : uint32_t {
     kParamMagic = 0x42505244u,   // reads as DRPB in a hex dump
-    kParamVersion = 2u
+    kParamVersion = 5u
 };
 
-// One bit per effect. The dsp layer has no enable flag of its own; these eight
-// bits are the entire enable surface.
+// One bit per effect. The dsp layer has no enable flag of its own; these bits
+// are the entire enable surface.
 //
-// Bit order is chain order, and EffectChain::process runs it in this order.
+// Bit order is NOT chain order any more: the equalizer was added last and runs
+// first. EffectChain::process is the order.
 enum : uint32_t {
     kEnBass      = 1u << 0,
     kEnExciter   = 1u << 1,
@@ -47,8 +54,50 @@ enum : uint32_t {
     // HRTF correction, which models the transducer and belongs immediately
     // before the DAC.
     kEnConvolution = 1u << 8,
-    kEnKnown     = 0x000001FFu
+    // Runs first, ahead of every bit above it. Until this existed the equalizer
+    // was `Filter N:` text handed to Equalizer APO, which is what made APO a
+    // runtime dependency rather than an import format.
+    kEnEqualizer = 1u << 9,
+    // Wiring rather than tone, and last in the chain for that reason: which
+    // speaker a stream channel ends up in, and how far away it is.
+    kEnMatrix    = 1u << 10,
+    kEnDelay     = 1u << 11,
+    // Sits with the equalizer, because it is an equalizer -- one whose curve is
+    // a function of how far the volume control has been turned down.
+    kEnLoudness  = 1u << 12,
+    kEnLimiter   = 1u << 13,
+    kEnDynBass   = 1u << 14,
+    kEnGraphic   = 1u << 15,
+    kEnKnown     = 0x0000FFFFu
 };
+
+// One id per stage, and the entire vocabulary of the order array below. These
+// are on the wire, so the values are fixed; the order they run in is not.
+enum : uint8_t {
+    kStageEqualizer = 0,
+    kStageGraphic,
+    kStageLoudness,
+    kStageDynBass,
+    kStageBass,
+    kStageExciter,
+    kStageTube,
+    kStageComp,
+    kStageMultiband,
+    kStageReverb,
+    kStageWidth,
+    kStageCrossfeed,
+    kStageMatrix,
+    kStageConvolution,
+    kStageDelay,
+    kStageLimiter,
+    kStageCount
+};
+static_assert(kStageCount == 16, "kDefaultOrder and ParamBlock::order are sized for 16");
+
+// The order the stages run in when nobody has said otherwise. Reproduces what
+// the chain did when it was hard-coded, and is what the sanitiser falls back to
+// for any order array that is not a permutation.
+extern const uint8_t kDefaultOrder[kStageCount];
 
 // Byte-for-byte what is on disk. There is no serialisation step: every member is
 // trivially copyable, alignment 4, and every member size is a multiple of 4, so
@@ -75,9 +124,25 @@ struct ParamBlock {
     Crossfeed::Params           crossfeed;   // +136    12
     MultibandCompressor::Params multiband;   // +148   108
     Convolution::Params         convolution; // +256    44
-};                                           // = 300
+    // Appended rather than placed in chain order. Struct order carries no
+    // meaning -- EffectChain::process is the order -- and appending leaves every
+    // offset above unchanged, so the assertions below still guard what they did.
+    Equalizer::Params           eq;          // +300   520
+    ChannelMatrix::Params       matrix;      // +820   256
+    ChannelDelay::Params        delay;       //+1076    32
+    LoudnessCorrection::Params  loudness;    //+1108    16
+    Limiter::Params             limiter;     //+1124    16
+    DynamicBass::Params         dynBass;     //+1140    16
+    GraphicEq::Params           graphic;     //+1156   128
 
-static_assert(sizeof(ParamBlock) == 300, "wire layout changed; bump kParamVersion");
+    // Which stage runs when. A permutation of 0..kStageCount-1; anything else
+    // is replaced wholesale by kDefaultOrder, because a duplicate would run a
+    // stage twice and an omission would silently drop an effect whose switch
+    // says it is on.
+    uint8_t order[kStageCount];              //+1284    16
+};                                           // = 1300
+
+static_assert(sizeof(ParamBlock) == 1300, "wire layout changed; bump kParamVersion");
 static_assert(alignof(ParamBlock) == 4, "wire layout changed; bump kParamVersion");
 static_assert(std::is_trivially_copyable<ParamBlock>::value, "must be memcpy-able");
 static_assert(offsetof(ParamBlock, enableMask) == 16, "wire layout changed");
@@ -90,6 +155,14 @@ static_assert(offsetof(ParamBlock, width) == 128, "wire layout changed");
 static_assert(offsetof(ParamBlock, crossfeed) == 136, "wire layout changed");
 static_assert(offsetof(ParamBlock, multiband) == 148, "wire layout changed");
 static_assert(offsetof(ParamBlock, convolution) == 256, "wire layout changed");
+static_assert(offsetof(ParamBlock, eq) == 300, "wire layout changed");
+static_assert(offsetof(ParamBlock, matrix) == 820, "wire layout changed");
+static_assert(offsetof(ParamBlock, delay) == 1076, "wire layout changed");
+static_assert(offsetof(ParamBlock, loudness) == 1108, "wire layout changed");
+static_assert(offsetof(ParamBlock, limiter) == 1124, "wire layout changed");
+static_assert(offsetof(ParamBlock, dynBass) == 1140, "wire layout changed");
+static_assert(offsetof(ParamBlock, graphic) == 1156, "wire layout changed");
+static_assert(offsetof(ParamBlock, order) == 1284, "wire layout changed");
 
 // --------------------------------------------------------------- sanitising
 

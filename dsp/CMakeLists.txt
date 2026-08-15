@@ -22,6 +22,12 @@ set(DREAMDSP_CORE_SOURCES
     ParamSlots.h
     StatusBlock.h
     EffectChain.h         EffectChain.cpp
+    Equalizer.h           Equalizer.cpp
+    GraphicEq.h           GraphicEq.cpp
+    Limiter.h             Limiter.cpp
+    BassBoost.h           BassBoost.cpp
+    Loudness.h            Loudness.cpp
+    Routing.h             Routing.cpp
     BiquadFilter.h        BiquadFilter.cpp
     Oversampler.h         Oversampler.cpp
     Compressor.h          Compressor.cpp

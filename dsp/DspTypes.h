@@ -2,6 +2,8 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 
 // The DSP layer is deliberately free of Windows, Qt and any I/O.
 //
@@ -44,5 +46,48 @@ inline float timeConstant(float ms, double sampleRate)
 
 template <typename T>
 inline T clampTo(T v, T lo, T hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// The ceiling every stage that can produce arbitrary gain writes through:
+// +12 dBFS.
+//
+// An equalizer, a channel matrix and a preamp are all unbounded-gain devices by
+// definition -- thirty-two bands at +40 dB, or eight inputs summed at full
+// weight, are legitimate parameter sets, and no validator can tell them apart
+// from ones the user meant. This runs inside audiodg.exe with a file under
+// ProgramData as its input. A post-mix object's output goes straight to the
+// endpoint, where anything above 0 dBFS is clipped away regardless, so a rail
+// four times higher cannot remove anything that would have been heard, and does
+// stop a hostile or simply mistaken parameter set from becoming a blast of
+// full-scale noise.
+constexpr float kRail = 4.0f;
+
+// Bounds one sample, reporting whether it had to.
+//
+// The exponent test is not decoration. Comparisons cannot do this job: the DSP
+// layer is built with /fp:fast, under which the compiler is entitled to assume
+// no operand is ever NaN and fold the test away. A NaN that reaches a recursive
+// filter's state stays there until the stream is torn down, so it has to be
+// stopped at the first stage that can see it.
+inline float railed(double v, bool *bad) noexcept
+{
+    uint64_t bits;
+    std::memcpy(&bits, &v, sizeof bits);
+    if ((bits & 0x7FF0000000000000ull) == 0x7FF0000000000000ull) {
+        *bad = true;
+        return 0.0f;
+    }
+    return v < -double(kRail) ? -kRail : (v > double(kRail) ? kRail : float(v));
+}
+
+inline float railed(float v, bool *bad) noexcept
+{
+    uint32_t bits;
+    std::memcpy(&bits, &v, sizeof bits);
+    if ((bits & 0x7F800000u) == 0x7F800000u) {
+        *bad = true;
+        return 0.0f;
+    }
+    return v < -kRail ? -kRail : (v > kRail ? kRail : v);
+}
 
 } // namespace dreamdsp::dsp

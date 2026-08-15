@@ -7,7 +7,9 @@
 #include "core/AutoEqDatabase.h"
 #include "core/Biquad.h"
 #include "core/Fft.h"
+#include "GraphicEq.h"
 #include "core/DreamPreset.h"
+#include "core/GraphicCurve.h"
 #include "core/PeacePreset.h"
 #include "platform/ApoLocator.h"
 #include "platform/AudioDevices.h"
@@ -293,7 +295,8 @@ void testAutoEq(const ApoInstall &apo)
 
     AutoEqDatabase db;
     QString err;
-    if (!db.load(apo.configPath, &err)) {
+    if (!db.load({ PresetStore::userDirectory() + QStringLiteral("/autoeq"),
+                   PresetStore::userDirectory(), apo.configPath }, &err)) {
         check(false, QStringLiteral("load databases: %1").arg(err));
         return;
     }
@@ -431,6 +434,19 @@ void testFullPreset()
     in.params.multiband.bandEnabled[1] = false;
     in.params.convolution.mix = 0.75f;
     in.params.convolution.trimDb = -2.5f;
+    // The output stage, so the byte comparison below covers it too. A channel
+    // swap is deliberate: it is the one matrix whose loss would be inaudible
+    // until the moment it matters.
+    in.params.enableMask |= dsp::kEnMatrix | dsp::kEnDelay | dsp::kEnLoudness;
+    in.params.matrix.gain[0][0] = 0.0f;
+    in.params.matrix.gain[0][1] = 1.0f;
+    in.params.matrix.gain[1][0] = 1.0f;
+    in.params.matrix.gain[1][1] = 0.0f;
+    in.params.delay.ms[1] = 3.75f;
+    in.params.delay.ms[4] = 12.5f;
+    in.params.loudness.referenceDb = -22.5f;
+    in.params.loudness.offsetDb = 2.5f;
+    in.params.loudness.amount = 0.625f;
     in.params = dsp::sanitise(in.params);
 
     in.convolutionFile = QStringLiteral("C:/somewhere/room.wav");
@@ -487,6 +503,78 @@ void testFullPreset()
         DreamPreset ignored;
         check(!loadDreamPreset(junk, &ignored, nullptr),
               QStringLiteral("a foreign file is refused"));
+    }
+}
+
+// --------------------------------------------------------- graphic curves
+
+void testGraphicCurve()
+{
+    out() << "\n[graphic curve]" << Qt::endl;
+
+    // AutoEQ's own spelling.
+    {
+        const GraphicCurve c = parseGraphicCurve(
+            QStringLiteral("GraphicEQ: 20 -1.5; 25 -1.4; 31.5 -1.3; 20000 -8.0"));
+        check(c.size() == 4, QStringLiteral("the GraphicEQ line parses to 4 points"));
+        check(c.size() == 4 && qFuzzyCompare(c.first().first, 20.0)
+                  && qFuzzyCompare(c.first().second, -1.5),
+              QStringLiteral("first point is 20 Hz, -1.5 dB"));
+        check(c.size() == 4 && qFuzzyCompare(c.last().first, 20000.0),
+              QStringLiteral("last point is 20 kHz"));
+    }
+
+    // The two-column form, with a comment, a blank line, junk, and the points
+    // out of order -- all of which turn up in hand-edited files.
+    {
+        const GraphicCurve c = parseGraphicCurve(QStringLiteral(
+            "# my curve\n1000 0\n\n100 3.5\nnot a line\n10000 -2\n"));
+        check(c.size() == 3, QStringLiteral("the two-column form parses, junk skipped"));
+        check(c.size() == 3 && c.at(0).first < c.at(1).first && c.at(1).first < c.at(2).first,
+              QStringLiteral("and comes back sorted by frequency"));
+    }
+
+    // A repeated frequency would make the log interpolation divide by zero.
+    {
+        const GraphicCurve c = parseGraphicCurve(QStringLiteral("100 1\n100 5\n1000 0"));
+        check(c.size() == 2, QStringLiteral("a repeated frequency is collapsed"));
+        check(c.size() == 2 && qFuzzyCompare(c.first().second, 5.0),
+              QStringLiteral("and the later value wins"));
+    }
+
+    // Interpolation is in log frequency: halfway between 100 and 1000 Hz is
+    // 316 Hz, not 550, and the value there has to be halfway too.
+    {
+        const GraphicCurve c = parseGraphicCurve(QStringLiteral("100 0\n1000 10"));
+        const double f[3] = { 50.0, 316.227766, 5000.0 };
+        double g[3] = { 0, 0, 0 };
+        resampleCurve(c, f, 3, g);
+        check(std::abs(g[1] - 5.0) < 1e-6,
+              QStringLiteral("316 Hz is the midpoint on a log axis (%1 dB)").arg(g[1]));
+        check(std::abs(g[0] - 0.0) < 1e-9 && std::abs(g[2] - 10.0) < 1e-9,
+              QStringLiteral("outside the data the curve is held flat, not extrapolated"));
+    }
+
+    // End to end: a curve in, band gains out, and the cascade those gains
+    // describe measured back against what was asked for.
+    {
+        QString text = QStringLiteral("GraphicEQ:");
+        for (int i = 0; i < 60; ++i) {
+            const double hz = 20.0 * std::pow(1000.0, double(i) / 59.0);
+            const double db = 5.0 * std::sin(std::log(hz / 20.0) * 1.1) - 2.0;
+            text += QStringLiteral(" %1 %2;").arg(hz, 0, 'f', 2).arg(db, 0, 'f', 2);
+        }
+        const GraphicCurve c = parseGraphicCurve(text);
+        check(c.size() == 60, QStringLiteral("a 60-point curve parses"));
+
+        double target[dsp::GraphicEq::kBands];
+        resampleCurve(c, dsp::GraphicEq::centres(), dsp::GraphicEq::kBands, target);
+
+        float gains[dsp::GraphicEq::kBands];
+        const double residual = dsp::fitGraphicEq(target, 48000.0, gains);
+        check(residual < 0.3,
+              QStringLiteral("the 31-band fit lands within %1 dB of it")
+                  .arg(residual, 0, 'f', 3));
     }
 }
 
@@ -749,6 +837,7 @@ int runSelfTest()
     testApoConfig();
     testVersionCompare();
     testAutostart();
+    testGraphicCurve();
     testFullPreset();
     testPresets(apo);
     testAutoEq(apo);

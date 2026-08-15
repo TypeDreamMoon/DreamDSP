@@ -50,7 +50,11 @@ class AutoEqDatabase
 public:
     // Databases are ~20 MB of text in total, so loading is explicit rather than
     // happening on construction.
-    bool load(const QString &configDir, QString *error = nullptr);
+    //
+    // Searched in order, first match per database wins. DreamDSP's own data
+    // directory is one of them, so the feature does not require Peace or
+    // Equalizer APO to be installed to reach the files they ship.
+    bool load(const QStringList &dirs, QString *error = nullptr);
     bool loaded() const { return m_loaded; }
 
     const QVector<AutoEqEntry> &entries() const { return m_entries; }

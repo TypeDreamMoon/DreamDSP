@@ -12,7 +12,12 @@
 #include "Convolver.h"
 #include "Denormals.h"
 #include "EffectChain.h"
+#include "BassBoost.h"
+#include "Equalizer.h"
+#include "GraphicEq.h"
+#include "Limiter.h"
 #include "Fft.h"
+#include "Loudness.h"
 #include "ImpulseAnalysis.h"
 #include "ImpulseBlob.h"
 #include "MultibandCompressor.h"
@@ -20,6 +25,7 @@
 #include "ParamSlots.h"
 #include "Resampler.h"
 #include "Reverb.h"
+#include "Routing.h"
 #include "Saturation.h"
 #include "StatusBlock.h"
 #include "Stereo.h"
@@ -28,6 +34,7 @@
 #include <algorithm>
 #include <atomic>
 #include <functional>
+#include <limits>
 #include <thread>
 
 #include <cmath>
@@ -1293,6 +1300,1060 @@ void testConvolver()
     }
 }
 
+// ------------------------------------------------------------------ equalizer
+
+EqBand eqBand(FilterKind kind, double f, double gainDb, double q, bool on = true)
+{
+    EqBand b;
+    std::memset(&b, 0, sizeof b);
+    b.freqHz = float(f);
+    b.gainDb = float(gainDb);
+    b.q = float(q);
+    b.type = uint8_t(kind);
+    b.enabled = on ? 1u : 0u;
+    return b;
+}
+
+Equalizer::Params eqParams(const std::vector<EqBand> &bands, float preampDb = 0.0f)
+{
+    Equalizer::Params p;
+    std::memset(&p, 0, sizeof p);
+    p.preampDb = preampDb;
+    int n = int(bands.size());
+    if (n > Equalizer::kMaxBands)
+        n = Equalizer::kMaxBands;
+    for (int i = 0; i < n; ++i)
+        p.band[i] = bands[size_t(i)];
+    p.bandCount = uint32_t(n);
+    return p;
+}
+
+// The equalizer's impulse response, as a spectrum.
+//
+// This is the measurement that matters: it goes through process(), i.e. through
+// the difference equation the audio actually takes, rather than re-evaluating
+// the transfer function the design produced. A coefficient that is right and a
+// state update that is wrong look identical to any test that only asks the
+// design what it thinks it does.
+std::vector<float> eqSpectrumDb(Equalizer &eq, int fftSize)
+{
+    Fft fft(fftSize);
+    const int n = fft.realSize();
+
+    std::vector<float> impulse(size_t(n), 0.0f);
+    impulse[0] = 1.0f;
+
+    float *ch[1] = { impulse.data() };
+    AudioBuffer buf{ ch, 1, n };
+    eq.process(buf);
+
+    std::vector<std::complex<float>> spec(size_t(fft.realBins()));
+    fft.realForward(impulse.data(), spec.data());
+
+    std::vector<float> db(spec.size());
+    for (size_t i = 0; i < spec.size(); ++i)
+        db[i] = 20.0f * std::log10(std::abs(spec[i]) + 1e-20f);
+    return db;
+}
+
+void testEqualizer()
+{
+    std::printf("\n[equalizer]\n");
+
+    constexpr double sr = 48000.0;
+    constexpr int fftSize = 8192;             // 16384 real samples, 341 ms
+
+    // --- the curve on screen is the curve in the audio ---------------------
+    //
+    // A realistic AutoEQ-shaped set, plus one fourth-order type so the two-
+    // section path is exercised as well.
+    {
+        Equalizer eq;
+        eq.prepare(sr, 1);
+        eq.setParams(eqParams({
+            eqBand(FilterKind::LSC, 105.0, 8.7, 0.71),
+            eqBand(FilterKind::PK, 35.0, 1.6, 1.40),
+            eqBand(FilterKind::PK, 1200.0, -4.5, 2.00),
+            eqBand(FilterKind::PK, 6300.0, 3.2, 3.50),
+            eqBand(FilterKind::HSC, 10000.0, -2.5, 0.71),
+            eqBand(FilterKind::BWHP, 22.0, 0.0, 0.0),
+        }, -6.3f));
+
+        const std::vector<float> measured = eqSpectrumDb(eq, fftSize);
+        const int realSize = fftSize * 2;
+
+        double worst = 0.0;
+        double worstHz = 0.0;
+        for (size_t i = 1; i < measured.size(); ++i) {
+            const double hz = double(i) * sr / double(realSize);
+            if (hz < 30.0 || hz > 18000.0)
+                continue;
+            const double err = std::fabs(double(measured[i]) - eq.responseDb(hz));
+            if (err > worst) { worst = err; worstHz = hz; }
+        }
+        check(worst < 0.02,
+              fmt("measured response matches responseDb() to %.4f dB (worst at %.0f Hz)",
+                  worst, worstHz));
+    }
+
+    // --- fourth-order alignments -------------------------------------------
+    //
+    // A 4th-order Butterworth is -3.01 dB at Fc and, being 24 dB/octave,
+    // -24.1 dB one octave above it: |H|^2 = 1 / (1 + (f/fc)^8).
+    {
+        const FilterSections bw = designFilter(FilterKind::BWLP, 500.0, 0.0, 0.0, sr);
+        check(bw.count == 2, "BWLP is two cascaded sections");
+        const double atFc = magnitudeDb(bw, 500.0, sr);
+        const double atOct = magnitudeDb(bw, 1000.0, sr);
+        check(std::fabs(atFc + 3.0103) < 0.02, fmt("BWLP is %.3f dB at Fc", atFc));
+        check(std::fabs(atOct + 24.1) < 0.15, fmt("BWLP is %.2f dB one octave up", atOct));
+
+        // Linkwitz-Riley is two identical Butterworth sections, so -6 dB at Fc.
+        const FilterSections lr = designFilter(FilterKind::LRLP, 500.0, 0.0, 0.0, sr);
+        check(std::fabs(magnitudeDb(lr, 500.0, sr) + 6.0206) < 0.02,
+              fmt("LRLP is %.3f dB at Fc", magnitudeDb(lr, 500.0, sr)));
+    }
+
+    // The defining property of a Linkwitz-Riley crossover: low plus high sums
+    // to flat. Checked through process(), on the summed impulse responses.
+    {
+        Equalizer low, high;
+        low.prepare(sr, 1);
+        high.prepare(sr, 1);
+        low.setParams(eqParams({ eqBand(FilterKind::LRLP, 1000.0, 0.0, 0.0) }));
+        high.setParams(eqParams({ eqBand(FilterKind::LRHP, 1000.0, 0.0, 0.0) }));
+
+        Fft fft(fftSize);
+        const int n = fft.realSize();
+        std::vector<float> a(size_t(n), 0.0f), b(size_t(n), 0.0f);
+        a[0] = 1.0f;
+        b[0] = 1.0f;
+        {
+            float *ca[1] = { a.data() };
+            float *cb[1] = { b.data() };
+            AudioBuffer ba{ ca, 1, n };
+            AudioBuffer bb{ cb, 1, n };
+            low.process(ba);
+            high.process(bb);
+        }
+        for (size_t i = 0; i < a.size(); ++i)
+            a[i] += b[i];
+
+        std::vector<std::complex<float>> spec(size_t(fft.realBins()));
+        fft.realForward(a.data(), spec.data());
+
+        double worst = 0.0;
+        for (size_t i = 1; i < spec.size(); ++i) {
+            const double hz = double(i) * sr / double(n);
+            if (hz < 20.0 || hz > 20000.0)
+                continue;
+            const double db = 20.0 * std::log10(double(std::abs(spec[i])) + 1e-20);
+            worst = std::max(worst, std::fabs(db));
+        }
+        check(worst < 0.02, fmt("LRLP + LRHP sum flat to %.4f dB", worst));
+    }
+
+    // The crossover the multiband compressor uses is the same filter under a
+    // different name. Two definitions of Linkwitz-Riley in one codebase that
+    // merely intend to agree is exactly the kind of drift this catches.
+    {
+        Equalizer low;
+        low.prepare(sr, 1);
+        low.setParams(eqParams({ eqBand(FilterKind::LRLP, 800.0, 0.0, 0.0) }));
+
+        LinkwitzRiley4 ref;
+        ref.design(800.0, sr);
+
+        const int n = 4096;
+        std::vector<float> mine(size_t(n), 0.0f);
+        mine[0] = 1.0f;
+        {
+            float *ch[1] = { mine.data() };
+            AudioBuffer buf{ ch, 1, n };
+            low.process(buf);
+        }
+
+        double worst = 0.0;
+        for (int i = 0; i < n; ++i) {
+            float lo = 0.0f, hi = 0.0f;
+            ref.process(i == 0 ? 1.0f : 0.0f, &lo, &hi);
+            worst = std::max(worst, double(std::fabs(mine[size_t(i)] - lo)));
+        }
+        check(worst < 1e-6, fmt("LRLP matches LinkwitzRiley4 to %.3g", worst));
+    }
+
+    // --- transparency and gain ---------------------------------------------
+    {
+        Equalizer eq;
+        eq.prepare(sr, 2);
+
+        Equalizer::Params none;
+        std::memset(&none, 0, sizeof none);
+        eq.setParams(none);
+
+        const int n = 1024;
+        // The second argument is not decoration: `l(size_t(n))` declares a
+        // function returning std::vector<float>, which is the seventh time that
+        // parse has been hit in this codebase.
+        std::vector<float> l(size_t(n), 0.0f), r(size_t(n), 0.0f);
+        uint32_t seed = 0x1234567u;
+        for (int i = 0; i < n; ++i) {
+            l[size_t(i)] = float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f;
+            r[size_t(i)] = float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f;
+        }
+        const std::vector<float> origL = l;
+
+        float *ch[2] = { l.data(), r.data() };
+        AudioBuffer buf{ ch, 2, n };
+        eq.process(buf);
+        check(std::memcmp(l.data(), origL.data(), size_t(n) * sizeof(float)) == 0,
+              "no bands is bit-exact passthrough");
+
+        // -6.0206 dB is exactly one half.
+        Equalizer::Params half = none;
+        half.preampDb = -6.020599913f;
+        eq.setParams(half);
+        // Copied into the existing storage rather than assigned, so the
+        // pointers already handed to `buf` stay valid.
+        std::copy(origL.begin(), origL.end(), l.begin());
+        eq.process(buf);
+        double worst = 0.0;
+        for (int i = 0; i < n; ++i)
+            worst = std::max(worst, double(std::fabs(l[size_t(i)] - origL[size_t(i)] * 0.5f)));
+        check(worst < 1e-6, fmt("preamp -6.02 dB halves the signal (err %.3g)", worst));
+    }
+
+    // --- the rail ----------------------------------------------------------
+    //
+    // The stage's own bound on what it can emit, which is the only thing
+    // standing between a hostile parameter file and a full-scale blast inside
+    // audiodg.
+    {
+        Equalizer eq;
+        eq.prepare(sr, 1);
+        Equalizer::Params loud;
+        std::memset(&loud, 0, sizeof loud);
+        loud.preampDb = 60.0f;
+        eq.setParams(loud);
+
+        std::vector<float> x(64, 1.0f);
+        float *ch[1] = { x.data() };
+        AudioBuffer buf{ ch, 1, 64 };
+        eq.process(buf);
+
+        bool railed = true;
+        for (float v : x)
+            if (!(v == 4.0f))
+                railed = false;
+        check(railed, "+60 dB of preamp is railed at +12 dBFS");
+    }
+
+    // A NaN arriving from an upstream processing object must not become a
+    // permanent silence: the sample is dropped and the filter state cleared, so
+    // the next buffer is correct again.
+    {
+        Equalizer eq, clean;
+        eq.prepare(sr, 1);
+        clean.prepare(sr, 1);
+        const Equalizer::Params p = eqParams({ eqBand(FilterKind::PK, 1000.0, 9.0, 1.4) });
+        eq.setParams(p);
+        clean.setParams(p);
+
+        std::vector<float> poison(512, 0.0f);
+        poison[10] = std::numeric_limits<float>::quiet_NaN();
+        {
+            float *ch[1] = { poison.data() };
+            AudioBuffer buf{ ch, 1, 512 };
+            eq.process(buf);
+        }
+        bool anyNan = false;
+        for (float v : poison)
+            if (v != v)
+                anyNan = true;
+        check(!anyNan, "a NaN input does not leave the equalizer");
+
+        std::vector<float> after(1024), reference(1024);
+        for (int i = 0; i < 1024; ++i) {
+            const float s = 0.25f * float(std::sin(2.0 * 3.14159265358979 * 1000.0 * i / sr));
+            after[size_t(i)] = s;
+            reference[size_t(i)] = s;
+        }
+        {
+            float *ca[1] = { after.data() };
+            float *cb[1] = { reference.data() };
+            AudioBuffer ba{ ca, 1, 1024 };
+            AudioBuffer bb{ cb, 1, 1024 };
+            eq.process(ba);
+            clean.process(bb);
+        }
+        double worst = 0.0;
+        for (int i = 0; i < 1024; ++i)
+            worst = std::max(worst, double(std::fabs(after[size_t(i)] - reference[size_t(i)])));
+        check(worst < 1e-6, fmt("the equalizer recovers from a NaN (err %.3g)", worst));
+    }
+
+    // --- nothing in the whole parameter space can run away ------------------
+    //
+    // Every type, at frequencies from below the audible band to above Nyquist,
+    // at extreme gains and Qs, on four sample rates. The claim being tested is
+    // the one the design makes: an unstable section becomes a wire rather than
+    // an exponentially growing signal inside a system process.
+    {
+        const double rates[] = { 44100.0, 48000.0, 96000.0, 192000.0 };
+        const double freqs[] = { 10.0, 20.0, 1000.0, 19000.0, 21000.0, 100000.0, 380000.0 };
+        const double gains[] = { -40.0, -12.0, 0.0, 12.0, 40.0 };
+        const double qs[] = { 0.05, 0.5, 1.41, 12.0, 100.0 };
+
+        long unstable = 0, misbehaved = 0, cases = 0;
+        std::vector<float> x(256);
+
+        for (double rate : rates) {
+            for (int k = 0; k < int(FilterKind::Count); ++k) {
+                for (double f : freqs) {
+                    for (double g : gains) {
+                        for (double q : qs) {
+                            ++cases;
+                            const FilterSections fs =
+                                designFilter(FilterKind(k), f, g, q, rate);
+                            for (int s = 0; s < fs.count; ++s) {
+                                const BiquadCoeffs &c = fs.section[size_t(s)];
+                                if (!(std::fabs(c.a2) < 1.0)
+                                    || !(std::fabs(c.a1) < 1.0 + c.a2))
+                                    ++unstable;
+                            }
+
+                            Equalizer eq;
+                            eq.prepare(rate, 1);
+                            eq.setParams(eqParams({ eqBand(FilterKind(k), f, g, q) },
+                                                  30.0f));
+                            uint32_t seed = 0xBEEF0000u + uint32_t(cases);
+                            for (auto &v : x)
+                                v = float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f;
+                            float *ch[1] = { x.data() };
+                            AudioBuffer buf{ ch, 1, int(x.size()) };
+                            for (int pass = 0; pass < 8; ++pass)
+                                eq.process(buf);
+                            for (float v : x)
+                                if (!(v >= -4.0f && v <= 4.0f))
+                                    ++misbehaved;
+                        }
+                    }
+                }
+            }
+        }
+        check(unstable == 0, fmt("no unstable section over %.0f designs", double(cases)));
+        check(misbehaved == 0,
+              fmt("every output stays inside the rail over %.0f cases", double(cases)));
+    }
+
+    // --- wire format --------------------------------------------------------
+    {
+        ParamBlock b = transparentBlock();
+        b.eq.bandCount = 999u;
+        b.eq.band[0] = eqBand(FilterKind::PK, 1000.0, 6.0, 1.4);
+        b.eq.band[Equalizer::kMaxBands - 1] = eqBand(FilterKind::PK, 8000.0, -3.0, 2.0);
+        b.eq.preampDb = 1e30f;
+        const ParamBlock s = sanitise(b);
+        check(s.eq.bandCount == uint32_t(Equalizer::kMaxBands), "band count is clamped");
+        check(s.eq.preampDb <= 30.0f && s.eq.preampDb >= -60.0f, "preamp is clamped");
+        check(isSane(s), "a sanitised block with bands is sane");
+
+        // Unused slots must hold a fixed pattern, or the same settings would
+        // produce different bytes on disk depending on history.
+        ParamBlock c = transparentBlock();
+        c.eq.bandCount = 2u;
+        c.eq.band[0] = eqBand(FilterKind::PK, 100.0, 1.0, 1.0);
+        c.eq.band[1] = eqBand(FilterKind::PK, 200.0, 2.0, 1.0);
+        c.eq.band[7] = eqBand(FilterKind::HSQ, 9000.0, 5.0, 0.7);
+        const ParamBlock cs = sanitise(c);
+        EqBand zero;
+        std::memset(&zero, 0, sizeof zero);
+        check(std::memcmp(&cs.eq.band[7], &zero, sizeof zero) == 0,
+              "slots past bandCount are zeroed");
+    }
+}
+
+// -------------------------------------------------------- routing and delay
+
+void testRouting()
+{
+    std::printf("\n[routing]\n");
+
+    constexpr double sr = 48000.0;
+    constexpr int frames = 512;
+
+    // --- the matrix ---------------------------------------------------------
+    {
+        ChannelMatrix m;
+        m.prepare(sr, 2, frames);
+        check(ChannelMatrix::isIdentity(ChannelMatrix::identity()), "identity() is the identity");
+
+        std::vector<float> l(size_t(frames), 0.0f), r(size_t(frames), 0.0f);
+        for (int i = 0; i < frames; ++i) {
+            l[size_t(i)] = 0.25f;
+            r[size_t(i)] = -0.5f;
+        }
+        const std::vector<float> l0 = l, r0 = r;
+
+        float *ch[2] = { l.data(), r.data() };
+        AudioBuffer buf{ ch, 2, frames };
+
+        m.setParams(ChannelMatrix::identity());
+        m.process(buf);
+        check(std::memcmp(l.data(), l0.data(), size_t(frames) * sizeof(float)) == 0
+                  && std::memcmp(r.data(), r0.data(), size_t(frames) * sizeof(float)) == 0,
+              "the identity matrix is bit-exact passthrough");
+
+        // A swap is the case that catches an in-place implementation: doing it
+        // channel by channel over the live buffer gives R in both outputs.
+        ChannelMatrix::Params swap;
+        std::memset(&swap, 0, sizeof swap);
+        swap.gain[0][1] = 1.0f;
+        swap.gain[1][0] = 1.0f;
+        for (int c = 2; c < ChannelMatrix::kMaxChannels; ++c)
+            swap.gain[c][c] = 1.0f;
+
+        std::copy(l0.begin(), l0.end(), l.begin());
+        std::copy(r0.begin(), r0.end(), r.begin());
+        m.setParams(swap);
+        m.process(buf);
+        bool swapped = true;
+        for (int i = 0; i < frames; ++i)
+            if (l[size_t(i)] != r0[size_t(i)] || r[size_t(i)] != l0[size_t(i)])
+                swapped = false;
+        check(swapped, "L and R swap without either being overwritten first");
+
+        // Downmix to mono at -6 dB, the other common use.
+        ChannelMatrix::Params mono;
+        std::memset(&mono, 0, sizeof mono);
+        for (int o = 0; o < 2; ++o)
+            mono.gain[o][0] = mono.gain[o][1] = 0.5f;
+        std::copy(l0.begin(), l0.end(), l.begin());
+        std::copy(r0.begin(), r0.end(), r.begin());
+        m.setParams(mono);
+        m.process(buf);
+        const float want = 0.5f * (0.25f + -0.5f);
+        bool monoOk = true;
+        for (int i = 0; i < frames; ++i)
+            if (std::fabs(l[size_t(i)] - want) > 1e-7f || std::fabs(r[size_t(i)] - want) > 1e-7f)
+                monoOk = false;
+        check(monoOk, fmt("mono downmix gives %.4f in both channels", double(want)));
+    }
+
+    // --- the delay ----------------------------------------------------------
+    //
+    // A whole-sample delay has to be bit-exact: the interpolator's coefficients
+    // collapse to (0, 1, 0, 0) at a zero fractional part, and if they do not the
+    // most common setting is the one that is quietly wrong.
+    {
+        ChannelDelay d;
+        d.prepare(sr, 1, 1024);
+
+        // 1 ms at 48 kHz is 48 samples, and both 1.0f and 48000/1000 are exact
+        // in floating point -- so the fractional part really is zero rather than
+        // 4e-6 away from it, and "bit-exact" is a fair thing to demand.
+        ChannelDelay::Params p;
+        std::memset(&p, 0, sizeof p);
+        p.ms[0] = 1.0f;
+        const int delaySamples = 48;
+        d.setParams(p);
+
+        const int n = 1024;
+        std::vector<float> x(size_t(n), 0.0f);
+        uint32_t seed = 0x51DE1u;
+        for (auto &v : x)
+            v = float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f;
+        const std::vector<float> x0 = x;
+
+        float *ch[1] = { x.data() };
+        AudioBuffer buf{ ch, 1, n };
+        d.process(buf);
+
+        int bad = 0;
+        for (int i = delaySamples; i < n; ++i)
+            if (x[size_t(i)] != x0[size_t(i - delaySamples)])
+                ++bad;
+        check(bad == 0, fmt("a 48-sample delay is bit-exact (%.0f wrong)", double(bad)));
+
+        bool leadingSilence = true;
+        for (int i = 0; i < delaySamples; ++i)
+            if (x[size_t(i)] != 0.0f)
+                leadingSilence = false;
+        check(leadingSilence, "the delay starts from silence, not from stale samples");
+    }
+
+    // A fractional delay is checked against the thing it is for: a sine shifted
+    // by a non-integer number of samples. Third-order Lagrange is not exact, so
+    // the tolerance is a level rather than zero -- but it has to be far below
+    // what rounding to the nearest sample would cost, or there is no point.
+    {
+        ChannelDelay d;
+        d.prepare(sr, 1, 4096);
+
+        const double delaySamples = 40.5;
+        ChannelDelay::Params p;
+        std::memset(&p, 0, sizeof p);
+        p.ms[0] = float(delaySamples * 1000.0 / sr);
+        d.setParams(p);
+
+        const int n = 4096;
+        const double f0 = 1000.0;
+        std::vector<float> x(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i)
+            x[size_t(i)] = float(0.5 * std::sin(2.0 * 3.14159265358979 * f0 * i / sr));
+
+        float *ch[1] = { x.data() };
+        AudioBuffer buf{ ch, 1, n };
+        d.process(buf);
+
+        double worst = 0.0;
+        for (int i = 200; i < n; ++i) {
+            const double want = 0.5 * std::sin(2.0 * 3.14159265358979 * f0
+                                               * (double(i) - delaySamples) / sr);
+            worst = std::max(worst, std::fabs(double(x[size_t(i)]) - want));
+        }
+        // Half a sample of rounding error at 1 kHz would be 0.033 of amplitude.
+        check(worst < 1e-3, fmt("a 40.5-sample delay of a 1 kHz sine is within %.2e", worst));
+    }
+
+    // Zero delay must be a wire, and must still fill the line so that switching
+    // a channel on later does not read history that was never recorded.
+    {
+        ChannelDelay d;
+        d.prepare(sr, 2, 256);
+        ChannelDelay::Params p;
+        std::memset(&p, 0, sizeof p);
+        d.setParams(p);
+
+        std::vector<float> a(256, 0.25f), b(256, -0.125f);
+        const std::vector<float> a0 = a;
+        float *ch[2] = { a.data(), b.data() };
+        AudioBuffer buf{ ch, 2, 256 };
+        d.process(buf);
+        check(std::memcmp(a.data(), a0.data(), a0.size() * sizeof(float)) == 0,
+              "zero delay is bit-exact passthrough");
+        check(d.latencySamples() == 0, "zero delay reports no latency");
+    }
+}
+
+// ------------------------------------------------------------------ loudness
+
+void testLoudness()
+{
+    std::printf("\n[loudness correction]\n");
+
+    constexpr double sr = 48000.0;
+
+    // At the reference level the stage is a wire. This is the setting the
+    // control sits at most of the time, so it is the one that must cost nothing
+    // and change nothing.
+    {
+        LoudnessCorrection::Params p;
+        std::memset(&p, 0, sizeof p);
+        p.volumeDb = -20.0f;
+        p.referenceDb = -20.0f;
+        p.amount = 1.0f;
+
+        double lo = 1.0, hi = 1.0, pre = 1.0;
+        LoudnessCorrection::shelvesFor(p, &lo, &hi, &pre);
+        check(lo == 0.0 && hi == 0.0 && pre == 0.0, "at the reference level nothing is applied");
+
+        LoudnessCorrection l;
+        l.prepare(sr, 2);
+        l.setParams(p);
+        check(l.neutral(), "and the stage reports itself neutral");
+
+        std::vector<float> a(512, 0.3f), b(512, -0.2f);
+        const std::vector<float> a0 = a;
+        float *ch[2] = { a.data(), b.data() };
+        AudioBuffer buf{ ch, 2, 512 };
+        l.process(buf);
+        check(std::memcmp(a.data(), a0.data(), a0.size() * sizeof(float)) == 0,
+              "neutral is bit-exact passthrough");
+    }
+
+    // Below the reference: bass up, and an equal preamp down, so the net effect
+    // is the midrange coming down rather than the low end eating the headroom.
+    // The numbers are Equalizer APO's formula, reproduced exactly.
+    {
+        LoudnessCorrection::Params p;
+        std::memset(&p, 0, sizeof p);
+        p.volumeDb = -20.0f;
+        p.referenceDb = 0.0f;
+        p.amount = 1.0f;
+
+        double lo = 0.0, hi = 0.0, pre = 0.0;
+        LoudnessCorrection::shelvesFor(p, &lo, &hi, &pre);
+        const double wantLow = 20.0 * 0.55 / (1.0 - 0.55);
+        check(std::fabs(lo - wantLow) < 1e-9, fmt("20 dB down -> %.3f dB low shelf", lo));
+        check(std::fabs(pre + lo) < 1e-9, "the preamp cancels the low shelf exactly");
+        // The high shelf is evaluated at the already-preamped level, so the
+        // preamp's 24 dB is added to the distance from the reference before it
+        // is worked out -- it comes out positive, restoring some of what the
+        // preamp took off the top end rather than cutting further.
+        check(hi > 0.0, fmt("the high shelf lifts the top back up by %.3f dB", hi));
+
+        // Halving the amount halves both shelves: the control has to be a scale
+        // on the correction, not a second curve.
+        LoudnessCorrection::Params half = p;
+        half.amount = 0.5f;
+        double lo2 = 0.0, hi2 = 0.0, pre2 = 0.0;
+        LoudnessCorrection::shelvesFor(half, &lo2, &hi2, &pre2);
+        check(std::fabs(lo2 - lo * 0.5) < 1e-9, "amount 0.5 halves the low shelf");
+    }
+
+    // What the stage actually does to audio must be the shelves it says it is
+    // applying -- measured, not asserted from the design.
+    {
+        LoudnessCorrection::Params p;
+        std::memset(&p, 0, sizeof p);
+        p.volumeDb = -10.0f;
+        p.referenceDb = 0.0f;
+        p.amount = 0.5f;
+
+        LoudnessCorrection l;
+        l.prepare(sr, 1);
+        l.setParams(p);
+        check(!l.neutral(), "10 dB below reference is not neutral");
+
+        Fft fft(8192);
+        const int n = fft.realSize();
+        std::vector<float> imp(size_t(n), 0.0f);
+        imp[0] = 1.0f;
+        {
+            float *ch[1] = { imp.data() };
+            AudioBuffer buf{ ch, 1, n };
+            l.process(buf);
+        }
+        std::vector<std::complex<float>> spec(size_t(fft.realBins()));
+        fft.realForward(imp.data(), spec.data());
+
+        const auto binAt = [&](double hz) {
+            return size_t(std::lround(hz * double(n) / sr));
+        };
+        const double atLow = 20.0 * std::log10(double(std::abs(spec[binAt(20.0)])) + 1e-20);
+        const double atMid = 20.0 * std::log10(double(std::abs(spec[binAt(1000.0)])) + 1e-20);
+        const double atHigh = 20.0 * std::log10(double(std::abs(spec[binAt(18000.0)])) + 1e-20);
+
+        // Measured against what the stage says it is applying, rather than
+        // against a guess. The tolerance is half a dB because 20 Hz is only
+        // 1.9 octaves below a 75 Hz shelf with Q 0.52 -- it has not quite
+        // reached its plateau there, and neither has the 10 kHz shelf at 18 kHz.
+        check(std::fabs(atMid - l.preampDb()) < 0.1,
+              fmt("the midrange sits at the preamp: %.3f dB vs %.3f", atMid, l.preampDb()));
+        check(std::fabs((atLow - atMid) - l.lowShelfDb()) < 0.5,
+              fmt("the low shelf measures %.3f dB against a designed %.3f",
+                  atLow - atMid, l.lowShelfDb()));
+        check(std::fabs((atHigh - atMid) - l.highShelfDb()) < 0.5,
+              fmt("the high shelf measures %.3f dB against a designed %.3f",
+                  atHigh - atMid, l.highShelfDb()));
+    }
+}
+
+// ------------------------------------------------------------------- limiter
+
+void testLimiter()
+{
+    std::printf("\n[limiter]\n");
+
+    constexpr double sr = 48000.0;
+    constexpr int n = 8192;
+
+    // The threshold is documented as a guarantee rather than an aim, so it is
+    // tested as one: a full-scale sine against a -6 dB ceiling, and not one
+    // sample allowed through above it.
+    {
+        Limiter lim;
+        lim.prepare(sr, 2, 1024);
+        Limiter::Params p;
+        p.gainDb = 0.0f;
+        p.thresholdDb = -6.0f;
+        p.releaseMs = 50.0f;
+        p.lookaheadMs = 1.5f;
+        lim.setParams(p);
+
+        std::vector<float> l(size_t(n), 0.0f), r(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i) {
+            const float v = float(std::sin(2.0 * 3.14159265358979 * 220.0 * i / sr));
+            l[size_t(i)] = v;
+            r[size_t(i)] = v;
+        }
+        float *ch[2] = { l.data(), r.data() };
+        AudioBuffer buf{ ch, 2, n };
+        lim.process(buf);
+
+        const float thr = std::pow(10.0f, -6.0f / 20.0f);
+        float worst = 0.0f;
+        for (float v : l)
+            worst = std::max(worst, std::fabs(v));
+        check(worst <= thr * 1.0001f,
+              fmt("peak %.5f never exceeds the %.5f threshold", double(worst), double(thr)));
+        // ...and it did not simply mute everything to get there.
+        check(worst > thr * 0.9f, fmt("and it reaches it (%.5f)", double(worst)));
+    }
+
+    // Material below the threshold has to come out untouched, delayed by the
+    // look-ahead and nothing more. A limiter that colours quiet passages is
+    // worse than no limiter.
+    {
+        Limiter lim;
+        lim.prepare(sr, 1, 1024);
+        Limiter::Params p;
+        p.thresholdDb = -6.0f;
+        p.lookaheadMs = 1.0f;      // exactly 48 samples
+        lim.setParams(p);
+        const int look = lim.latencySamples();
+        check(look == 48, fmt("1 ms of look-ahead is %.0f samples", double(look)));
+
+        std::vector<float> x(size_t(n), 0.0f);
+        uint32_t seed = 0xA11CEu;
+        for (auto &v : x)
+            v = 0.1f * float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f;
+        const std::vector<float> x0 = x;
+
+        float *ch[1] = { x.data() };
+        AudioBuffer buf{ ch, 1, n };
+        lim.process(buf);
+
+        int bad = 0;
+        for (int i = look; i < n; ++i)
+            if (x[size_t(i)] != x0[size_t(i - look)])
+                ++bad;
+        check(bad == 0, fmt("quiet material passes bit-exact (%.0f wrong)", double(bad)));
+    }
+
+    // The pre-gain is before the limiter, which is the whole point of putting it
+    // there: turning it up makes the limiter work, not the output louder.
+    {
+        Limiter lim;
+        lim.prepare(sr, 1, 1024);
+        Limiter::Params p;
+        p.gainDb = 20.0f;
+        p.thresholdDb = -3.0f;
+        p.releaseMs = 20.0f;
+        lim.setParams(p);
+
+        std::vector<float> x(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i)
+            x[size_t(i)] = 0.2f * float(std::sin(2.0 * 3.14159265358979 * 440.0 * i / sr));
+        float *ch[1] = { x.data() };
+        AudioBuffer buf{ ch, 1, n };
+        lim.process(buf);
+
+        const float thr = std::pow(10.0f, -3.0f / 20.0f);
+        float worst = 0.0f;
+        for (float v : x)
+            worst = std::max(worst, std::fabs(v));
+        check(worst <= thr * 1.0001f,
+              fmt("+20 dB of pre-gain still lands under the ceiling (%.5f)", double(worst)));
+        // 0.2 lifted 20 dB is 2.0 against a 0.708 ceiling: 20*log10(0.708/2)
+        // is -9.02 dB, and the meter has to say exactly that rather than
+        // something plausible.
+        check(std::fabs(lim.reductionDb() + 9.02) < 0.1,
+              fmt("and the meter reads the arithmetic: %.2f dB", lim.reductionDb()));
+    }
+}
+
+// --------------------------------------------------------- dynamic bass boost
+
+void testDynamicBass()
+{
+    std::printf("\n[dynamic bass]\n");
+
+    constexpr double sr = 48000.0;
+    constexpr int n = 24000;   // half a second, long enough for the envelope
+
+    const auto runTone = [&](float amplitude, float maxGainDb) {
+        DynamicBass b;
+        b.prepare(sr, 1);
+        DynamicBass::Params p;
+        p.maxGainDb = maxGainDb;
+        p.cutoffHz = 100.0f;
+        p.releaseMs = 100.0f;
+        b.setParams(p);
+
+        std::vector<float> x(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i)
+            x[size_t(i)] = amplitude * float(std::sin(2.0 * 3.14159265358979 * 50.0 * i / sr));
+        float *ch[1] = { x.data() };
+        AudioBuffer buf{ ch, 1, n };
+        b.process(buf);
+
+        float peak = 0.0f;
+        for (int i = n / 2; i < n; ++i)   // steady state only
+            peak = std::max(peak, std::fabs(x[size_t(i)]));
+        return std::make_pair(peak, b.appliedDb());
+    };
+
+    // A quiet low end gets the whole boost, because there is room for it.
+    {
+        const auto [peak, db] = runTone(0.05f, 12.0f);
+        check(db > 11.5, fmt("a -26 dBFS tone gets the full +%.2f dB", db));
+        check(peak > 0.05f * 3.5f, fmt("and comes out at %.3f", double(peak)));
+    }
+
+    // A loud one gets whatever is left and no more, which is the property the
+    // design is built around: the envelope is measured before the boost, so the
+    // gain is exactly the headroom and the loop cannot chase itself.
+    //
+    // The output lands a little over full scale even so, and the tolerance says
+    // so rather than hiding it: the boosted band is bounded, but the stage
+    // emits that band summed with the one above the crossover, and at 50 Hz
+    // against a 100 Hz split the high band still contributes. Half a decibel,
+    // and the limiter is what turns a bound like this into a ceiling.
+    {
+        const auto [peak, db] = runTone(0.9f, 12.0f);
+        check(db < 1.5, fmt("a -0.9 dBFS tone gets only +%.2f dB", db));
+        check(peak <= 1.10f, fmt("and lands within half a dB of full scale (%.3f)", double(peak)));
+    }
+
+    // The behaviour that actually matters, as a ratio: nearly nothing when the
+    // material is already loud, the whole boost when it is not.
+    {
+        const auto [loudPeak, loudDb] = runTone(0.9f, 12.0f);
+        const auto [quietPeak, quietDb] = runTone(0.05f, 12.0f);
+        (void)loudPeak; (void)quietPeak;
+        check(quietDb - loudDb > 9.0,
+              fmt("%.2f dB of boost on quiet material against %.2f on loud", quietDb, loudDb));
+    }
+
+    // At a maximum of 0 dB the stage is a crossover that puts its two bands
+    // straight back together. That is an all-pass, not a wire -- the magnitude
+    // is untouched but the phase is not, which is worth stating rather than
+    // discovering.
+    {
+        DynamicBass b;
+        b.prepare(sr, 1);
+        DynamicBass::Params p;
+        p.maxGainDb = 0.0f;
+        b.setParams(p);
+
+        Fft fft(4096);
+        const int len = fft.realSize();
+        std::vector<float> imp(size_t(len), 0.0f);
+        imp[0] = 1.0f;
+        float *ch[1] = { imp.data() };
+        AudioBuffer buf{ ch, 1, len };
+        b.process(buf);
+
+        std::vector<std::complex<float>> spec(size_t(fft.realBins()));
+        fft.realForward(imp.data(), spec.data());
+        double worst = 0.0;
+        for (size_t i = 1; i < spec.size(); ++i) {
+            const double hz = double(i) * sr / double(len);
+            if (hz < 20.0 || hz > 20000.0)
+                continue;
+            worst = std::max(worst,
+                             std::fabs(20.0 * std::log10(double(std::abs(spec[i])) + 1e-20)));
+        }
+        check(worst < 0.05, fmt("at +0 dB the magnitude is flat to %.4f dB", worst));
+    }
+}
+
+// -------------------------------------------------------------- graphic eq
+
+void testGraphicEq()
+{
+    std::printf("\n[graphic eq]\n");
+
+    constexpr double sr = 48000.0;
+    const double *f = GraphicEq::centres();
+
+    // A curve with a bass lift, a presence dip and a treble tilt -- the shape
+    // an AutoEQ correction actually has.
+    double target[GraphicEq::kBands];
+    for (int i = 0; i < GraphicEq::kBands; ++i) {
+        const double hz = f[i];
+        target[i] = 6.0 * std::exp(-std::pow(std::log(hz / 45.0), 2.0))
+                    - 4.5 * std::exp(-std::pow(std::log(hz / 3000.0) * 1.6, 2.0))
+                    - 2.0 * std::log10(hz / 1000.0);
+    }
+
+    float gains[GraphicEq::kBands];
+    const double residual = fitGraphicEq(target, sr, gains);
+    check(residual < 0.25,
+          fmt("the fit lands within %.4f dB of the requested curve at the centres", residual));
+
+    // Setting each band to its own target without solving for the overlap is
+    // the naive thing to do, and it is wrong by several dB. Worth measuring, so
+    // the iteration is justified by a number rather than by an assertion.
+    {
+        double naiveWorst = 0.0;
+        FilterSections s[GraphicEq::kBands];
+        for (int i = 0; i < GraphicEq::kBands; ++i)
+            s[i] = designFilter(FilterKind::PK, f[i], target[i], GraphicEq::kQ, sr);
+        for (int i = 0; i < GraphicEq::kBands; ++i) {
+            double got = 0.0;
+            for (int j = 0; j < GraphicEq::kBands; ++j)
+                got += magnitudeDb(s[j], f[i], sr);
+            naiveWorst = std::max(naiveWorst, std::fabs(target[i] - got));
+        }
+        check(naiveWorst > 1.0,
+              fmt("...where not solving for the overlap would be off by %.2f dB", naiveWorst));
+    }
+
+    // And what actually comes out of process() is that curve, measured.
+    {
+        GraphicEq g;
+        g.prepare(sr, 1);
+        GraphicEq::Params p;
+        std::memcpy(p.gainDb, gains, sizeof p.gainDb);
+        p.amount = 1.0f;
+        g.setParams(p);
+
+        Fft fft(8192);
+        const int len = fft.realSize();
+        std::vector<float> imp(size_t(len), 0.0f);
+        imp[0] = 1.0f;
+        {
+            float *ch[1] = { imp.data() };
+            AudioBuffer buf{ ch, 1, len };
+            g.process(buf);
+        }
+        std::vector<std::complex<float>> spec(size_t(fft.realBins()));
+        fft.realForward(imp.data(), spec.data());
+
+        double worst = 0.0;
+        for (int i = 0; i < GraphicEq::kBands; ++i) {
+            if (f[i] < 30.0 || f[i] > 18000.0)
+                continue;
+            const size_t bin = size_t(std::lround(f[i] * double(len) / sr));
+            const double got = 20.0 * std::log10(double(std::abs(spec[bin])) + 1e-20);
+            worst = std::max(worst, std::fabs(got - target[i]));
+        }
+        check(worst < 0.4,
+              fmt("the measured response follows the requested curve to %.4f dB", worst));
+    }
+
+    // Amount scales the whole thing; at zero the stage is thirty-one identity
+    // filters and has to be inaudible.
+    {
+        GraphicEq g;
+        g.prepare(sr, 1);
+        GraphicEq::Params p;
+        std::memcpy(p.gainDb, gains, sizeof p.gainDb);
+        p.amount = 0.0f;
+        g.setParams(p);
+
+        const int len = 512;
+        std::vector<float> x(size_t(len), 0.0f);
+        uint32_t seed = 0x6E401u;
+        for (auto &v : x)
+            v = 0.25f * float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f;
+        const std::vector<float> x0 = x;
+        float *ch[1] = { x.data() };
+        AudioBuffer buf{ ch, 1, len };
+        g.process(buf);
+
+        double worst = 0.0;
+        for (int i = 0; i < len; ++i)
+            worst = std::max(worst, double(std::fabs(x[size_t(i)] - x0[size_t(i)])));
+        check(worst < 1e-6, fmt("amount 0 is inaudible (%.3g)", worst));
+    }
+}
+
+// ---------------------------------------------------------------- chain order
+
+void testChainOrder()
+{
+    std::printf("\n[chain order]\n");
+
+    // A non-permutation is replaced wholesale, not patched. A duplicate would
+    // run a stage twice and an omission would drop an effect whose switch says
+    // it is on, and neither is something a user could have asked for.
+    {
+        ParamBlock b = transparentBlock();
+        check(std::memcmp(b.order, kDefaultOrder, sizeof b.order) == 0,
+              "the transparent block carries the default order");
+
+        b.order[3] = b.order[4];                 // a duplicate
+        ParamBlock s = sanitise(b);
+        check(std::memcmp(s.order, kDefaultOrder, sizeof s.order) == 0,
+              "a duplicated stage falls back to the default order");
+
+        b = transparentBlock();
+        b.order[0] = 99;                         // out of range
+        s = sanitise(b);
+        check(std::memcmp(s.order, kDefaultOrder, sizeof s.order) == 0,
+              "an out-of-range stage falls back to the default order");
+
+        // A genuine permutation survives untouched.
+        b = transparentBlock();
+        for (int i = 0; i < kStageCount; ++i)
+            b.order[i] = uint8_t(kStageCount - 1 - i);
+        s = sanitise(b);
+        bool reversed = true;
+        for (int i = 0; i < kStageCount; ++i)
+            reversed = reversed && s.order[i] == uint8_t(kStageCount - 1 - i);
+        check(reversed, "a real permutation survives sanitising");
+        check(isSane(s), "and the block is sane");
+    }
+
+    // The order has to actually change the audio, or it is a setting that does
+    // nothing. An equalizer preamp of +12 dB and a limiter at -6 dB: with the
+    // equalizer first the limiter catches it, and the other way round it does
+    // not, because nothing runs after the ceiling.
+    {
+        constexpr double sr = 48000.0;
+        constexpr int n = 8192;
+        const float thr = std::pow(10.0f, -6.0f / 20.0f);
+
+        const auto run = [&](bool eqFirst) {
+            ParamBlock p = transparentBlock();
+            p.enableMask = kEnEqualizer | kEnLimiter;
+            p.eq.preampDb = 12.0f;
+            p.eq.bandCount = 0;
+            p.limiter.thresholdDb = -6.0f;
+            p.limiter.releaseMs = 20.0f;
+            p.limiter.lookaheadMs = 1.0f;
+            p.generation = eqFirst ? 1u : 2u;
+
+            // Everything else keeps its default position; only these two move.
+            int w = 0;
+            uint8_t order[kStageCount];
+            if (eqFirst) {
+                order[w++] = kStageEqualizer;
+                order[w++] = kStageLimiter;
+            } else {
+                order[w++] = kStageLimiter;
+                order[w++] = kStageEqualizer;
+            }
+            for (int i = 0; i < kStageCount; ++i) {
+                const uint8_t s = kDefaultOrder[i];
+                if (s != kStageEqualizer && s != kStageLimiter)
+                    order[w++] = s;
+            }
+            std::memcpy(p.order, order, sizeof order);
+            p = sanitise(p);
+
+            EffectChain chain;
+            chain.prepare(sr, 1, n);
+            chain.apply(p);
+
+            std::vector<float> x(size_t(n), 0.0f);
+            for (int i = 0; i < n; ++i)
+                x[size_t(i)] = 0.2f * float(std::sin(2.0 * 3.14159265358979 * 300.0 * i / sr));
+            float *ch[1] = { x.data() };
+            AudioBuffer buf{ ch, 1, n };
+            chain.process(buf);
+
+            float peak = 0.0f;
+            for (int i = n / 2; i < n; ++i)
+                peak = std::max(peak, std::fabs(x[size_t(i)]));
+            return peak;
+        };
+
+        const float limited = run(true);
+        const float unlimited = run(false);
+
+        check(limited <= thr * 1.0001f,
+              fmt("equalizer then limiter: peak %.4f is under the ceiling", double(limited)));
+        check(unlimited > thr * 1.5f,
+              fmt("limiter then equalizer: peak %.4f is not (%.2f dB higher)",
+                  double(unlimited), 20.0 * std::log10(double(unlimited / limited))));
+    }
+}
+
 // ------------------------------------------------------------ impulse analysis
 
 void testImpulseAnalysis()
@@ -1499,7 +2560,7 @@ void testParamBlock()
 {
     std::printf("\n[parameter block]\n");
 
-    check(sizeof(ParamBlock) == 300, fmt("wire size is %.0f bytes", double(sizeof(ParamBlock))));
+    check(sizeof(ParamBlock) == 1300, fmt("wire size is %.0f bytes", double(sizeof(ParamBlock))));
     check(sizeof(StatusBlock) == 296, "status block is 296 bytes");
 
     // The transparent default must not be the dsp defaults. This is the test
@@ -1668,6 +2729,16 @@ void testNoAllocation()
     p.bass.amount = 0.4f;
     p.width.width = 1.4f;
     p.multiband.band[0].ratio = 2.0f;
+    // A full band set, so the equalizer's design path runs under the counter
+    // too -- thirty-two designs on a parameter change is exactly the sort of
+    // thing that would be tempting to implement with a std::vector.
+    for (int i = 0; i < Equalizer::kMaxBands; ++i) {
+        p.eq.band[i] = eqBand(FilterKind(i % int(FilterKind::Count)),
+                              30.0 * std::pow(1.22, double(i)),
+                              (i % 2) ? 4.0 : -4.0, 1.0 + 0.1 * double(i));
+    }
+    p.eq.bandCount = uint32_t(Equalizer::kMaxBands);
+    p.eq.preampDb = -6.0f;
     p = sanitise(p);
 
     // One warm-up pass outside the count: the first apply legitimately designs
@@ -1685,6 +2756,7 @@ void testNoAllocation()
         for (int n : sizes) {
             p.generation = uint32_t(round * 100 + n);
             p.comp.thresholdDb = -float(n % 20);    // force a genuine re-design
+            p.eq.band[n % Equalizer::kMaxBands].gainDb = float(n % 13) - 6.0f;
             chain.apply(sanitise(p));
             AudioBuffer b{ ptrs.data(), ch, n };
             chain.process(b);
@@ -1790,6 +2862,13 @@ int runTests()
     testFft();
     testResampler();
     testConvolver();
+    testEqualizer();
+    testGraphicEq();
+    testRouting();
+    testLoudness();
+    testLimiter();
+    testDynamicBass();
+    testChainOrder();
     testImpulseAnalysis();
     testImpulseBlob();
     testParamBlock();

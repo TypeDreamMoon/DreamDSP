@@ -102,6 +102,9 @@ bool saveDreamPreset(const QString &path, const DreamPreset &preset, QString *er
             { dsp::kEnMultiband, "multiband" },{ dsp::kEnReverb, "reverb" },
             { dsp::kEnWidth, "width" },        { dsp::kEnCrossfeed, "crossfeed" },
             { dsp::kEnConvolution, "convolution" },
+            { dsp::kEnEqualizer, "equalizer" },
+            { dsp::kEnMatrix, "matrix" },      { dsp::kEnDelay, "delay" },
+            { dsp::kEnLoudness, "loudness" },
         };
         for (const auto &n : kNames) {
             if (p.enableMask & n.bit)
@@ -165,6 +168,35 @@ bool saveDreamPreset(const QString &path, const DreamPreset &preset, QString *er
         };
 
         root[QStringLiteral("effects")] = fx;
+    }
+
+    // --- output stage ------------------------------------------------------
+    //
+    // Written as named fields like everything else here rather than as the
+    // block's bytes: a preset that survives a wire-format change is worth more
+    // than one that is quick to serialise, and this file is meant to be
+    // readable.
+    {
+        QJsonArray rows;
+        for (int o = 0; o < dsp::ChannelMatrix::kMaxChannels; ++o) {
+            QJsonArray row;
+            for (int i = 0; i < dsp::ChannelMatrix::kMaxChannels; ++i)
+                row.append(preset.params.matrix.gain[o][i]);
+            rows.append(row);
+        }
+        QJsonArray delays;
+        for (int c = 0; c < dsp::ChannelDelay::kMaxChannels; ++c)
+            delays.append(preset.params.delay.ms[c]);
+
+        root[QStringLiteral("output")] = QJsonObject{
+            { QStringLiteral("matrix"), rows },
+            { QStringLiteral("delayMs"), delays },
+            { QStringLiteral("loudness"), QJsonObject{
+                { QStringLiteral("referenceDb"), preset.params.loudness.referenceDb },
+                { QStringLiteral("offsetDb"), preset.params.loudness.offsetDb },
+                { QStringLiteral("amount"), preset.params.loudness.amount },
+            } },
+        };
     }
 
     // --- convolution -------------------------------------------------------
@@ -296,6 +328,31 @@ bool loadDreamPreset(const QString &path, DreamPreset *out, QString *error)
             if (i < enabled.size())
                 p.multiband.bandEnabled[i] = enabled.at(i).toBool(true);
         }
+    }
+
+    // --- output stage ------------------------------------------------------
+    {
+        const QJsonObject op = root.value(QStringLiteral("output")).toObject();
+        // Absent for a preset written before the output stage existed. The
+        // identity is the neutral matrix, not the zeroes a missing key would
+        // otherwise leave, so it is set unconditionally and then overwritten.
+        p.matrix = dsp::ChannelMatrix::identity();
+
+        const QJsonArray rows = op.value(QStringLiteral("matrix")).toArray();
+        for (int o = 0; o < rows.size() && o < dsp::ChannelMatrix::kMaxChannels; ++o) {
+            const QJsonArray row = rows.at(o).toArray();
+            for (int i = 0; i < row.size() && i < dsp::ChannelMatrix::kMaxChannels; ++i)
+                p.matrix.gain[o][i] = float(row.at(i).toDouble());
+        }
+
+        const QJsonArray delays = op.value(QStringLiteral("delayMs")).toArray();
+        for (int c = 0; c < delays.size() && c < dsp::ChannelDelay::kMaxChannels; ++c)
+            p.delay.ms[c] = float(delays.at(c).toDouble());
+
+        const QJsonObject ld = op.value(QStringLiteral("loudness")).toObject();
+        p.loudness.referenceDb = float(ld.value(QStringLiteral("referenceDb")).toDouble(0.0));
+        p.loudness.offsetDb = float(ld.value(QStringLiteral("offsetDb")).toDouble(0.0));
+        p.loudness.amount = float(ld.value(QStringLiteral("amount")).toDouble(1.0));
     }
 
     const QJsonObject cv = root.value(QStringLiteral("convolution")).toObject();

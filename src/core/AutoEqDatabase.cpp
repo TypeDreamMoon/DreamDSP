@@ -61,29 +61,48 @@ QStringList AutoEqDatabase::sourceNames()
     return out;
 }
 
-bool AutoEqDatabase::load(const QString &configDir, QString *error)
+bool AutoEqDatabase::load(const QStringList &dirs, QString *error)
 {
     m_entries.clear();
     m_loaded = false;
 
-    if (configDir.isEmpty()) {
-        if (error) *error = QStringLiteral("未知的 APO 配置目录");
-        return false;
-    }
-
-    QDir dir(configDir);
+    QStringList searched;
     int found = 0;
-    for (int i = 0; i < static_cast<int>(std::size(kSources)); ++i) {
-        const QString path = dir.filePath(QString::fromLatin1(kSources[i].file));
-        if (!QFile::exists(path))
+
+    // Several directories rather than one, because these databases arrive with
+    // Peace or with Equalizer APO and DreamDSP no longer requires either to be
+    // installed. Dropping the four files into DreamDSP's own directory has to
+    // be enough, or "AutoEQ needs Peace" would be a dependency hiding inside a
+    // feature rather than in the audio path.
+    for (const QString &d : dirs) {
+        if (d.isEmpty())
             continue;
-        if (loadFile(path, i, error))
-            ++found;
+        QDir dir(d);
+        searched << QDir::toNativeSeparators(dir.absolutePath());
+        for (int i = 0; i < static_cast<int>(std::size(kSources)); ++i) {
+            const QString path = dir.filePath(QString::fromLatin1(kSources[i].file));
+            if (!QFile::exists(path))
+                continue;
+            // First directory that has a given database wins; the rest are not
+            // consulted for it, so two copies cannot produce doubled entries.
+            bool already = false;
+            for (const AutoEqEntry &e : std::as_const(m_entries)) {
+                if (e.source == i) { already = true; break; }
+            }
+            if (already)
+                continue;
+            if (loadFile(path, i, error))
+                ++found;
+        }
     }
 
     if (found == 0) {
-        if (error && error->isEmpty())
-            *error = QStringLiteral("在 %1 里没有找到 AutoEQ 数据库").arg(configDir);
+        if (error && error->isEmpty()) {
+            *error = searched.isEmpty()
+                         ? QStringLiteral("没有可搜索的目录")
+                         : QStringLiteral("在这些目录里没有找到 AutoEQ 数据库:%1")
+                               .arg(searched.join(QStringLiteral("、")));
+        }
         return false;
     }
 

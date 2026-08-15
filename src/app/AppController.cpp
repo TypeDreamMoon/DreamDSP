@@ -4,9 +4,11 @@
 #include "WavFile.h"
 
 #include "core/ApoConfig.h"
+#include "core/GraphicCurve.h"
 #include "platform/Autostart.h"
 
 #include <QCoreApplication>
+#include <QRegularExpression>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileInfo>
@@ -35,6 +37,8 @@ QString num(double v, int decimals)
 AppController::AppController(QObject *parent)
     : QObject(parent)
 {
+    std::memcpy(m_order, dsp::kDefaultOrder, sizeof m_order);
+
     m_apo = locateApo();
     m_presets.setImportDirectory(m_apo.configPath);
 
@@ -100,18 +104,49 @@ AppController::AppController(QObject *parent)
     // Every effect change reaches the copy inside audiodg, whether it came from
     // a slider, a preset, or restoring the last session. The publisher
     // coalesces, so connecting the fine-grained signals directly is fine.
-    m_publisher.setSources(&m_compressor, &m_reverb, &m_effects);
+    m_publisher.setSources(&m_compressor, &m_reverb, &m_effects, &m_bands, &m_output);
+    connect(&m_output, &OutputModel::changed, this, [this] {
+        markDirty(true);
+        m_publisher.schedule();
+    });
+
+    // Only while the correction is switched on: this is a COM call, and one
+    // every half second for a feature nobody is using is a cost with no buyer.
+    m_volumeTimer.setInterval(500);
+    connect(&m_volumeTimer, &QTimer::timeout, this, &AppController::pollVolume);
+    connect(&m_output, &OutputModel::changed, this, [this] {
+        if (m_output.loudnessOn() && !m_volumeTimer.isActive()) {
+            pollVolume();
+            m_volumeTimer.start();
+        } else if (!m_output.loudnessOn() && m_volumeTimer.isActive()) {
+            m_volumeTimer.stop();
+        }
+    });
     connect(&m_compressor, &CompressorModel::paramsChanged,
             &m_publisher, &ParamPublisher::schedule);
     connect(&m_reverb, &ReverbModel::paramsChanged,
             &m_publisher, &ParamPublisher::schedule);
     connect(&m_effects, &EffectsModel::changed,
             &m_publisher, &ParamPublisher::schedule);
-    connect(&m_publisher, &ParamPublisher::statusChanged,
-            this, &AppController::apoStatusChanged);
+    connect(&m_publisher, &ParamPublisher::statusChanged, this, [this] {
+        // The channel count comes from the APO's own report rather than from a
+        // device query: it is the number the processing object is actually
+        // handed, which is what the routing and delay controls have to match.
+        const dsp::StatusBlock &s = m_publisher.status();
+        for (uint32_t i = 0; i < s.instanceCount; ++i) {
+            if (s.inst[i].flags & dsp::kSfStreaming) {
+                m_output.setChannels(int(s.inst[i].channels));
+                break;
+            }
+        }
+        emit apoStatusChanged();
+    });
 
     restoreSession();
     refreshDevices();
+    // One reading at start-up so the control shows a number rather than "cannot
+    // read"; the repeating poll only runs while the correction is switched on.
+    pollVolume();
     refreshEngaged();
     refreshApoState();
 
@@ -123,8 +158,33 @@ AppController::AppController(QObject *parent)
     // params.bin is what the APO is actually running, so it wins over the
     // QSettings copy for the switch's position. The file name still comes from
     // QSettings -- the blob is content-addressed and does not carry one.
-    m_convolutionEnabled = m_publisher.convolutionEnabled();
-    m_publisher.publishNow();
+    if (m_publisher.convolution().irGeneration != 0u) {
+        m_convolutionEnabled = m_publisher.convolutionEnabled();
+    } else if (!m_convolution.path.isEmpty() && QFileInfo::exists(m_convolution.path)) {
+        // Nothing published at all, but the session remembers a file. A
+        // parameter file that was lost or refused -- a format change being the
+        // usual reason -- would otherwise leave the interface naming an impulse
+        // response that is not loaded, which is precisely the state a user
+        // cannot tell apart from a working one. Republish it and keep the
+        // switch position restoreSession() read out of QSettings.
+        QString err;
+        if (!m_publisher.publishImpulse(m_convolution.path, &err))
+            setError(QStringLiteral("脉冲响应重新载入失败:%1").arg(err));
+        else
+            m_publisher.setConvolutionEnabled(m_convolutionEnabled);
+    }
+    // The curve and the order come back out of the same file the effects do.
+    m_graphic = m_publisher.graphic();
+    m_graphicEnabled = m_publisher.graphicEnabled();
+    std::memcpy(m_order, m_publisher.order(), sizeof m_order);
+    emit graphicChanged();
+    emit chainChanged();
+
+    // Settles who applies the equalizer before the first block goes out, so
+    // that a machine where both are present never gets one buffer of doubled
+    // gain during start-up.
+    syncEqOwnership();
+    flushParams();
     refreshImpulseCurve();
 
     // Make sure our include file exists from the start; it is inert until the
@@ -150,7 +210,7 @@ AppController::~AppController()
     }
     // The same reasoning for the parameter channel: a slider moved in the last
     // 30 ms would otherwise be lost, and it is the session store as well.
-    m_publisher.publishNow();
+    flushParams();
     saveSession();
 }
 
@@ -242,7 +302,11 @@ void AppController::setEngaged(bool on)
                   : QStringLiteral("已停止接管 —— 已从 config.txt 移除"));
     m_engaged = on;
     emit engagedChanged();
+    emit eqEngineChanged();
     refreshTrayIcon();
+    // Hands the equalizer over. Engaging APO switches ours off and disengaging
+    // switches it back on, so the curve is applied exactly once either way.
+    scheduleWrite();
 }
 
 // ------------------------------------------------------------------- output
@@ -289,11 +353,30 @@ void appendBlock(QString &out, const Preset &p, const QString &deviceName,
 
 } // namespace
 
+QString AppController::eqEngine() const
+{
+    if (!m_eqEnabled)
+        return QStringLiteral("已旁通");
+    if (m_apo.found && m_engaged)
+        return QStringLiteral("Equalizer APO");
+    if (nativeProcessing())
+        return QStringLiteral("DreamDSP");
+    return QStringLiteral("未接入音频");
+}
+
 QString AppController::generatedText() const
 {
     QString out;
     out += QStringLiteral("# Generated by DreamDSP %1 -- edits will be overwritten.\r\n")
                .arg(QStringLiteral(DREAMDSP_VERSION));
+
+    // Kept current even while nothing includes it, so that engaging Equalizer
+    // APO is a one-line change rather than a regeneration -- but say plainly
+    // that it is not the file doing the work, because a stale-looking config
+    // that is nevertheless being obeyed is the worst of the two states.
+    if (nativeProcessing())
+        out += QStringLiteral("# DreamDSP is processing this endpoint itself; "
+                              "nothing includes this file.\r\n");
 
     if (!m_eqEnabled) {
         out += QStringLiteral("# (equalizer disabled)\r\n");
@@ -368,6 +451,7 @@ void AppController::refreshDevices()
 
     // Needed for the convolution sample-rate check.
     m_deviceRate = dreamdsp::deviceSampleRate(profileKeyForDevice(m_currentDevice));
+    pollVolume();
 
     emit devicesChanged();
     emit currentDeviceChanged();
@@ -398,7 +482,19 @@ void AppController::resetAll()
         m_effects.restore(defaults);
     }
 
-    setMessage(QStringLiteral("已全部归零(均衡器与效果)"));
+    // The output stage as well: routing back to straight-through, no delays,
+    // no loudness correction. "Reset everything" that left a channel swap in
+    // place would be the most confusing possible outcome.
+    {
+        dsp::ParamBlock defaults = dsp::transparentBlock();
+        defaults.loudness.amount = 1.0f;
+        m_output.restore(defaults);
+    }
+
+    clearGraphicEq();
+    resetChainOrder();
+
+    setMessage(QStringLiteral("已全部归零(均衡器、效果与输出)"));
 }
 
 // ------------------------------------------------------------- full presets
@@ -422,8 +518,13 @@ bool AppController::saveFullPreset(const QString &name)
     p.eqEnabled = m_eqEnabled;
     // Straight from the publisher, so a preset holds byte-for-byte what the
     // DSP is running rather than a second reading of the same models.
+    //
+    // The equalizer is deliberately left out of the block: p.eq above already
+    // holds it, as a readable band list rather than 520 bytes of base64, and
+    // two copies of the same curve in one file is one copy too many.
     p.params = blockFromModels(&m_compressor, &m_reverb, &m_effects,
-                               m_publisher.convolution(), m_convolutionEnabled);
+                               m_publisher.convolution(), m_convolutionEnabled,
+                               nullptr, 0.0, false, &m_output);
     p.convolutionFile = m_convolution.path;
     p.convolutionName = m_convolution.name;
     p.autoEqSource = m_autoEqSource;
@@ -459,6 +560,7 @@ bool AppController::loadFullPreset(const QString &path)
     m_compressor.restore(p.params.comp, (p.params.enableMask & dsp::kEnComp) != 0);
     m_reverb.restore(p.params.reverb, (p.params.enableMask & dsp::kEnReverb) != 0);
     m_effects.restore(p.params);
+    m_output.restore(p.params);
     m_autoEqSource = p.autoEqSource;
 
     m_publisher.setConvolutionMix(p.params.convolution.mix);
@@ -478,7 +580,7 @@ bool AppController::loadFullPreset(const QString &path)
 
     setCurrentPreset(p.name);
     markDirty(false);
-    m_publisher.publishNow();
+    flushParams();
     emit generatedTextChanged();
     scheduleWrite();
 
@@ -614,9 +716,20 @@ QString AppController::apoTargetDevice() const
 
 void AppController::refreshApoState()
 {
+    const bool wasNative = nativeProcessing();
+
     m_apoState = apoState();
     m_apoSlot = apoSlotOf(apoTargetDevice());
     emit apoStateChanged();
+    emit eqEngineChanged();
+
+    // Attaching to an endpoint is the moment the equalizer moves house. Doing
+    // it here rather than in setApoAttached covers every route to the same
+    // state -- a device switch, an install, the elevated helper coming back.
+    if (nativeProcessing() != wasNative) {
+        syncEqOwnership();
+        scheduleWrite();
+    }
 }
 
 void AppController::installApo()
@@ -807,12 +920,11 @@ void AppController::quitApplication()
 
 bool AppController::nativeConvolution() const
 {
-    // DreamDSP convolves it itself whenever its own processing object is
-    // actually in this endpoint's chain. Otherwise the work has to be handed to
-    // Equalizer APO, which is the fallback rather than the default because its
-    // Convolution: command requires the file to be at exactly the device rate
-    // and is silently wrong when it is not.
-    return m_apoState.installed() && m_apoSlot.isOurs;
+    // Otherwise the work has to be handed to Equalizer APO, which is the
+    // fallback rather than the default because its Convolution: command
+    // requires the file to be at exactly the device rate and is silently wrong
+    // when it is not.
+    return nativeProcessing();
 }
 
 bool AppController::rateMismatch() const
@@ -1039,6 +1151,17 @@ void AppController::setMetering(bool on)
     }
 }
 
+void AppController::pollVolume()
+{
+    if (!m_endpointVolume.attach(profileKeyForDevice(m_currentDevice))) {
+        m_output.setVolume(0.0, false);
+        return;
+    }
+    const float db = m_endpointVolume.levelDb();
+    // 1.0 is the "no reading" sentinel; a real attenuation is never positive.
+    m_output.setVolume(db > 0.0f ? 0.0 : double(db), db <= 0.0f);
+}
+
 void AppController::pollMeter()
 {
     const float v = m_meter.peak();
@@ -1237,8 +1360,16 @@ bool AppController::loadAutoEq()
     if (m_autoEq.loaded())
         return true;
 
+    // DreamDSP's own directory first, so a copy placed there wins over whatever
+    // an old Peace install left behind.
+    QStringList roots;
+    roots << PresetStore::userDirectory() + QStringLiteral("/autoeq");
+    roots << PresetStore::userDirectory();
+    if (!m_apo.configPath.isEmpty())
+        roots << m_apo.configPath;
+
     QString err;
-    if (!m_autoEq.load(m_apo.configPath, &err)) {
+    if (!m_autoEq.load(roots, &err)) {
         setError(QStringLiteral("载入 AutoEQ 数据库失败: %1").arg(err));
         emit autoEqChanged();
         return false;
@@ -1387,25 +1518,328 @@ bool AppController::deletePreset(int row)
     return true;
 }
 
+// ------------------------------------------------------- graphic equalizer
+
+bool AppController::graphicLoaded() const
+{
+    for (int i = 0; i < dsp::GraphicEq::kBands; ++i)
+        if (m_graphic.gainDb[i] != 0.0f)
+            return true;
+    return false;
+}
+
+QVariantList AppController::graphicBands() const
+{
+    const double *f = dsp::GraphicEq::centres();
+    QVariantList out;
+    for (int i = 0; i < dsp::GraphicEq::kBands; ++i) {
+        out.append(QVariantMap{
+            { QStringLiteral("hz"), f[i] },
+            // What was asked for, and what the bank settled on. Both, because
+            // the gap between them is the honest description of a third-octave
+            // bank following an arbitrary curve.
+            { QStringLiteral("target"),
+              i < m_graphicTarget.size() ? m_graphicTarget.at(i) : 0.0 },
+            { QStringLiteral("gain"), double(m_graphic.gainDb[i]) },
+        });
+    }
+    return out;
+}
+
+bool AppController::importGraphicEq(const QString &text)
+{
+    const GraphicCurve curve = parseGraphicCurve(text);
+    if (curve.size() < 2) {
+        setError(QStringLiteral("没能从这段文本里读出曲线 —— 需要「频率 增益」成对的数据"));
+        return false;
+    }
+
+    double target[dsp::GraphicEq::kBands];
+    resampleCurve(curve, dsp::GraphicEq::centres(), dsp::GraphicEq::kBands, target);
+
+    m_graphicTarget.resize(dsp::GraphicEq::kBands);
+    for (int i = 0; i < dsp::GraphicEq::kBands; ++i)
+        m_graphicTarget[i] = target[i];
+
+    // Fitted at the endpoint's own rate, because that is where it will run.
+    const double rate = m_deviceRate > 0 ? double(m_deviceRate) : 48000.0;
+    m_graphicFitError = dsp::fitGraphicEq(target, rate, m_graphic.gainDb);
+    if (m_graphic.amount <= 0.0f)
+        m_graphic.amount = 1.0f;
+    m_graphicEnabled = true;
+
+    setError({});
+    setMessage(QStringLiteral("已载入曲线 · %1 个点 → 31 段,最大偏差 %2 dB")
+                   .arg(curve.size())
+                   .arg(m_graphicFitError, 0, 'f', 2));
+    emit graphicChanged();
+    emit chainChanged();
+    markDirty(true);
+    scheduleWrite();
+    return true;
+}
+
+bool AppController::loadGraphicEqFile(const QUrl &url)
+{
+    const QString path = url.isLocalFile() ? url.toLocalFile() : url.toString();
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        setError(QStringLiteral("打不开 %1:%2").arg(path, f.errorString()));
+        return false;
+    }
+    return importGraphicEq(QString::fromUtf8(f.readAll()));
+}
+
+void AppController::clearGraphicEq()
+{
+    std::memset(m_graphic.gainDb, 0, sizeof m_graphic.gainDb);
+    m_graphicTarget.clear();
+    m_graphicFitError = 0.0;
+    m_graphicEnabled = false;
+    emit graphicChanged();
+    emit chainChanged();
+    markDirty(true);
+    scheduleWrite();
+}
+
+void AppController::setGraphicEnabled(bool on)
+{
+    if (m_graphicEnabled == on)
+        return;
+    m_graphicEnabled = on;
+    emit graphicChanged();
+    emit chainChanged();
+    markDirty(true);
+    scheduleWrite();
+}
+
+void AppController::setGraphicAmount(double v)
+{
+    const float a = float(std::clamp(v, 0.0, 1.0));
+    if (m_graphic.amount == a)
+        return;
+    m_graphic.amount = a;
+    emit graphicChanged();
+    markDirty(true);
+    scheduleWrite();
+}
+
+// ------------------------------------------------------------------- chain
+
+namespace {
+
+struct StageInfo {
+    uint8_t id;
+    const char *name;
+    const char *hint;
+    int page;        // which section configures it
+};
+
+// Index-aligned with the kStage* ids, so a lookup is a subscript.
+const StageInfo kStages[] = {
+    { dsp::kStageEqualizer,   "参数均衡",   "32 段 · 18 种滤波器",    0 },
+    { dsp::kStageGraphic,     "图形均衡",   "31 段 · 从曲线导入",     0 },
+    { dsp::kStageLoudness,    "等响度补偿", "跟随系统音量",           3 },
+    { dsp::kStageDynBass,     "动态低音",   "按剩余余量提升低频",     1 },
+    { dsp::kStageBass,        "虚拟低音",   "合成谐波,小喇叭用",     1 },
+    { dsp::kStageExciter,     "激励器",     "高频谐波",               1 },
+    { dsp::kStageTube,        "电子管",     "偶次谐波染色",           1 },
+    { dsp::kStageComp,        "压缩器",     "动态范围",               1 },
+    { dsp::kStageMultiband,   "多段压缩",   "三段独立动态",           1 },
+    { dsp::kStageReverb,      "混响",       "空间感",                 1 },
+    { dsp::kStageWidth,       "声场展宽",   "侧信号增益",             1 },
+    { dsp::kStageCrossfeed,   "串扰",       "耳机听音箱",             1 },
+    { dsp::kStageMatrix,      "声道路由",   "输出 = 输入的加权和",    3 },
+    { dsp::kStageConvolution, "卷积",       "脉冲响应 · 任意采样率",  2 },
+    { dsp::kStageDelay,       "声道延时",   "音箱时间对齐",           3 },
+    { dsp::kStageLimiter,     "限制器",     "前瞻峰值限制",           3 },
+};
+// Page indices follow the navigation rail: 0 equalizer, 1 effects,
+// 2 convolution, 3 output, 4 chain, 5 AutoEQ, 6 settings.
+static_assert(std::size(kStages) == size_t(dsp::kStageCount),
+              "kStages must stay index-aligned with the kStage* ids");
+
+} // namespace
+
+QVariantList AppController::chain() const
+{
+    QVariantList out;
+    for (int i = 0; i < dsp::kStageCount; ++i) {
+        const uint8_t id = m_order[i];
+        if (id >= dsp::kStageCount)
+            continue;
+        const StageInfo &s = kStages[id];
+        out.append(QVariantMap{
+            { QStringLiteral("id"), int(id) },
+            { QStringLiteral("name"), QString::fromUtf8(s.name) },
+            { QStringLiteral("hint"), QString::fromUtf8(s.hint) },
+            { QStringLiteral("page"), s.page },
+            { QStringLiteral("on"), stageEnabled(int(id)) },
+        });
+    }
+    return out;
+}
+
+bool AppController::chainIsDefault() const
+{
+    return std::memcmp(m_order, dsp::kDefaultOrder, sizeof m_order) == 0;
+}
+
+bool AppController::stageEnabled(int stageId) const
+{
+    switch (stageId) {
+    case dsp::kStageEqualizer:   return m_eqEnabled;
+    case dsp::kStageGraphic:     return m_graphicEnabled;
+    case dsp::kStageLoudness:    return m_output.loudnessOn();
+    case dsp::kStageDynBass:     return m_effects.dynBassOn();
+    case dsp::kStageBass:        return m_effects.bassOn();
+    case dsp::kStageExciter:     return m_effects.exciterOn();
+    case dsp::kStageTube:        return m_effects.tubeOn();
+    case dsp::kStageComp:        return m_compressor.enabled();
+    case dsp::kStageMultiband:   return m_effects.multibandOn();
+    case dsp::kStageReverb:      return m_reverb.enabled();
+    case dsp::kStageWidth:       return m_effects.widthOn();
+    case dsp::kStageCrossfeed:   return m_effects.crossfeedOn();
+    case dsp::kStageMatrix:      return m_output.matrixOn();
+    case dsp::kStageConvolution: return m_convolutionEnabled;
+    case dsp::kStageDelay:       return m_output.delayOn();
+    case dsp::kStageLimiter:     return m_output.limiterOn();
+    default:                     return false;
+    }
+}
+
+void AppController::setStageEnabled(int stageId, bool on)
+{
+    // Adding and removing an effect is the same switch its own page carries.
+    // There is deliberately no second notion of membership: a chain list whose
+    // entries could disagree with the switches would be two truths about the
+    // same thing, and they would drift.
+    switch (stageId) {
+    case dsp::kStageEqualizer:   setEqEnabled(on); break;
+    case dsp::kStageGraphic:     setGraphicEnabled(on); break;
+    case dsp::kStageLoudness:    m_output.setLoudnessOn(on); break;
+    case dsp::kStageDynBass:     m_effects.setProperty("dynBassEnabled", on); break;
+    case dsp::kStageBass:        m_effects.setProperty("bassEnabled", on); break;
+    case dsp::kStageExciter:     m_effects.setProperty("exciterEnabled", on); break;
+    case dsp::kStageTube:        m_effects.setProperty("tubeEnabled", on); break;
+    case dsp::kStageComp:        m_compressor.setEnabled(on); break;
+    case dsp::kStageMultiband:   m_effects.setProperty("multibandEnabled", on); break;
+    case dsp::kStageReverb:      m_reverb.setEnabled(on); break;
+    case dsp::kStageWidth:       m_effects.setProperty("widthEnabled", on); break;
+    case dsp::kStageCrossfeed:   m_effects.setProperty("crossfeedEnabled", on); break;
+    case dsp::kStageMatrix:      m_output.setMatrixOn(on); break;
+    case dsp::kStageConvolution: setConvolutionEnabled(on); break;
+    case dsp::kStageDelay:       m_output.setDelayOn(on); break;
+    case dsp::kStageLimiter:     m_output.setLimiterOn(on); break;
+    default: return;
+    }
+    emit chainChanged();
+}
+
+void AppController::moveStage(int fromIndex, int toIndex)
+{
+    if (fromIndex < 0 || fromIndex >= dsp::kStageCount)
+        return;
+    toIndex = std::clamp(toIndex, 0, dsp::kStageCount - 1);
+    if (fromIndex == toIndex)
+        return;
+
+    const uint8_t moved = m_order[fromIndex];
+    if (fromIndex < toIndex)
+        std::memmove(m_order + fromIndex, m_order + fromIndex + 1, size_t(toIndex - fromIndex));
+    else
+        std::memmove(m_order + toIndex + 1, m_order + toIndex, size_t(fromIndex - toIndex));
+    m_order[toIndex] = moved;
+
+    emit chainChanged();
+    markDirty(true);
+    scheduleWrite();
+}
+
+void AppController::resetChainOrder()
+{
+    if (chainIsDefault())
+        return;
+    std::memcpy(m_order, dsp::kDefaultOrder, sizeof m_order);
+    emit chainChanged();
+    markDirty(true);
+    scheduleWrite();
+    setMessage(QStringLiteral("已恢复默认处理顺序"));
+}
+
 // ------------------------------------------------------------------ private
 
 void AppController::scheduleWrite()
 {
-    if (m_apo.found)
-        m_writeTimer.start();
+    // The equalizer's real destination is the parameter channel, not a text
+    // file, so every change goes there first and unconditionally. The publisher
+    // coalesces on its own, which is why this is not behind the timer.
+    m_publisher.setEqualizer(m_preamp, eqRunsHere());
+    m_publisher.setGraphic(m_graphic, m_graphicEnabled);
+    m_publisher.setOrder(m_order);
+    m_publisher.schedule();
+
+    // Started whether or not Equalizer APO is installed: this timer is also
+    // what saves the session, and gating it on APO meant that on a machine
+    // without APO nothing the user changed was ever written down.
+    m_writeTimer.start();
+}
+
+void AppController::flushParams()
+{
+    m_publisher.setEqualizer(m_preamp, eqRunsHere());
+    m_publisher.setGraphic(m_graphic, m_graphicEnabled);
+    m_publisher.setOrder(m_order);
+    m_publisher.publishNow();
+}
+
+bool AppController::nativeProcessing() const
+{
+    // DreamDSP does the work itself whenever its own processing object is
+    // actually in this endpoint's chain.
+    return m_apoState.installed() && m_apoSlot.isOurs;
+}
+
+bool AppController::eqRunsHere() const
+{
+    // Exactly one of the two applies the curve. Equalizer APO applies it for as
+    // long as our include line is in its config.txt; DreamDSP applies it the
+    // rest of the time. Both at once would land every boost twice, and the
+    // symptom -- everything is right but twice as strong -- is the kind of thing
+    // that gets blamed on the filters rather than on the routing.
+    return m_eqEnabled && !(m_apo.found && m_engaged);
+}
+
+void AppController::syncEqOwnership()
+{
+    // Our object being in the chain is the whole point of installing it, so it
+    // wins: the include line comes out and Equalizer APO stops being part of
+    // the audio path. Reversible, and reported rather than silent.
+    if (nativeProcessing() && m_apo.found && m_engaged) {
+        setEngaged(false);
+        if (!m_engaged)
+            setMessage(QStringLiteral("均衡器已交给 DreamDSP 自己处理 —— "
+                                      "已从 Equalizer APO 的 config.txt 移除引用"));
+        // If that failed -- an unwritable config.txt is the usual reason -- the
+        // include line is still there and APO is still applying the curve.
+        // eqRunsHere() then keeps our own equalizer switched off, which is the
+        // right way to lose that race.
+    }
 }
 
 void AppController::writeNow()
 {
-    if (!m_apo.found)
-        return;
-
-    const QString path = configFilePath(m_apo, QString::fromLatin1(kIncludeFile));
-    QString err;
-    if (!ApoConfig::writeText(path, generatedText(), &err))
-        setError(QStringLiteral("写入 %1 失败: %2").arg(QString::fromLatin1(kIncludeFile), err));
-    else
-        setError({});
+    // Written even when nothing includes it. The file is inert on its own, and
+    // having it on disk and current is what makes engaging Equalizer APO a
+    // one-line change rather than a regeneration.
+    if (m_apo.found) {
+        const QString path = configFilePath(m_apo, QString::fromLatin1(kIncludeFile));
+        QString err;
+        if (!ApoConfig::writeText(path, generatedText(), &err))
+            setError(QStringLiteral("写入 %1 失败: %2").arg(QString::fromLatin1(kIncludeFile), err));
+        else
+            setError({});
+    }
 
     saveSession();
 }

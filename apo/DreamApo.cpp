@@ -189,7 +189,14 @@ HRESULT DreamApo::GetLatency(HNSTIME *pTime)
     // synchronisation, and the capture-path echo canceller uses the render
     // stream as its reference; being wrong there is a synchronisation bug that
     // shows up somewhere else entirely.
-    const uint32_t samples = m_locked ? m_chain.convolution().latencySamples() : 0u;
+    //
+    // The per-channel delay is summed in as well. Unlike the convolver's, its
+    // figure follows a parameter the user can change at any time, so a delay
+    // dialled in after the stream was built leaves this stale until the stream
+    // is rebuilt. Time alignment is a few milliseconds, which is below what
+    // video synchronisation resolves; there is no way to have both a live
+    // control and a fixed reported latency.
+    const uint32_t samples = m_locked ? uint32_t(m_chain.latencySamples()) : 0u;
     *pTime = (samples > 0 && m_sampleRate > 0.0)
                  ? HNSTIME(std::llround(double(samples) * 10000000.0 / m_sampleRate))
                  : 0;
@@ -357,7 +364,7 @@ HRESULT DreamApo::LockForProcess(UINT32 u32NumInputConnections,
         m_chain.convolution().setArmed(initial.convolution.irGeneration != 0u);
         if (m_chain.convolution().armed()) {
             trace(L"convolution armed, latency samples",
-                  m_chain.convolution().latencySamples());
+                  m_chain.latencySamples());
         }
     }
 

@@ -96,6 +96,8 @@ HusWindow {
                 { label: '均衡器', icon: HusIcon.SlidersOutlined },
                 { label: '效果',   icon: HusIcon.ThunderboltOutlined },
                 { label: '卷积',   icon: HusIcon.SoundOutlined },
+                { label: '输出',   icon: HusIcon.DeploymentUnitOutlined },
+                { label: '链路',   icon: HusIcon.NodeIndexOutlined },
                 { label: 'AutoEQ', icon: HusIcon.CustomerServiceOutlined },
                 { label: '设置',   icon: HusIcon.SettingOutlined },
             ]
@@ -136,11 +138,15 @@ HusWindow {
                         font.weight: Font.DemiBold
                     }
 
+                    // Which program is applying the curve. Two of them can, and
+                    // "the slider does nothing" has a different cause for each,
+                    // so the answer is on screen rather than inferable.
                     StatusPill {
-                        text: AppController.engaged ? '已接管' : '未接管'
-                        dotColor: AppController.engaged
-                                  ? HusTheme.Primary.colorSuccess
-                                  : HusTheme.Primary.colorTextQuaternary
+                        text: '均衡 · ' + AppController.eqEngine
+                        dotColor: !AppController.eqEnabled ? HusTheme.Primary.colorTextQuaternary
+                                : AppController.eqNative   ? HusTheme.Primary.colorSuccess
+                                : AppController.engaged    ? HusTheme.Primary.colorWarning
+                                                           : HusTheme.Primary.colorError
                     }
 
                     Item { Layout.fillWidth: true }
@@ -165,10 +171,14 @@ HusWindow {
                         onClicked: AppController.refreshDevices()
                     }
 
+                    // The fallback path, for a machine where DreamDSP's own
+                    // processing object is not in the chain. Hidden entirely
+                    // when Equalizer APO is not installed -- it is no longer
+                    // something DreamDSP needs.
                     HusButton {
-                        text: AppController.engaged ? '停止接管' : '接管 config.txt'
-                        type: AppController.engaged ? HusButton.Type_Default
-                                                    : HusButton.Type_Primary
+                        visible: AppController.apoFound
+                        text: AppController.engaged ? '交回 DreamDSP' : '交给 Equalizer APO'
+                        type: HusButton.Type_Default
                         enabled: AppController.apoFound && AppController.configWritable
                         onClicked: AppController.engaged = !AppController.engaged
                     }
@@ -185,6 +195,8 @@ HusWindow {
                 EqualizerPane { }
                 EffectsPane { }
                 ConvolutionPane { }
+                OutputPane { }
+                ChainPane { onGoToPage: (page) => win.page = page }
                 AutoEqPane { }
                 SettingsPane { }
             }
@@ -207,13 +219,22 @@ HusWindow {
                     anchors.rightMargin: 14
                     spacing: 10
 
+                    // DreamDSP's own audio component comes first, because it is
+                    // the one that has to be working. Equalizer APO's absence
+                    // used to be reported in red; it is not a fault any more.
                     StatusPill {
-                        text: AppController.apoFound
-                              ? 'Equalizer APO ' + AppController.apoVersion
-                              : '未检测到 Equalizer APO'
-                        dotColor: AppController.apoFound
-                                  ? HusTheme.Primary.colorSuccess
-                                  : HusTheme.Primary.colorError
+                        text: AppController.apoStatusText
+                        dotColor: AppController.apoLive
+                                  ? (AppController.apoInSync ? HusTheme.Primary.colorSuccess
+                                                             : HusTheme.Primary.colorWarning)
+                                  : (AppController.apoAttached ? HusTheme.Primary.colorWarning
+                                                               : HusTheme.Primary.colorTextQuaternary)
+                    }
+
+                    StatusPill {
+                        visible: AppController.apoFound
+                        showDot: false
+                        text: 'Equalizer APO ' + AppController.apoVersion
                     }
 
                     HusText {

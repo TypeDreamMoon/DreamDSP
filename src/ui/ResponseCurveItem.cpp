@@ -13,7 +13,7 @@ namespace {
 
 constexpr double kFMin = 20.0;
 constexpr double kFMax = 20000.0;
-constexpr double kSampleRate = 48000.0;
+constexpr double kDefaultRate = 48000.0;
 
 // Frequencies that get a labelled gridline.
 const double kGridFreqs[] = { 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000 };
@@ -93,6 +93,17 @@ void ResponseCurveItem::setFilled(bool v)
 {
     if (m_filled == v) return;
     m_filled = v; emit filledChanged(); update();
+}
+
+void ResponseCurveItem::setSampleRate(int hz)
+{
+    // Anything outside the range the DSP layer accepts is treated as unknown
+    // rather than clamped: an endpoint that reports 0 has not been queried yet,
+    // and drawing at 8 Hz would be worse than drawing at the default.
+    if (hz != 0 && (hz < 8000 || hz > 384000))
+        hz = 0;
+    if (m_sampleRate == hz) return;
+    m_sampleRate = hz; emit sampleRateChanged(); update();
 }
 
 void ResponseCurveItem::setSpectrum(const QVector<float> &s)
@@ -205,8 +216,12 @@ void ResponseCurveItem::paint(QPainter *painter)
 
     // --- curve ------------------------------------------------------------
     // Precompute coefficients once, then evaluate per pixel column.
-    QVector<BiquadCoeffs> coeffs;
-    coeffs.reserve(m_bands->bands().size());
+    // Designed at the endpoint's own rate, so the drawing and the running
+    // filters are the same filters.
+    const double rate = m_sampleRate > 0 ? double(m_sampleRate) : kDefaultRate;
+
+    QVector<FilterSections> filters;
+    filters.reserve(m_bands->bands().size());
     for (const PresetBand &b : m_bands->bands()) {
         if (!b.enabled)
             continue;
@@ -214,7 +229,7 @@ void ResponseCurveItem::paint(QPainter *painter)
         // only gain-carrying bands may be skipped for being flat.
         if (hasGain(b.type) && qFuzzyIsNull(b.gainDb))
             continue;
-        coeffs.push_back(designBiquad(b.type, b.frequency, b.gainDb, b.q, kSampleRate));
+        filters.push_back(designBiquad(b.type, b.frequency, b.gainDb, b.q, rate));
     }
 
     const int columns = std::max(2, static_cast<int>(w));
@@ -224,8 +239,8 @@ void ResponseCurveItem::paint(QPainter *painter)
         const double hz = kFMin * std::pow(kFMax / kFMin, t);
 
         double db = m_preamp;
-        for (const BiquadCoeffs &c : std::as_const(coeffs))
-            db += magnitudeDb(c, hz, kSampleRate);
+        for (const FilterSections &c : std::as_const(filters))
+            db += magnitudeDb(c, hz, rate);
 
         const double x = t * w;
         const double y = dbToY(std::clamp(db, -m_rangeDb - 5.0, m_rangeDb + 5.0));

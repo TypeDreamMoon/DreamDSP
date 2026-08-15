@@ -37,6 +37,9 @@ Item {
                 bands: AppController.bands
                 preamp: AppController.preamp
                 rangeDb: 15
+                // Drawn at the endpoint's rate, so the curve on screen is the
+                // filter the endpoint is running rather than a 48 kHz stand-in.
+                sampleRate: AppController.deviceRate
                 spectrum: AppController.spectrum
                 spectrumColor: HusTheme.isDark ? '#63b3ff' : '#2b7fd4'
                 curveColor: HusTheme.Primary.colorPrimary
@@ -45,6 +48,136 @@ Item {
                 opacity: AppController.eqEnabled ? 1.0 : 0.35
 
                 Behavior on opacity { NumberAnimation { duration: 180 } }
+            }
+        }
+
+        SectionCard {
+            Layout.fillWidth: true
+            title: '图形均衡'
+            hint: '31 段 1/3 倍频 —— 贴 AutoEQ 的 GraphicEQ 曲线进来'
+
+            headerRight: HusSwitch {
+                checked: AppController.graphicEnabled
+                onToggled: AppController.graphicEnabled = checked
+            }
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 8
+                opacity: AppController.graphicEnabled ? 1.0 : 0.5
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    HusText { text: '强度'; font.pixelSize: 12; opacity: 0.7 }
+                    Fader {
+                        Layout.fillWidth: true
+                        min: 0; max: 1; stepSize: 0.01
+                        value: AppController.graphicAmount
+                        onFirstMoved: AppController.graphicAmount = currentValue
+                    }
+                    HusText {
+                        text: Math.round(AppController.graphicAmount * 100) + '%'
+                        font.pixelSize: 12
+                        Layout.preferredWidth: 42
+                    }
+                    HusButton {
+                        text: '粘贴曲线'
+                        onClicked: pasteBox.visible = !pasteBox.visible
+                    }
+                    HusButton {
+                        text: '清除'
+                        enabled: AppController.graphicLoaded
+                        onClicked: AppController.clearGraphicEq()
+                    }
+                }
+
+                HusText {
+                    visible: AppController.graphicLoaded
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: 11
+                    opacity: 0.55
+                    // The gap between what was asked for and what a third-octave
+                    // bank can produce. Stated, because it is a real limit and a
+                    // silent one would be worse.
+                    text: '已载入曲线 · 与目标最大偏差 '
+                          + AppController.graphicFitError.toFixed(2) + ' dB'
+                }
+
+                ColumnLayout {
+                    id: pasteBox
+                    visible: false
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    HusInput {
+                        id: curveText
+                        Layout.fillWidth: true
+                        placeholderText: 'GraphicEQ: 20 -1.5; 25 -1.4; 31.5 -1.3; ...'
+                    }
+                    RowLayout {
+                        spacing: 8
+                        HusButton {
+                            text: '载入'
+                            type: HusButton.Type_Primary
+                            onClicked: {
+                                if (AppController.importGraphicEq(curveText.text))
+                                    pasteBox.visible = false;
+                            }
+                        }
+                        HusText {
+                            text: '也可以把 *GraphicEQ.txt 直接拖到这张卡片上'
+                            font.pixelSize: 11
+                            opacity: 0.5
+                        }
+                    }
+                }
+
+                // The 31 bands as they came out of the fit.
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 74
+                    spacing: 2
+                    visible: AppController.graphicLoaded
+
+                    Repeater {
+                        model: AppController.graphicBands
+                        delegate: Item {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+
+                            Rectangle {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                width: Math.max(3, parent.width - 3)
+                                // Zero sits on the mid-line; +-15 dB fills the card.
+                                readonly property real half: parent.height / 2
+                                readonly property real px:
+                                    Math.max(-half, Math.min(half, modelData.gain / 15 * half))
+                                height: Math.max(2, Math.abs(px))
+                                y: px >= 0 ? half - px : half
+                                radius: 2
+                                color: HusTheme.Primary.colorPrimary
+                                opacity: 0.85
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Second child of the card, not of the layout above it: a DropArea
+            // anchored inside a ColumnLayout is undefined behaviour, and the
+            // card's content area is a plain Item that takes anchors happily.
+            // It has to come after the layout -- SectionCard sizes itself from
+            // children[0].
+            DropArea {
+                anchors.fill: parent
+                onDropped: (drop) => {
+                    if (drop.hasUrls && drop.urls.length > 0)
+                        AppController.loadGraphicEqFile(drop.urls[0]);
+                }
             }
         }
 

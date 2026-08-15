@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QtQml/qqmlregistration.h>
 
+#include "BassBoost.h"
 #include "MultibandCompressor.h"
 #include "ParamBlock.h"
 #include "Saturation.h"
@@ -37,6 +38,17 @@ class EffectsModel : public QObject
     Q_PROPERTY(double bassAmount READ bassAmount WRITE setBassAmount NOTIFY changed)
     Q_PROPERTY(double bassDrive READ bassDrive WRITE setBassDrive NOTIFY changed)
     Q_PROPERTY(bool bassRemoveOriginal READ bassRemoveOriginal WRITE setBassRemoveOriginal NOTIFY changed)
+
+    // --- dynamic bass boost ---
+    //
+    // Beside the psychoacoustic one deliberately: they look interchangeable and
+    // are not. That one invents a fundamental the transducer cannot play; this
+    // one lifts a fundamental that is already there, by whatever headroom is
+    // left. Which you want depends on the speaker, not on taste.
+    Q_PROPERTY(bool dynBassEnabled MEMBER m_dynBassEnabled NOTIFY changed)
+    Q_PROPERTY(double dynBassMaxGain READ dynBassMaxGain WRITE setDynBassMaxGain NOTIFY changed)
+    Q_PROPERTY(double dynBassCutoff READ dynBassCutoff WRITE setDynBassCutoff NOTIFY changed)
+    Q_PROPERTY(double dynBassRelease READ dynBassRelease WRITE setDynBassRelease NOTIFY changed)
 
     // --- exciter ---
     Q_PROPERTY(bool exciterEnabled MEMBER m_exciterEnabled NOTIFY changed)
@@ -88,6 +100,15 @@ public:
     // Snapshots for a worker thread.
     bool tubeOn() const       { return m_tubeEnabled; }
     bool bassOn() const       { return m_bassEnabled; }
+    bool dynBassOn() const    { return m_dynBassEnabled; }
+
+    double dynBassMaxGain() const { return m_dynBass.maxGainDb; }
+    void setDynBassMaxGain(double v);
+    double dynBassCutoff() const { return m_dynBass.cutoffHz; }
+    void setDynBassCutoff(double v);
+    double dynBassRelease() const { return m_dynBass.releaseMs; }
+    void setDynBassRelease(double v);
+    dsp::DynamicBass::Params dynBassParams() const { return m_dynBass; }
     bool exciterOn() const    { return m_exciterEnabled; }
     bool widthOn() const      { return m_widthEnabled; }
     bool crossfeedOn() const  { return m_crossfeedEnabled; }
@@ -112,6 +133,7 @@ signals:
 private:
     dsp::TubeStage::Params m_tube;
     dsp::VirtualBass::Params m_bass;
+    dsp::DynamicBass::Params m_dynBass;
     dsp::Exciter::Params m_exciter;
     dsp::StereoWidener::Params m_width;
     dsp::Crossfeed::Params m_crossfeed;
@@ -119,6 +141,7 @@ private:
 
     bool m_tubeEnabled = false;
     bool m_bassEnabled = false;
+    bool m_dynBassEnabled = false;
     bool m_exciterEnabled = false;
     bool m_widthEnabled = false;
     bool m_crossfeedEnabled = false;

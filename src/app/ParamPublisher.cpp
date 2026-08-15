@@ -25,11 +25,42 @@ constexpr int kStatusPollMs = 1000;
 
 } // namespace
 
+dsp::Equalizer::Params eqParamsFromBands(const QVector<PresetBand> &bands, double preampDb)
+{
+    dsp::Equalizer::Params eq;
+    std::memset(&eq, 0, sizeof eq);
+    eq.preampDb = float(preampDb);
+
+    int n = int(bands.size());
+    if (n > dsp::Equalizer::kMaxBands)
+        n = dsp::Equalizer::kMaxBands;
+
+    for (int i = 0; i < n; ++i) {
+        const PresetBand &s = bands[i];
+        dsp::EqBand &d = eq.band[i];
+        d.freqHz = float(s.frequency);
+        // Carried even for the types that ignore it, so that switching a band
+        // to LPQ and back does not lose the gain the user had dialled in. The
+        // DSP layer is the one that decides a type has no gain.
+        d.gainDb = float(s.gainDb);
+        d.q = float(s.q);
+        d.type = uint8_t(s.type);
+        d.enabled = s.enabled ? 1u : 0u;
+        d.reserved = 0;
+    }
+    eq.bandCount = uint32_t(n);
+    return eq;
+}
+
 dsp::ParamBlock blockFromModels(const CompressorModel *comp,
                                 const ReverbModel *reverb,
                                 const EffectsModel *effects,
                                 const dsp::Convolution::Params &convolution,
-                                bool convolutionEnabled)
+                                bool convolutionEnabled,
+                                const EqBandModel *bands,
+                                double preampDb,
+                                bool eqEnabled,
+                                const OutputModel *output)
 {
     // From transparentBlock, not from a value-initialised ParamBlock: the
     // Params members carry default member initialisers, so `{}` would produce a
@@ -62,6 +93,7 @@ dsp::ParamBlock blockFromModels(const CompressorModel *comp,
         b.multiband = effects->multibandParams();
         b.width = effects->widthParams();
         b.crossfeed = effects->crossfeedParams();
+        b.dynBass = effects->dynBassParams();
 
         if (effects->bassOn())      b.enableMask |= dsp::kEnBass;
         if (effects->exciterOn())   b.enableMask |= dsp::kEnExciter;
@@ -69,6 +101,28 @@ dsp::ParamBlock blockFromModels(const CompressorModel *comp,
         if (effects->multibandOn()) b.enableMask |= dsp::kEnMultiband;
         if (effects->widthOn())     b.enableMask |= dsp::kEnWidth;
         if (effects->crossfeedOn()) b.enableMask |= dsp::kEnCrossfeed;
+        if (effects->dynBassOn())   b.enableMask |= dsp::kEnDynBass;
+    }
+
+    // Carried unconditionally, for the same reason as the effects above: this
+    // block is the session store, and a bypassed equalizer must come back with
+    // its bands intact rather than with the sanitiser's fallbacks.
+    if (bands)
+        b.eq = eqParamsFromBands(bands->bands(), preampDb);
+    else
+        b.eq.preampDb = float(preampDb);
+    if (eqEnabled)
+        b.enableMask |= dsp::kEnEqualizer;
+
+    // Same rule again: the routing, the delays and the loudness settings are
+    // carried whether or not their switches are on, because this block is where
+    // they are kept between runs.
+    if (output) {
+        b.matrix = output->matrixParams();
+        b.delay = output->delayParams();
+        b.loudness = output->loudnessParams();
+        b.limiter = output->limiterParams();
+        b.enableMask |= output->enableBits();
     }
 
     // Carried whether or not it is enabled: the impulse response's identity is
@@ -95,6 +149,9 @@ ParamPublisher::ParamPublisher(QObject *parent)
     // irGeneration must start at zero -- it is what tells the APO whether an
     // impulse response has ever been configured.
     m_convolution = dsp::Convolution::Params{};
+    std::memcpy(m_order, dsp::kDefaultOrder, sizeof m_order);
+    std::memset(&m_graphic, 0, sizeof m_graphic);
+    m_graphic.amount = 1.0f;
 
     m_writeTimer.setSingleShot(true);
     m_writeTimer.setInterval(kWriteDebounceMs);
@@ -125,11 +182,32 @@ QString ParamPublisher::statusFilePath()
 }
 
 void ParamPublisher::setSources(CompressorModel *comp, ReverbModel *reverb,
-                                EffectsModel *effects)
+                                EffectsModel *effects, EqBandModel *bands,
+                                OutputModel *output)
 {
     m_comp = comp;
     m_reverb = reverb;
     m_effects = effects;
+    m_bands = bands;
+    m_output = output;
+}
+
+void ParamPublisher::setEqualizer(double preampDb, bool enabled)
+{
+    m_preampDb = preampDb;
+    m_eqEnabled = enabled;
+}
+
+void ParamPublisher::setGraphic(const dsp::GraphicEq::Params &p, bool enabled)
+{
+    m_graphic = p;
+    m_graphicEnabled = enabled;
+}
+
+void ParamPublisher::setOrder(const uint8_t *order)
+{
+    if (order)
+        std::memcpy(m_order, order, sizeof m_order);
 }
 
 void ParamPublisher::schedule()
@@ -142,7 +220,16 @@ bool ParamPublisher::publishNow()
     m_writeTimer.stop();
 
     dsp::ParamBlock b = blockFromModels(m_comp, m_reverb, m_effects,
-                                        m_convolution, m_convolutionEnabled);
+                                        m_convolution, m_convolutionEnabled,
+                                        m_bands, m_preampDb, m_eqEnabled, m_output);
+    // The curve and the order are the controller's, so they are stamped on here
+    // rather than reached for inside blockFromModels -- which the offline
+    // renderer also calls, with neither of them.
+    b.graphic = m_graphic;
+    if (m_graphicEnabled)
+        b.enableMask |= dsp::kEnGraphic;
+    std::memcpy(b.order, m_order, sizeof b.order);
+    b = dsp::sanitise(b);
     b.generation = ++m_generation;
 
     QDir().mkpath(controlDirectory());
@@ -309,11 +396,75 @@ void ParamPublisher::load()
         return;
 
     dsp::ParamBlock b;
+    std::memset(&b, 0, sizeof b);
     const qint64 got = file.read(reinterpret_cast<char *>(&b), sizeof b);
     file.close();
-    if (got != qint64(sizeof b) || b.magic != dsp::kParamMagic
-        || b.version != dsp::kParamVersion || b.sizeBytes != sizeof b) {
+
+    if (got < 4 || b.magic != dsp::kParamMagic)
         return;
+
+    // Older versions are accepted and migrated, not rejected.
+    //
+    // Every stage added since v2 was appended to the block rather than inserted
+    // into it, so an older file is byte-for-byte a current one with the newer
+    // stages left zeroed -- which is exactly what "the version that wrote this
+    // did not have them" should restore to. Refusing it instead would silently
+    // reset every effect the user had switched on, on the one launch where they
+    // least expect it, and this file is the only place those settings are kept.
+    //
+    // Nothing before v2 is accepted: v1 predates several field additions in the
+    // middle of the struct and cannot be migrated by truncation.
+    struct Legacy { uint32_t version; qint64 size; };
+    static const Legacy kLegacy[] = {
+        { 2u, 300 },    // before the equalizer
+        { 3u, 820 },    // before routing, delay and loudness
+        { 4u, 1124 },   // before the limiter, dynamic bass, graphic eq, order
+    };
+
+    bool ok = (got == qint64(sizeof b) && b.version == dsp::kParamVersion
+               && b.sizeBytes == sizeof b);
+    bool migrated = false;
+    for (const Legacy &l : kLegacy) {
+        if (!ok && got == l.size && b.version == l.version && b.sizeBytes == uint32_t(l.size)) {
+            ok = true;
+            migrated = true;
+            break;
+        }
+    }
+    if (!ok)
+        return;
+
+    if (migrated) {
+        // Read before the header is rewritten, or the test below would be
+        // asking the new version number what the old one supported.
+        const uint32_t wrote = b.version;
+
+        b.version = dsp::kParamVersion;
+        b.sizeBytes = uint32_t(sizeof b);
+
+        // Bits the writing version did not have cannot have been set by it, and
+        // a stage whose parameters arrived as zeros must not come up enabled --
+        // the matrix in particular would be silence rather than a no-op, which
+        // is why it is given the identity here rather than left as read.
+        uint32_t keep = dsp::kEnBass | dsp::kEnExciter | dsp::kEnTube | dsp::kEnComp
+                        | dsp::kEnMultiband | dsp::kEnReverb | dsp::kEnWidth
+                        | dsp::kEnCrossfeed | dsp::kEnConvolution;
+        if (wrote >= 3u)
+            keep |= dsp::kEnEqualizer;
+        if (wrote >= 4u)
+            keep |= dsp::kEnMatrix | dsp::kEnDelay | dsp::kEnLoudness;
+        b.enableMask &= keep;
+        if (wrote < 4u)
+            b.matrix = dsp::ChannelMatrix::identity();
+        // Same reasoning one version on: zeros are not a configuration.
+        if (wrote < 5u) {
+            b.limiter = dsp::Limiter::Params{};
+            b.dynBass = dsp::DynamicBass::Params{};
+            std::memset(&b.graphic, 0, sizeof b.graphic);
+            b.graphic.amount = 1.0f;
+            std::memcpy(b.order, dsp::kDefaultOrder, sizeof b.order);
+        }
+        b = dsp::sanitise(b);
     }
 
     m_generation = b.generation;
@@ -334,6 +485,15 @@ void ParamPublisher::load()
         m_reverb->restore(b.reverb, (b.enableMask & dsp::kEnReverb) != 0);
     if (m_effects)
         m_effects->restore(b);
+
+    if (m_output)
+        m_output->restore(b);
+
+    m_graphic = b.graphic;
+    if (!(m_graphic.amount > 0.0f))
+        m_graphic.amount = 1.0f;
+    m_graphicEnabled = (b.enableMask & dsp::kEnGraphic) != 0;
+    std::memcpy(m_order, b.order, sizeof m_order);
 
     m_convolution = b.convolution;
     m_convolutionEnabled = (b.enableMask & dsp::kEnConvolution) != 0;

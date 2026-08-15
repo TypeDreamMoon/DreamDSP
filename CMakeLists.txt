@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(DreamDSP VERSION 0.1.0 LANGUAGES CXX)
+project(DreamDSP VERSION 0.2.0 LANGUAGES CXX)
 
 # The version comes from the git tag, not from the line above -- that one is
 # only the fallback for a tree with no tags at all. See cmake/Version.cmake.
@@ -55,11 +55,14 @@ qt_add_qml_module(DreamDSP
         qml/components/Fader.qml
         qml/components/EqualizerPane.qml
         qml/components/EffectsPane.qml
+        qml/components/OutputPane.qml
+        qml/components/ChainPane.qml
     SOURCES
         src/core/Biquad.h              src/core/Biquad.cpp
         src/core/ApoConfig.h           src/core/ApoConfig.cpp
         src/core/PeacePreset.h         src/core/PeacePreset.cpp
         src/core/DreamPreset.h         src/core/DreamPreset.cpp
+        src/core/GraphicCurve.h        src/core/GraphicCurve.cpp
         src/core/AutoEqDatabase.h      src/core/AutoEqDatabase.cpp
         src/core/Fft.h                 src/core/Fft.cpp
         src/core/ImpulseResponse.h     src/core/ImpulseResponse.cpp
@@ -71,6 +74,7 @@ qt_add_qml_module(DreamDSP
         src/platform/Autostart.h       src/platform/Autostart.cpp
         src/platform/HotkeyManager.h   src/platform/HotkeyManager.cpp
         src/platform/PeakMeter.h       src/platform/PeakMeter.cpp
+        src/platform/VolumeReader.h    src/platform/VolumeReader.cpp
         src/platform/SingleInstance.h  src/platform/SingleInstance.cpp
         src/platform/LoopbackCapture.h src/platform/LoopbackCapture.cpp
         src/platform/TonePlayer.h      src/platform/TonePlayer.cpp
@@ -86,6 +90,7 @@ qt_add_qml_module(DreamDSP
         src/app/ReverbModel.h          src/app/ReverbModel.cpp
         src/app/OfflineRender.h        src/app/OfflineRender.cpp
         src/app/EffectsModel.h         src/app/EffectsModel.cpp
+        src/app/OutputModel.h          src/app/OutputModel.cpp
         src/app/ParamPublisher.h       src/app/ParamPublisher.cpp
 )
 

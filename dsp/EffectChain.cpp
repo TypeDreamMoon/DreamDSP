@@ -10,6 +10,10 @@ void EffectChain::prepare(double sampleRate, int channels, int maxFrames)
     m_channels = channels;
     m_maxFrames = maxFrames;
 
+    m_eq.prepare(sampleRate, channels);
+    m_graphic.prepare(sampleRate, channels);
+    m_loudness.prepare(sampleRate, channels);
+    m_dynBass.prepare(sampleRate, channels);
     m_bass.prepare(sampleRate, channels);
     m_exciter.prepare(sampleRate, channels);
     m_tube.prepare(sampleRate, channels);
@@ -22,18 +26,26 @@ void EffectChain::prepare(double sampleRate, int channels, int maxFrames)
     // headphone and room correction. Longer reverb impulse responses need a
     // larger budget, granted by the caller.
     m_conv.prepare(sampleRate, channels, 64);
+    m_matrix.prepare(sampleRate, channels, maxFrames);
+    m_delay.prepare(sampleRate, channels, maxFrames);
+    m_limiter.prepare(sampleRate, channels, maxFrames);
 
     // Zeroed rather than value-initialised: the Params members carry default
     // member initialisers, and `m_applied = {}` would seed an always-on reverb.
     // Starting from all-zero is what makes a chain that has never been given
     // parameters transparent by construction.
     std::memset(&m_applied, 0, sizeof m_applied);
+    std::memcpy(m_order, kDefaultOrder, sizeof m_order);
 
     reset();
 }
 
 void EffectChain::reset()
 {
+    m_eq.reset();
+    m_graphic.reset();
+    m_loudness.reset();
+    m_dynBass.reset();
     m_bass.reset();
     m_exciter.reset();
     m_tube.reset();
@@ -43,6 +55,9 @@ void EffectChain::reset()
     m_width.reset();
     m_crossfeed.reset();
     m_conv.reset();
+    m_matrix.reset();
+    m_delay.reset();
+    m_limiter.reset();
 }
 
 void EffectChain::apply(ParamBlock p) noexcept
@@ -70,6 +85,10 @@ void EffectChain::apply(ParamBlock p) noexcept
     if (turnedOn & (bit))                                                      \
         obj.reset();
 
+    DREAMDSP_STAGE(kEnEqualizer, eq, m_eq)
+    DREAMDSP_STAGE(kEnGraphic, graphic, m_graphic)
+    DREAMDSP_STAGE(kEnLoudness, loudness, m_loudness)
+    DREAMDSP_STAGE(kEnDynBass, dynBass, m_dynBass)
     DREAMDSP_STAGE(kEnBass, bass, m_bass)
     DREAMDSP_STAGE(kEnExciter, exciter, m_exciter)
     DREAMDSP_STAGE(kEnTube, tube, m_tube)
@@ -78,6 +97,9 @@ void EffectChain::apply(ParamBlock p) noexcept
     DREAMDSP_STAGE(kEnReverb, reverb, m_reverb)
     DREAMDSP_STAGE(kEnWidth, width, m_width)
     DREAMDSP_STAGE(kEnCrossfeed, crossfeed, m_crossfeed)
+    DREAMDSP_STAGE(kEnMatrix, matrix, m_matrix)
+    DREAMDSP_STAGE(kEnDelay, delay, m_delay)
+    DREAMDSP_STAGE(kEnLimiter, limiter, m_limiter)
 
 #undef DREAMDSP_STAGE
 
@@ -99,6 +121,11 @@ void EffectChain::apply(ParamBlock p) noexcept
     // Resetting on the 0 -> 1 transition is what stops a ten-minute-old reverb
     // tail from bursting into the output the moment the effect is switched back
     // on. It costs one buffer fill per user toggle.
+    // Already validated as a permutation by sanitise(); copied rather than
+    // re-checked, because apply() runs on the audio thread and the check has a
+    // place it belongs.
+    std::memcpy(m_order, p.order, sizeof m_order);
+
     m_applied.enableMask = p.enableMask;
     m_applied.generation = p.generation;
 }
@@ -109,24 +136,43 @@ void EffectChain::process(const AudioBuffer &buf)
     if (mask == 0u || !buf.valid())
         return;
 
-    // Chain order, and why:
-    //   bass and exciter first -- they add content the later stages should see
-    //   tube next, colouring the whole spectrum
-    //   dynamics after tone, so the compressor reacts to the finished sound
-    //   reverb after dynamics, because compressing a tail pumps it
-    //   width and crossfeed last: they are output-stage, not part of the tone
+    // The order is the user's, not the code's.
     //
-    // This order is also the bit order of kEn*, and the offline renderer used
-    // to open-code it. Changing one now changes both.
-    if (mask & kEnBass)      m_bass.process(buf);
-    if (mask & kEnExciter)   m_exciter.process(buf);
-    if (mask & kEnTube)      m_tube.process(buf);
-    if (mask & kEnComp)      m_comp.process(buf);
-    if (mask & kEnMultiband) m_multi.process(buf);
-    if (mask & kEnReverb)    m_reverb.process(buf);
-    if (mask & kEnWidth)     m_width.process(buf);
-    if (mask & kEnCrossfeed) m_crossfeed.process(buf);
-    if (mask & kEnConvolution) m_conv.process(buf);
+    // kDefaultOrder is what this used to be written out as, and the reasoning
+    // behind it is still worth having: correction first, because everything
+    // after it should act on a corrected signal rather than on the transducer's
+    // errors; things that add content next, so the dynamics see them; dynamics
+    // after tone, so the compressor reacts to the finished sound; then the
+    // output stage, where routing decides which speaker a channel ends up in
+    // and the impulse response corrects for that speaker, so it has to see the
+    // final assignment; delay after that, because it is distance; and the
+    // limiter last, because a ceiling that anything runs after is not a ceiling.
+    //
+    // Every one of those is a default rather than a constraint. The chain
+    // editor can put them in any order, and the two places that used to
+    // open-code this -- here and the offline renderer -- now both walk the
+    // same array.
+    for (int i = 0; i < kStageCount; ++i) {
+        switch (m_order[i]) {
+        case kStageEqualizer:   if (mask & kEnEqualizer)   m_eq.process(buf);        break;
+        case kStageGraphic:     if (mask & kEnGraphic)     m_graphic.process(buf);   break;
+        case kStageLoudness:    if (mask & kEnLoudness)    m_loudness.process(buf);  break;
+        case kStageDynBass:     if (mask & kEnDynBass)     m_dynBass.process(buf);   break;
+        case kStageBass:        if (mask & kEnBass)        m_bass.process(buf);      break;
+        case kStageExciter:     if (mask & kEnExciter)     m_exciter.process(buf);   break;
+        case kStageTube:        if (mask & kEnTube)        m_tube.process(buf);      break;
+        case kStageComp:        if (mask & kEnComp)        m_comp.process(buf);      break;
+        case kStageMultiband:   if (mask & kEnMultiband)   m_multi.process(buf);     break;
+        case kStageReverb:      if (mask & kEnReverb)      m_reverb.process(buf);    break;
+        case kStageWidth:       if (mask & kEnWidth)       m_width.process(buf);     break;
+        case kStageCrossfeed:   if (mask & kEnCrossfeed)   m_crossfeed.process(buf); break;
+        case kStageMatrix:      if (mask & kEnMatrix)      m_matrix.process(buf);    break;
+        case kStageConvolution: if (mask & kEnConvolution) m_conv.process(buf);      break;
+        case kStageDelay:       if (mask & kEnDelay)       m_delay.process(buf);     break;
+        case kStageLimiter:     if (mask & kEnLimiter)     m_limiter.process(buf);   break;
+        default: break;
+        }
+    }
 }
 
 } // namespace dreamdsp::dsp

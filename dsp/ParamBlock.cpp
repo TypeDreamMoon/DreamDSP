@@ -2,7 +2,37 @@
 
 namespace dreamdsp::dsp {
 
+// Correction first, then things that add content, then dynamics, then the
+// output stage. Reproduces the order the chain ran in when it was hard-coded.
+const uint8_t kDefaultOrder[kStageCount] = {
+    kStageEqualizer, kStageGraphic, kStageLoudness,
+    kStageDynBass, kStageBass, kStageExciter, kStageTube,
+    kStageComp, kStageMultiband, kStageReverb,
+    kStageWidth, kStageCrossfeed,
+    kStageMatrix, kStageConvolution, kStageDelay, kStageLimiter
+};
+
 namespace {
+
+// True when `order` names every stage exactly once.
+//
+// Checked rather than repaired, and replaced wholesale when it fails. A partial
+// repair would produce an order the user never asked for and could not predict,
+// where the documented fallback is at least the one the interface shows as the
+// default.
+bool isPermutation(const uint8_t *order) noexcept
+{
+    uint32_t seen = 0;
+    for (int i = 0; i < kStageCount; ++i) {
+        if (order[i] >= kStageCount)
+            return false;
+        const uint32_t bit = 1u << order[i];
+        if (seen & bit)
+            return false;
+        seen |= bit;
+    }
+    return true;
+}
 
 // The rule, applied mechanically below:
 //
@@ -121,6 +151,73 @@ ParamBlock sanitise(const ParamBlock &in) noexcept
     // verified against the blob's contents instead.
     std::memcpy(o.convolution.irHash, in.convolution.irHash, sizeof o.convolution.irHash);
 
+    // Preamp is a straight multiply, but the equalizer rails its own output at
+    // +12 dBFS, so this bound only has to be sane rather than to be the only
+    // thing standing between a bad file and a full-scale blast.
+    o.eq.preampDb = sanF(in.eq.preampDb, -60.0f, 30.0f, 0.0f);
+    o.eq.bandCount = in.eq.bandCount > uint32_t(Equalizer::kMaxBands)
+                         ? uint32_t(Equalizer::kMaxBands) : in.eq.bandCount;
+    for (uint32_t i = 0; i < o.eq.bandCount; ++i) {
+        const EqBand &s = in.eq.band[i];
+        EqBand &d = o.eq.band[i];
+        // Never zero, so that a band inside bandCount can never be
+        // byte-identical to an unused slot -- which is what lets the equalizer
+        // use memcmp against its own copy to decide what to redesign.
+        d.freqHz = sanF(s.freqHz, 10.0f, 400000.0f, 1000.0f);
+        d.gainDb = sanF(s.gainDb, -40.0f, 40.0f, 0.0f);
+        d.q      = sanF(s.q, 0.05f, 100.0f, 1.0f);
+        d.type   = s.type < uint8_t(FilterKind::Count) ? s.type : 0u;
+        d.enabled = sanB(s.enabled) ? 1u : 0u;
+        d.reserved = 0;
+    }
+    // Bands past the count stay as memset left them. An unused slot has to hold
+    // a fixed byte pattern, or the block's on-disk representation would depend
+    // on whatever the GUI happened to have in those slots earlier.
+
+    // Eight inputs at +12 dB each would be +30 dB of summing gain, so each
+    // coefficient is bounded and the stage rails its own output as well. Note
+    // that the neutral matrix is the identity, not zero -- an all-zero block
+    // therefore describes silence, which is why the stage means nothing without
+    // kEnMatrix and why silence is the direction it fails in.
+    for (int o2 = 0; o2 < ChannelMatrix::kMaxChannels; ++o2)
+        for (int i = 0; i < ChannelMatrix::kMaxChannels; ++i)
+            o.matrix.gain[o2][i] = sanF(in.matrix.gain[o2][i], -4.0f, 4.0f,
+                                        o2 == i ? 1.0f : 0.0f);
+
+    for (int c = 0; c < ChannelDelay::kMaxChannels; ++c)
+        o.delay.ms[c] = sanF(in.delay.ms[c], 0.0f, ChannelDelay::kMaxMs, 0.0f);
+
+    // volumeDb is an attenuation reported by the endpoint, so it is at most 0.
+    // The floor is generous: some devices report a range down to -96 dB.
+    o.loudness.volumeDb   = sanF(in.loudness.volumeDb, -120.0f, 0.0f, 0.0f);
+    o.loudness.referenceDb = sanF(in.loudness.referenceDb, -120.0f, 0.0f, 0.0f);
+    o.loudness.offsetDb   = sanF(in.loudness.offsetDb, -60.0f, 60.0f, 0.0f);
+    o.loudness.amount     = sanF(in.loudness.amount, 0.0f, 1.0f, 0.0f);
+
+    // The limiter's threshold is a promise the stage keeps exactly, so the only
+    // job here is to keep it inside a range where that promise is meaningful.
+    o.limiter.gainDb      = sanF(in.limiter.gainDb, -24.0f, 24.0f, 0.0f);
+    o.limiter.thresholdDb = sanF(in.limiter.thresholdDb, -30.0f, 0.0f, -0.3f);
+    o.limiter.releaseMs   = sanF(in.limiter.releaseMs, 1.0f, 1000.0f, 100.0f);
+    o.limiter.lookaheadMs = sanF(in.limiter.lookaheadMs, 0.0f, Limiter::kMaxLookaheadMs, 1.5f);
+
+    o.dynBass.maxGainDb = sanF(in.dynBass.maxGainDb, 0.0f, 24.0f, 0.0f);
+    o.dynBass.cutoffHz  = sanF(in.dynBass.cutoffHz, 30.0f, 250.0f, 100.0f);
+    o.dynBass.releaseMs = sanF(in.dynBass.releaseMs, 10.0f, 2000.0f, 250.0f);
+    o.dynBass.reserved  = 0.0f;
+
+    // Thirty-one bounded decibel values. This is the whole reason the graphic
+    // equalizer is a fixed band grid rather than an impulse response: a curve
+    // can be clamped exactly, and a set of filter coefficients cannot.
+    for (int i = 0; i < GraphicEq::kBands; ++i)
+        o.graphic.gainDb[i] = sanF(in.graphic.gainDb[i], -40.0f, 40.0f, 0.0f);
+    o.graphic.amount = sanF(in.graphic.amount, 0.0f, 1.0f, 0.0f);
+
+    if (isPermutation(in.order))
+        std::memcpy(o.order, in.order, sizeof o.order);
+    else
+        std::memcpy(o.order, kDefaultOrder, sizeof o.order);
+
     return o;
 }
 
@@ -135,14 +232,25 @@ ParamBlock transparentBlock() noexcept
     ParamBlock zero;
     std::memset(&zero, 0, sizeof zero);
 
+    // The channel matrix is the one stage whose neutral setting is not all
+    // zero: zero means silence, identity means "leave the channels alone". It
+    // is set here rather than in sanitise() so that muting every channel stays
+    // expressible -- a block that says silence is allowed to mean silence.
+    //
+    // With this, the block is transparent for every enableMask rather than only
+    // for zero, which is what the transparency test asserts.
+    zero.matrix = ChannelMatrix::identity();
+
+    // An all-zero order array names stage 0 sixteen times, which the sanitiser
+    // would replace anyway -- setting it here makes the block a fixed point of
+    // sanitise() rather than something that changes on its first pass through.
+    std::memcpy(zero.order, kDefaultOrder, sizeof zero.order);
+
     // Passed through the sanitiser rather than returned raw, so that the block
     // satisfies isSane(). That matters beyond tidiness: the argument that a
     // torn read can never produce a dangerous parameter set rests on every slot
     // always holding a *sanitised* block, and an all-zero block is not one --
     // its compressor ratio of 0 is outside the legal range.
-    //
-    // Transparency does not come from the field values, it comes from
-    // enableMask being 0, which survives sanitising untouched.
     return sanitise(zero);
 }
 
@@ -171,6 +279,13 @@ void clampForRate(ParamBlock &b, double sampleRate) noexcept
     const float lowMax = b.multiband.highCrossHz / 1.5f;
     if (b.multiband.lowCrossHz > lowMax)
         b.multiband.lowCrossHz = lowMax;
+
+    // The equalizer's band frequencies are deliberately left alone. Every other
+    // stage here designs its filters without checking Nyquist, so this is the
+    // only place that can bound them; designFilter() does check, and clamping to
+    // 0.45 * rate on top of it would move a 20 kHz high shelf on a 44.1 kHz
+    // endpoint for no reason -- and move it by a different amount per endpoint,
+    // so the same preset would not be the same filter on two devices.
 }
 
 } // namespace dreamdsp::dsp

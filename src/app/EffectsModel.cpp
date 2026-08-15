@@ -45,6 +45,10 @@ void EffectsModel::setTubeMix(double v)   { if (put(m_tube.mix, v, 0.0, 1.0))   
 void EffectsModel::setBassCutoff(double v) { if (put(m_bass.cutoffHz, v, 40.0, 250.0)) emit changed(); }
 void EffectsModel::setBassAmount(double v) { if (put(m_bass.amount, v, 0.0, 1.0))      emit changed(); }
 void EffectsModel::setBassDrive(double v)  { if (put(m_bass.drive, v, 1.0, 12.0))      emit changed(); }
+void EffectsModel::setDynBassMaxGain(double v) { if (put(m_dynBass.maxGainDb, v, 0.0, 24.0))   emit changed(); }
+void EffectsModel::setDynBassCutoff(double v)  { if (put(m_dynBass.cutoffHz, v, 30.0, 250.0))  emit changed(); }
+void EffectsModel::setDynBassRelease(double v) { if (put(m_dynBass.releaseMs, v, 10.0, 2000.0)) emit changed(); }
+
 void EffectsModel::setBassRemoveOriginal(bool v)
 {
     if (m_bass.removeOriginal == v) return;
@@ -69,6 +73,7 @@ void EffectsModel::restore(const dsp::ParamBlock &b)
 {
     m_tube = b.tube;
     m_bass = b.bass;
+    m_dynBass = b.dynBass;
     m_exciter = b.exciter;
     m_width = b.width;
     m_crossfeed = b.crossfeed;
@@ -76,6 +81,7 @@ void EffectsModel::restore(const dsp::ParamBlock &b)
 
     m_tubeEnabled = (b.enableMask & dsp::kEnTube) != 0;
     m_bassEnabled = (b.enableMask & dsp::kEnBass) != 0;
+    m_dynBassEnabled = (b.enableMask & dsp::kEnDynBass) != 0;
     m_exciterEnabled = (b.enableMask & dsp::kEnExciter) != 0;
     m_widthEnabled = (b.enableMask & dsp::kEnWidth) != 0;
     m_crossfeedEnabled = (b.enableMask & dsp::kEnCrossfeed) != 0;

@@ -6,6 +6,7 @@
 #include <QtQml/qqmlregistration.h>
 
 #include "app/EqBandModel.h"
+#include "app/OutputModel.h"
 #include "app/ParamPublisher.h"
 #include "app/PresetStore.h"
 #include "core/AutoEqDatabase.h"
@@ -14,6 +15,7 @@
 #include "platform/ApoInstaller.h"
 #include "platform/ApoLocator.h"
 #include "platform/AudioDevices.h"
+#include "platform/VolumeReader.h"
 #include "platform/HotkeyManager.h"
 #include "platform/UpdateChecker.h"
 #include "platform/LoopbackCapture.h"
@@ -21,6 +23,7 @@
 #include "platform/TrayIcon.h"
 
 #include <QHash>
+#include <QUrl>
 #include <QVariantList>
 
 namespace dreamdsp {
@@ -55,12 +58,35 @@ class AppController : public QObject
     Q_PROPERTY(dreamdsp::CompressorModel *compressor READ compressor CONSTANT)
     Q_PROPERTY(dreamdsp::ReverbModel *reverb READ reverbModel CONSTANT)
     Q_PROPERTY(dreamdsp::EffectsModel *effects READ effects CONSTANT)
+    Q_PROPERTY(dreamdsp::OutputModel *output READ output CONSTANT)
     Q_PROPERTY(QString currentPreset READ currentPreset NOTIFY currentPresetChanged)
     Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
 
     Q_PROPERTY(double preamp READ preamp WRITE setPreamp NOTIFY preampChanged)
     Q_PROPERTY(bool eqEnabled READ eqEnabled WRITE setEqEnabled NOTIFY eqEnabledChanged)
     Q_PROPERTY(bool engaged READ engaged WRITE setEngaged NOTIFY engagedChanged)
+
+    // Which program is actually applying the curve. A slider that appears to do
+    // nothing has too many possible explanations for the answer to be left
+    // implicit, and after the equalizer moved into DreamDSP's own processing
+    // object there are genuinely two programs that could be doing it.
+    Q_PROPERTY(QString eqEngine READ eqEngine NOTIFY eqEngineChanged)
+    Q_PROPERTY(bool eqNative READ nativeProcessing NOTIFY eqEngineChanged)
+
+    // --- graphic equalizer -------------------------------------------------
+    Q_PROPERTY(bool graphicEnabled READ graphicEnabled WRITE setGraphicEnabled NOTIFY graphicChanged)
+    Q_PROPERTY(double graphicAmount READ graphicAmount WRITE setGraphicAmount NOTIFY graphicChanged)
+    Q_PROPERTY(bool graphicLoaded READ graphicLoaded NOTIFY graphicChanged)
+    // How far the realised cascade sits from the curve that was asked for. On
+    // screen because a third-octave bank cannot follow every curve exactly, and
+    // a number is the difference between a known limit and a mystery.
+    Q_PROPERTY(double graphicFitError READ graphicFitError NOTIFY graphicChanged)
+    Q_PROPERTY(QVariantList graphicBands READ graphicBands NOTIFY graphicChanged)
+
+    // --- the chain ---------------------------------------------------------
+    // [{ id, name, hint, on, page }] in execution order.
+    Q_PROPERTY(QVariantList chain READ chain NOTIFY chainChanged)
+    Q_PROPERTY(bool chainIsDefault READ chainIsDefault NOTIFY chainChanged)
 
     Q_PROPERTY(QString generatedText READ generatedText NOTIFY generatedTextChanged)
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
@@ -134,6 +160,7 @@ public:
     CompressorModel *compressor() { return &m_compressor; }
     ReverbModel *reverbModel() { return &m_reverb; }
     EffectsModel *effects() { return &m_effects; }
+    OutputModel *output() { return &m_output; }
 
     // True when an APO instance is streaming somewhere on this machine.
     bool apoLive() const;
@@ -150,9 +177,39 @@ public:
     bool engaged() const { return m_engaged; }
     void setEngaged(bool on);
 
+    // True when DreamDSP's own processing object is in the selected endpoint's
+    // chain, i.e. when the equalizer, the effects and the convolution are all
+    // being run by DreamDSP rather than handed to Equalizer APO.
+    bool nativeProcessing() const;
+    // Whether DreamDSP is the one applying the equalizer right now. False while
+    // Equalizer APO is engaged with our include file, because then it is.
+    bool eqRunsHere() const;
+    QString eqEngine() const;
+
     QString generatedText() const;
     QString lastError() const { return m_lastError; }
     QString lastMessage() const { return m_lastMessage; }
+
+    bool graphicEnabled() const { return m_graphicEnabled; }
+    void setGraphicEnabled(bool on);
+    double graphicAmount() const { return m_graphic.amount; }
+    void setGraphicAmount(double v);
+    bool graphicLoaded() const;
+    double graphicFitError() const { return m_graphicFitError; }
+    QVariantList graphicBands() const;
+
+    // Accepts AutoEQ's "GraphicEQ: 20 -1.5; 25 -1.4; ..." and the bare
+    // "<hz> <db>" per line form both files come in.
+    Q_INVOKABLE bool importGraphicEq(const QString &text);
+    Q_INVOKABLE bool loadGraphicEqFile(const QUrl &url);
+    Q_INVOKABLE void clearGraphicEq();
+
+    QVariantList chain() const;
+    bool chainIsDefault() const;
+    Q_INVOKABLE void setStageEnabled(int stageId, bool on);
+    Q_INVOKABLE bool stageEnabled(int stageId) const;
+    Q_INVOKABLE void moveStage(int fromIndex, int toIndex);
+    Q_INVOKABLE void resetChainOrder();
 
     Q_INVOKABLE void refreshDevices();
     Q_INVOKABLE void resetAll();
@@ -295,6 +352,9 @@ signals:
     void preampChanged();
     void eqEnabledChanged();
     void engagedChanged();
+    void eqEngineChanged();
+    void graphicChanged();
+    void chainChanged();
     void generatedTextChanged();
     void lastErrorChanged();
     void lastMessageChanged();
@@ -328,6 +388,13 @@ signals:
 private:
     void scheduleWrite();
     void writeNow();
+    // setEqualizer + publishNow, so the two never get out of step: publishing
+    // without telling the publisher the current preamp would send the previous
+    // one, and the block is the session store as well as the wire format.
+    void flushParams();
+    // Makes sure exactly one of DreamDSP and Equalizer APO is applying the
+    // curve, disengaging APO when our own object has taken over.
+    void syncEqOwnership();
     void refreshEngaged();
     void setError(const QString &err);
     void setMessage(const QString &msg);
@@ -360,6 +427,7 @@ private:
     CompressorModel m_compressor;
     ReverbModel m_reverb;
     EffectsModel m_effects;
+    OutputModel m_output;
     ParamPublisher m_publisher;
 
     QVector<float> m_impulseCurve;
@@ -377,6 +445,15 @@ private:
     QStringList m_deviceNames;
     int m_currentDevice = 0;      // 0 == all devices
     QString m_pendingDeviceId;    // restored from settings before devices are enumerated
+    dsp::GraphicEq::Params m_graphic{};
+    bool m_graphicEnabled = false;
+    double m_graphicFitError = 0.0;
+    // The requested curve, kept beside the fitted gains so the display can show
+    // what was asked for rather than what the bank managed.
+    QVector<double> m_graphicTarget;
+
+    uint8_t m_order[dsp::kStageCount];
+
     double m_preamp = 0.0;
     bool m_eqEnabled = true;
     bool m_engaged = false;
@@ -390,6 +467,7 @@ private:
     void refreshTrayIcon();
     void onHotkey(const QString &actionId);
     void pollMeter();
+    void pollVolume();
     void nudgeAllGains(double delta);
 
     QString profileKeyForDevice(int index) const;
@@ -404,6 +482,11 @@ private:
     UpdateChecker m_updates;
     PeakMeter m_meter;
     QTimer m_meterTimer;
+    // Polled rather than pushed: IAudioEndpointVolumeCallback arrives on a
+    // system thread and would have to be marshalled back, for a reading whose
+    // only consumer is a pair of shelving filters that move slowly anyway.
+    VolumeReader m_endpointVolume;
+    QTimer m_volumeTimer;
     AutoEqDatabase m_autoEq;
     LoopbackCapture m_capture;
     QTimer m_spectrumIdleTimer;

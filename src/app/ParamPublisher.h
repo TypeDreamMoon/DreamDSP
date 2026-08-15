@@ -11,9 +11,18 @@
 // a parameter block.
 #include "app/CompressorModel.h"
 #include "app/EffectsModel.h"
+#include "app/EqBandModel.h"
+#include "app/OutputModel.h"
 #include "app/ReverbModel.h"
 
 namespace dreamdsp {
+
+// The band list the GUI edits, as the equalizer's wire format.
+//
+// Bands past the thirty-second are dropped rather than silently folded in: the
+// parameter block is fixed size by design, and a preset that would not fit has
+// to be visibly cut, not quietly approximated.
+dsp::Equalizer::Params eqParamsFromBands(const QVector<PresetBand> &bands, double preampDb);
 
 // Collects the current settings into a dsp::ParamBlock.
 //
@@ -25,7 +34,11 @@ dsp::ParamBlock blockFromModels(const CompressorModel *comp,
                                 const ReverbModel *reverb,
                                 const EffectsModel *effects,
                                 const dsp::Convolution::Params &convolution,
-                                bool convolutionEnabled);
+                                bool convolutionEnabled,
+                                const EqBandModel *bands = nullptr,
+                                double preampDb = 0.0,
+                                bool eqEnabled = false,
+                                const OutputModel *output = nullptr);
 
 // Publishes parameters to the copy of the DSP running inside audiodg.exe, and
 // reads back what that copy says it is doing.
@@ -44,7 +57,14 @@ public:
     explicit ParamPublisher(QObject *parent = nullptr);
 
     // The models to read. Not owned.
-    void setSources(CompressorModel *comp, ReverbModel *reverb, EffectsModel *effects);
+    void setSources(CompressorModel *comp, ReverbModel *reverb, EffectsModel *effects,
+                    EqBandModel *bands, OutputModel *output);
+
+    // Preamp, bypass, the graphic curve and the chain order are the
+    // controller's rather than any one model's.
+    void setEqualizer(double preampDb, bool enabled);
+    void setGraphic(const dsp::GraphicEq::Params &p, bool enabled);
+    void setOrder(const uint8_t *order);
 
     // Decodes an impulse response file, writes it into the control directory as
     // a content-addressed blob, and returns the parameters that name it.
@@ -73,6 +93,12 @@ public:
     const dsp::Convolution::Params &convolution() const { return m_convolution; }
     bool convolutionEnabled() const { return m_convolutionEnabled; }
     QString impulseName() const { return m_impulseName; }
+
+    // Read back after load(), so the controller resumes the curve and the order
+    // that were last running rather than a second copy kept elsewhere.
+    const dsp::GraphicEq::Params &graphic() const { return m_graphic; }
+    bool graphicEnabled() const { return m_graphicEnabled; }
+    const uint8_t *order() const { return m_order; }
 
     static QString impulseDirectory();
 
@@ -109,6 +135,13 @@ private:
     CompressorModel *m_comp = nullptr;
     ReverbModel *m_reverb = nullptr;
     EffectsModel *m_effects = nullptr;
+    EqBandModel *m_bands = nullptr;
+    OutputModel *m_output = nullptr;
+    double m_preampDb = 0.0;
+    bool m_eqEnabled = true;
+    dsp::GraphicEq::Params m_graphic{};
+    bool m_graphicEnabled = false;
+    uint8_t m_order[dsp::kStageCount];
 
     QTimer m_writeTimer;
     QTimer m_statusTimer;

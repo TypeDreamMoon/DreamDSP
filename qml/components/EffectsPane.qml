@@ -20,6 +20,9 @@ Item {
         compressor: root.comp
         reverb: root.rev
         effects: root.fx
+        bands: AppController.bands
+        preamp: AppController.preamp
+        eqEnabled: AppController.eqEnabled
     }
 
     component ParamRow: RowLayout {
@@ -388,6 +391,46 @@ Item {
                     label: '干湿比'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
                     value: fx.tubeMix
                     onEdited: (v) => fx.tubeMix = v
+                }
+            }
+        }
+
+        SectionCard {
+            Layout.fillWidth: true
+            title: '动态低音'
+            hint: '按当前还剩多少动态余量来提升低频 —— 安静时给满,响时几乎不给'
+
+            headerRight: HusSwitch {
+                checked: fx.dynBassEnabled
+                onToggled: fx.dynBassEnabled = checked
+            }
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 8
+
+                ParamRow {
+                    label: '最大提升'; unit: 'dB'; from: 0; to: 24; step: 0.5; decimals: 1
+                    value: fx.dynBassMaxGain
+                    onEdited: (v) => fx.dynBassMaxGain = v
+                }
+                ParamRow {
+                    label: '分频点'; unit: 'Hz'; from: 30; to: 250; step: 5; decimals: 0
+                    value: fx.dynBassCutoff
+                    onEdited: (v) => fx.dynBassCutoff = v
+                }
+                ParamRow {
+                    label: '恢复'; unit: 'ms'; from: 10; to: 2000; step: 10; decimals: 0
+                    value: fx.dynBassRelease
+                    onEdited: (v) => fx.dynBassRelease = v
+                }
+
+                HusText {
+                    text: '和「虚拟低音」不是一回事:那个合成放不出来的基频,这个抬高本来就有的。'
+                    font.pixelSize: 11
+                    opacity: 0.5
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
                 }
             }
         }

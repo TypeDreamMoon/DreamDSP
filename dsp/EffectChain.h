@@ -1,10 +1,16 @@
 #pragma once
 
+#include "BassBoost.h"
 #include "Compressor.h"
 #include "Convolver.h"
+#include "Equalizer.h"
+#include "GraphicEq.h"
+#include "Limiter.h"
+#include "Loudness.h"
 #include "MultibandCompressor.h"
 #include "ParamBlock.h"
 #include "Reverb.h"
+#include "Routing.h"
 #include "Saturation.h"
 #include "Stereo.h"
 
@@ -31,6 +37,23 @@ public:
     // and therefore cannot travel in a ParamBlock. Whoever owns the chain feeds
     // it kernels directly.
     ConvolutionStage &convolution() noexcept { return m_conv; }
+
+    // Exposed so the GUI can read the response back out of the running
+    // coefficients instead of designing a second set of its own to plot.
+    const Equalizer &equalizer() const noexcept { return m_eq; }
+    const LoudnessCorrection &loudness() const noexcept { return m_loudness; }
+
+    // Convolution, delay and the limiter's look-ahead all hold the stream
+    // back; the APO reports the sum to Windows once, when the stream is built.
+    int latencySamples() const noexcept
+    {
+        return int(m_conv.latencySamples()) + m_delay.latencySamples()
+               + m_limiter.latencySamples();
+    }
+
+    const Limiter &limiter() const noexcept { return m_limiter; }
+    const DynamicBass &dynamicBass() const noexcept { return m_dynBass; }
+    const GraphicEq &graphicEq() const noexcept { return m_graphic; }
 
     // Not real-time in the strict sense (it clears delay lines), but allocation
     // free -- safe from Reset().
@@ -74,6 +97,10 @@ private:
     // block to decide what needs redesigning.
     ParamBlock m_applied{};
 
+    Equalizer m_eq;
+    GraphicEq m_graphic;
+    LoudnessCorrection m_loudness;
+    DynamicBass m_dynBass;
     VirtualBass m_bass;
     Exciter m_exciter;
     TubeStage m_tube;
@@ -83,6 +110,14 @@ private:
     StereoWidener m_width;
     Crossfeed m_crossfeed;
     ConvolutionStage m_conv;
+    ChannelMatrix m_matrix;
+    ChannelDelay m_delay;
+    Limiter m_limiter;
+
+    // The order the stages run in, copied out of the last block installed.
+    // Held separately from m_applied so process() reads one contiguous array
+    // rather than reaching into a 1300-byte struct on every buffer.
+    uint8_t m_order[kStageCount];
 };
 
 } // namespace dreamdsp::dsp

@@ -16,6 +16,11 @@ class EqBandModel : public QAbstractListModel
     Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
 
 public:
+    // Tied to the parameter block rather than to Peace's own 31, so the number
+    // of bands the interface will let you build and the number that reach the
+    // audio cannot drift apart.
+    static constexpr int kMaxBands = dsp::Equalizer::kMaxBands;
+
     enum Role {
         FrequencyRole = Qt::UserRole + 1,
         GainRole,

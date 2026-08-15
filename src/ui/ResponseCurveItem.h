@@ -27,6 +27,12 @@ class ResponseCurveItem : public QQuickPaintedItem
     Q_PROPERTY(QVector<float> spectrum READ spectrum WRITE setSpectrum NOTIFY spectrumChanged)
     Q_PROPERTY(QColor spectrumColor READ spectrumColor WRITE setSpectrumColor NOTIFY spectrumColorChanged)
 
+    // The rate the filters are designed at. Not cosmetic: the bilinear
+    // transform warps a shelf near Nyquist by a couple of dB, so a curve drawn
+    // at a fixed 48 kHz would stop being the curve the endpoint is running as
+    // soon as the endpoint is not at 48 kHz. Zero means "use the default".
+    Q_PROPERTY(int sampleRate READ sampleRate WRITE setSampleRate NOTIFY sampleRateChanged)
+
 public:
     explicit ResponseCurveItem(QQuickItem *parent = nullptr);
 
@@ -50,6 +56,8 @@ public:
     void setSpectrum(const QVector<float> &s);
     QColor spectrumColor() const { return m_spectrumColor; }
     void setSpectrumColor(const QColor &c);
+    int sampleRate() const { return m_sampleRate; }
+    void setSampleRate(int hz);
 
 signals:
     void bandsChanged();
@@ -61,6 +69,7 @@ signals:
     void filledChanged();
     void spectrumChanged();
     void spectrumColorChanged();
+    void sampleRateChanged();
 
 private:
     EqBandModel *m_bands = nullptr;
@@ -70,6 +79,7 @@ private:
     QColor m_gridColor = QColor(255, 255, 255, 28);
     QColor m_labelColor = QColor(255, 255, 255, 110);
     bool m_filled = true;
+    int m_sampleRate = 0;
 
     QVector<float> m_spectrum;      // dBFS per log-spaced band
     QVector<float> m_decay;         // slow-falling envelope, for readability

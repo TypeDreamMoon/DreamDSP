@@ -26,7 +26,28 @@ struct Job {
     // this block rather than each open-coding the rack.
     dsp::ParamBlock params = dsp::transparentBlock();
 
-    bool anything() const { return params.enableMask != 0u; }
+    // "Would this file come out different?" A switched-on equalizer sitting at
+    // flat with no preamp would otherwise make the answer always yes, and the
+    // whole point of the check is to say so when you have dropped a file and
+    // nothing at all would happen to it.
+    bool anything() const
+    {
+        uint32_t mask = params.enableMask;
+        if (mask & dsp::kEnEqualizer) {
+            bool audible = params.eq.preampDb != 0.0f;
+            for (uint32_t i = 0; i < params.eq.bandCount && !audible; ++i) {
+                const dsp::EqBand &b = params.eq.band[i];
+                if (!b.enabled)
+                    continue;
+                // A gainless type shapes the curve at 0 dB, so it always counts.
+                if (b.gainDb != 0.0f || !dsp::filterHasGain(dsp::FilterKind(b.type)))
+                    audible = true;
+            }
+            if (!audible)
+                mask &= ~dsp::kEnEqualizer;
+        }
+        return mask != 0u;
+    }
 };
 
 struct Result {
@@ -135,7 +156,8 @@ void OfflineRender::renderUrl(const QUrl &url)
     // endpoint's rate inside the APO, which an offline render of an arbitrary
     // file has no equivalent of.
     job.params = blockFromModels(m_compressor, m_reverb, m_effects,
-                                 dsp::Convolution::Params{}, false);
+                                 dsp::Convolution::Params{}, false,
+                                 m_bands, m_preamp, m_eqEnabled);
 
     if (!job.anything()) {
         setStatus(QStringLiteral("没有启用任何效果 —— 先打开一个"), true);

@@ -2,37 +2,28 @@
 
 #include <QString>
 
-// Biquad design + magnitude response, used to render the predicted frequency
-// response and to emit Equalizer APO filter lines.
+#include "Equalizer.h"   // dsp layer
+
+// Qt-side spelling of the filter vocabulary.
 //
-// Formulas follow the Audio EQ Cookbook (Robert Bristow-Johnson).
+// The types, the design formulas and the magnitude response all live in
+// dsp/Equalizer.h now, because that is the copy that runs inside audiodg.exe.
+// This header exists only to add the string handling Qt makes convenient and
+// the DSP layer must not depend on.
+//
+// It used to hold a second implementation of the same maths, which meant the
+// curve drawn on screen and the filter applied to the audio came from two
+// pieces of code that were merely intended to agree. They did not: this file's
+// Butterworth and Linkwitz-Riley types were single second-order sections, and
+// nothing applied them at all.
 
 namespace dreamdsp {
 
-// The 18 filter types Equalizer APO accepts, in the exact order Peace stores
-// them as integers in a .peace file's [Filters] section -- so the enum value
-// IS the on-disk index. Do not reorder.
-enum class FilterType {
-    PK = 0,   // peaking
-    LPQ,      // low-pass with Q
-    HPQ,      // high-pass with Q
-    BP,       // band-pass
-    LS,       // low shelf  (no Q)
-    HS,       // high shelf (no Q)
-    NO,       // notch
-    AP,       // all-pass
-    LSC,      // low shelf,  centre frequency
-    HSC,      // high shelf, centre frequency
-    BWLP,     // Butterworth low-pass
-    BWHP,     // Butterworth high-pass
-    LRLP,     // Linkwitz-Riley low-pass
-    LRHP,     // Linkwitz-Riley high-pass
-    LSCQ,     // low shelf,  centre frequency, with Q
-    HSCQ,     // high shelf, centre frequency, with Q
-    LSQ,      // low shelf  with Q
-    HSQ,      // high shelf with Q
-    Count
-};
+using FilterType = dsp::FilterKind;
+using BiquadCoeffs = dsp::BiquadCoeffs;
+using FilterSections = dsp::FilterSections;
+
+using dsp::magnitudeDb;
 
 const char *apoToken(FilterType type);
 bool hasGain(FilterType type);
@@ -45,25 +36,12 @@ FilterType filterTypeFromToken(const QString &token, bool *ok = nullptr);
 FilterType filterTypeFromIndex(int index, bool *ok = nullptr);
 inline int filterTypeIndex(FilterType type) { return static_cast<int>(type); }
 
-// Normalised coefficients: a0 is folded into the others.
-struct BiquadCoeffs {
-    double b0 = 1.0;
-    double b1 = 0.0;
-    double b2 = 0.0;
-    double a1 = 0.0;
-    double a2 = 0.0;
-};
-
-// Butterworth and Linkwitz-Riley types are higher-order in APO; here they are
-// approximated by the equivalent second-order section, which is close enough
-// for a preview curve but is NOT what APO actually applies.
-BiquadCoeffs designBiquad(FilterType type,
-                          double freqHz,
-                          double gainDb,
-                          double q,
-                          double sampleRate);
-
-// Magnitude of H(e^jw) in dB at freqHz.
-double magnitudeDb(const BiquadCoeffs &c, double freqHz, double sampleRate);
+// One filter, as up to two cascaded sections. Butterworth and Linkwitz-Riley
+// are fourth order and use both.
+FilterSections designBiquad(FilterType type,
+                            double freqHz,
+                            double gainDb,
+                            double q,
+                            double sampleRate);
 
 } // namespace dreamdsp

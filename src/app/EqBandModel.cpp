@@ -201,7 +201,7 @@ QVariantList EqBandModel::filterTypeOptions() const
 
 void EqBandModel::insertBandAfter(int row)
 {
-    if (m_bands.size() >= 31)
+    if (m_bands.size() >= kMaxBands)
         return;
     row = std::clamp(row, -1, static_cast<int>(m_bands.size()) - 1);
 
@@ -244,6 +244,13 @@ void EqBandModel::setBands(const QVector<PresetBand> &bands)
 
     beginResetModel();
     m_bands = bands;
+    // An imported .peace file or APO config can name more filters than the
+    // parameter block has room for. Cutting here rather than in the publisher
+    // means the bands on screen are the bands being applied -- a model holding
+    // forty entries while thirty-two reach the audio would make the curve a
+    // lie.
+    if (m_bands.size() > kMaxBands)
+        m_bands.resize(kMaxBands);
     endResetModel();
 
     emit countChanged();
@@ -252,7 +259,7 @@ void EqBandModel::setBands(const QVector<PresetBand> &bands)
 
 void EqBandModel::setBandCount(int count)
 {
-    count = std::clamp(count, 1, 31);
+    count = std::clamp(count, 1, kMaxBands);
 
     beginResetModel();
     m_bands.clear();

@@ -12,77 +12,123 @@ to ViPER4Windows here — a full effects rack, not just an equalizer.
 Two pieces, split along a line that matters:
 
 ```
-DreamDSP.exe     Qt/QML interface — configuration, presets, analysis
-DreamDSPFX.dll   VST2 plugin — the effects that need real DSP        [planned]
+DreamDSP.exe      Qt/QML interface -- configuration, presets, analysis
+DreamDspApo.dll   the audio processing object, loaded into audiodg.exe
 ```
 
-Everything runs inside **Equalizer APO**, which handles the parts that are
-genuinely dangerous to get wrong: audio-engine integration, format negotiation,
-device management, and crash isolation.
+DreamDSP registers its own APO and attaches it to an endpoint's post-mix slot,
+so the whole rack runs inside the Windows audio engine:
 
 ```
-audio → Windows Audio Engine → Equalizer APO ─┬─ linear filters (APO native)
-                                              └─ DreamDSPFX.dll (our effects)
-                                     ↑ reads
-                            config/dreamdsp.txt   ← DreamDSP writes only this
-                            config/config.txt     ← only adds/removes one
-                                                    "Include: dreamdsp.txt" line
+audio -> Windows Audio Engine -> DreamDspApo.dll
+                                   equalizer -> bass -> exciter -> tube
+                                   -> compressor -> multiband -> reverb
+                                   -> width -> crossfeed -> convolution
+                                        ^ reads
+                        C:\ProgramData\DreamDSP\control\params.bin
+                        C:\ProgramData\DreamDSP\status.bin  <- APO writes back
 ```
 
-**Why a VST plugin rather than our own APO.** Both Equalizer APO and
-ViPER4Windows are APOs — DLLs registered into `MMDevices` and loaded into
-`audiodg.exe`. Writing another one means re-implementing what APO already does
-well, and a null dereference there kills system audio until the user restarts
-the audio service. APO, by contrast, guards its plugin calls — strings lifted
-straight out of `EqualizerAPO.dll`:
+Parameters travel, not filter coefficients: 820 bytes of clamped scalars,
+published by replacing a file (so the kernel provides the atomicity), read
+through a three-slot seqlock, and sanitised on both sides. A hostile IIR
+denominator cannot be told apart from a legitimate one by any cheap test, which
+would leave an unbounded-gain path into a system audio process; bounded scalars
+can be checked exactly.
 
-```
-The VST plugin %s crashed during audio processing.
-The VST plugin %s crashed during initialization.
-Library %s has wrong architecture, must be %d-bit
-VSTPluginMain                    <- VST2 entry point; no VST3 symbols present
-\VSTPlugins                      <- default search path
-```
+**Equalizer APO is not required.** It was, up to 0.1.0: the equalizer was
+emitted as `Filter N:` lines into `config/dreamdsp.txt` and APO executed them.
+The equalizer now runs in DreamDSP's own APO, in double precision, with the
+filter design shared between the audio path and the curve on screen -- so the
+plotted response is read out of the coefficients the audio actually goes
+through, verified against the measured impulse response to 0.0000 dB.
 
-So a bug in our DSP gets caught and the plugin dropped, instead of silencing
-the machine. That single line decides the architecture.
-
-APO hosts **VST2 only** (the `VSTPluginMain` export, 64-bit). The VST2 SDK is no
-longer distributed by Steinberg, but the interface is a plain C ABI struct —
-`AEffect` is declared directly in this project rather than taking an SDK
-dependency.
+Equalizer APO remains supported as a fallback for an endpoint DreamDSP's own
+object is not attached to, and its file formats remain supported as import and
+export. Exactly one of the two applies the curve at any time; attaching
+DreamDSP's object removes the `Include:` line, and the interface says which
+program is doing the work.
 
 ## Effect inventory
 
-Split by what can be expressed in APO's linear configuration language and what
-needs real signal processing:
+Everything runs in DreamDSP's own APO.
 
-| Effect | Where it runs | Status |
-|---|---|---|
-| Parametric EQ, up to 31 bands, 18 filter types | APO native | done |
-| Preamp, per-device profiles, channel routing | APO native | done |
-| AutoEQ headphone correction (20,777 curves) | APO native | done |
-| Peace `.peace` preset interop | APO native | done |
-| ViPER **DDC** (`.vdc`) import | APO native — DDC is just cascaded biquads | planned |
-| Convolution / impulse response | APO native (`Convolution:`) | planned |
-| Loudness correction | APO native (`LoudnessCorrection:`) | planned |
-| Compressor / compander | plugin | planned |
-| Algorithmic reverb | plugin | planned |
-| Tube saturation, exciter | plugin | planned |
-| Psychoacoustic bass | plugin | planned |
-| Stereo widener, crossfeed | plugin | planned |
+| Effect | Status |
+|---|---|
+| Parametric EQ, 32 bands, 18 filter types, double precision | done |
+| Graphic EQ, 31 ISO bands, imports AutoEQ `GraphicEQ:` curves | done |
+| Preamp, per-device profiles | done |
+| AutoEQ headphone correction (20,777 curves) | done |
+| Peace `.peace` preset interop | done |
+| Convolution / impulse response, any rate, any file rate | done |
+| Compressor, with auto knee/attack/release/makeup | done |
+| Three-band multiband compressor | done |
+| Algorithmic reverb | done |
+| Tube saturation, exciter | done |
+| Psychoacoustic virtual bass | done |
+| Stereo widener, crossfeed | done |
+| Dynamic bass boost (level-following) | done |
+| Look-ahead peak limiter | done |
+| User-orderable chain | done |
+| Channel routing matrix (APO `Copy:`) | done |
+| Per-channel delay (APO `Delay:`), sub-sample | done |
+| Loudness correction (APO `LoudnessCorrection:`) | done |
+| ViPER **DDC** (`.vdc`) import | not planned |
+| Capture (microphone) endpoints | not supported |
+| VST plugin hosting | not planned -- see below |
+| Liveprog (EEL2 scripting) | not planned -- see below |
 
-The linear half is not a limitation to work around — APO's filter engine is
-good, and anything expressible as biquads belongs there rather than in our
-plugin.
+Filters that Equalizer APO never implemented -- `BWLP`, `BWHP`, `LRLP`, `LRHP`,
+which are Peace's spelling and which APO 1.4.2 logs as invalid and drops -- are
+implemented here as genuine fourth-order sections.
+
+Two places where the reimplementation is deliberately not a copy. The delay
+interpolates to sub-sample resolution: APO rounds to whole samples, which at
+48 kHz quantises speaker alignment to 7.1 mm of path length, the same order as
+the distances being corrected. And the loudness correction takes the endpoint
+volume from the interface rather than from a polling thread inside audiodg.exe,
+so the DSP stage stays a pure function of its parameters and the system audio
+process makes no COM calls of its own. The correction curve itself is APO's
+formula, reproduced exactly.
+
+**The chain order is the user's.** Stages run in whatever order the chain
+editor puts them in; `kDefaultOrder` is a default, not a constraint. The order
+travels as a permutation of the sixteen stage ids, and the sanitiser replaces
+anything that is not a permutation wholesale rather than patching it -- a
+duplicate would run a stage twice and an omission would silently drop an effect
+whose switch says it is on.
+
+**The graphic equalizer is a filter bank, not an FIR.** JamesDSP and Equalizer
+APO both realise arbitrary magnitude curves with an FIR; this uses 31 ISO
+third-octave peaking sections, and the band gains are solved for so the cascade
+matches the requested curve rather than merely being set to it (which is wrong
+by 12 dB on a real curve, because the bands overlap). Three reasons: a
+partitioned convolver's latency is its block size, which is milliseconds added
+to every stream for an equalizer; only bounded gains can travel on the wire,
+where coefficients cannot be validated at all; and the design is the same
+`designFilter()` the parametric bands already use and that is already tested
+against measured impulse responses. The cost is resolution -- third-octave
+against an FIR's ability to follow a curve as sharply as its length allows.
+Measured, a 60-point AutoEQ-shaped curve lands within 0.007 dB.
+
+**VST hosting is not planned.** APO can afford it because it guards every
+plugin call and drops a plugin that faults; DreamDSP would be handing arbitrary
+third-party code a real-time thread inside `audiodg.exe`, where a fault takes
+the machine's audio with it. `Stage:` is likewise absent because it is a
+config-file concept -- selecting which APO slot a section applies to -- and
+`If`/`Eval` because per-device profiles already cover what it is used for.
+Liveprog is the same objection one step milder -- a sandboxed interpreter rather
+than native code -- but it is a language implementation, not an effect, and a
+runaway script on a real-time thread inside a system audio process is a poor
+place to find that out.
 
 ## Peace compatibility
 
-DreamDSP began as a Peace Equalizer replacement and keeps full interoperability
-with it, now as one feature among others: it reads and writes Peace's `.peace`
-preset format, imports the presets an existing Peace install left behind, and
-touches `config.txt` with a single reversible `Include:` line so a Peace setup
-alongside it keeps working.
+DreamDSP began as a Peace Equalizer replacement and keeps interoperability with
+it as a file format rather than as a dependency: it reads and writes `.peace`
+presets, imports the presets an existing Peace install left behind, and reads
+the AutoEQ databases Peace ships -- from its own directory first, so neither
+Peace nor Equalizer APO has to be installed for that feature to work.
 
 ## Requirements
 
@@ -91,7 +137,7 @@ alongside it keeps working.
 | Qt | 6.8.3 msvc2022_64 (`D:\Qt\6.8.3\msvc2022_64`) |
 | Toolchain | Visual Studio 2022 (matching Qt's MSVC build) |
 | Build system | CMake ≥ 3.21 + Ninja |
-| Runtime | Equalizer APO ≥ 1.4 installed |
+| Runtime | Windows 10/11. Equalizer APO optional (fallback + import only) |
 
 Paths are set in [`scripts/env.bat`](scripts/env.bat) — edit there if yours differ.
 
