@@ -11,6 +11,7 @@
 #include "core/PeacePreset.h"
 #include "platform/ApoLocator.h"
 #include "platform/AudioDevices.h"
+#include "platform/UpdateChecker.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -489,6 +490,39 @@ void testFullPreset()
     }
 }
 
+// Getting this wrong strands every installed copy: a version comparison that
+// says 0.10.0 is older than 0.9.0 means the update is never offered again, and
+// nothing about the application looks broken while it happens.
+void testVersionCompare()
+{
+    out() << "\n[version compare]" << Qt::endl;
+
+    const auto cmp = &UpdateChecker::compareVersions;
+
+    check(cmp(QStringLiteral("1.0.0"), QStringLiteral("1.0.0")) == 0, QStringLiteral("equal"));
+    check(cmp(QStringLiteral("1.0.0"), QStringLiteral("1.0.1")) < 0, QStringLiteral("patch"));
+    check(cmp(QStringLiteral("1.0.0"), QStringLiteral("1.1.0")) < 0, QStringLiteral("minor"));
+    check(cmp(QStringLiteral("1.0.0"), QStringLiteral("2.0.0")) < 0, QStringLiteral("major"));
+
+    // The one a string comparison gets backwards.
+    check(cmp(QStringLiteral("0.9.0"), QStringLiteral("0.10.0")) < 0,
+          QStringLiteral("0.9.0 is older than 0.10.0"));
+    check(cmp(QStringLiteral("0.2.0"), QStringLiteral("0.10.0")) < 0,
+          QStringLiteral("0.2.0 is older than 0.10.0"));
+
+    // A development build carries a suffix; it must compare as its release.
+    check(cmp(QStringLiteral("0.2.0+7.abc1234"), QStringLiteral("0.2.0")) == 0,
+          QStringLiteral("a build suffix does not change the ordering"));
+    check(cmp(QStringLiteral("0.2.0+7.abc1234-dirty"), QStringLiteral("0.3.0")) < 0,
+          QStringLiteral("a dirty build still sees a newer release"));
+
+    // Short and malformed forms must not crash or invent an ordering.
+    check(cmp(QStringLiteral("1"), QStringLiteral("1.0.0")) == 0,
+          QStringLiteral("missing components read as zero"));
+    check(cmp(QStringLiteral(""), QStringLiteral("0.0.1")) < 0,
+          QStringLiteral("an empty version is older than anything"));
+}
+
 void testAutostart()
 {
     out() << "\n[autostart]" << Qt::endl;
@@ -713,6 +747,7 @@ int runSelfTest()
     testBiquad();
     testFft();
     testApoConfig();
+    testVersionCompare();
     testAutostart();
     testFullPreset();
     testPresets(apo);

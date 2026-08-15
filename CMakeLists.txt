@@ -2,6 +2,17 @@ cmake_minimum_required(VERSION 3.21)
 
 project(DreamDSP VERSION 0.1.0 LANGUAGES CXX)
 
+# The version comes from the git tag, not from the line above -- that one is
+# only the fallback for a tree with no tags at all. See cmake/Version.cmake.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(Version)
+dreamdsp_version_from_git("${PROJECT_VERSION}")
+if(DREAMDSP_IS_RELEASE)
+    message(STATUS "DreamDSP version ${DREAMDSP_VERSION_FULL} (release)")
+else()
+    message(STATUS "DreamDSP version ${DREAMDSP_VERSION_FULL}")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -63,6 +74,7 @@ qt_add_qml_module(DreamDSP
         src/platform/SingleInstance.h  src/platform/SingleInstance.cpp
         src/platform/LoopbackCapture.h src/platform/LoopbackCapture.cpp
         src/platform/TonePlayer.h      src/platform/TonePlayer.cpp
+        src/platform/UpdateChecker.h   src/platform/UpdateChecker.cpp
         src/app/EqBandModel.h          src/app/EqBandModel.cpp
         src/app/PresetStore.h          src/app/PresetStore.cpp
         src/app/AppController.h        src/app/AppController.cpp
@@ -90,7 +102,9 @@ target_include_directories(DreamDSP PRIVATE
 
 target_compile_definitions(DreamDSP PRIVATE
     HUSKARUI_IMPORT_PATH="${HuskarUI_QML_IMPORT_PATH}"
-    DREAMDSP_VERSION="${PROJECT_VERSION}"
+    DREAMDSP_VERSION="${DREAMDSP_VERSION}"
+    DREAMDSP_VERSION_FULL="${DREAMDSP_VERSION_FULL}"
+    DREAMDSP_REPO="TypeDreamMoon/DreamDSP"
     UNICODE _UNICODE
     NOMINMAX
     WIN32_LEAN_AND_MEAN

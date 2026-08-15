@@ -341,11 +341,95 @@ Item {
                 }
             }
 
+            HusDivider { Layout.fillWidth: true }
+
+            // ------------------------------------------------------- updates
+            SectionTitle { text: '关于与更新' }
+
+            SettingRow {
+                label: '当前版本'
+                hint: AppController.updates.status !== ''
+                      ? AppController.updates.status
+                      : AppController.version
+                RowLayout {
+                    spacing: 8
+                    HusButton {
+                        text: '检查更新'
+                        enabled: !AppController.updates.busy
+                        onClicked: AppController.updates.checkNow()
+                    }
+                    HusButton {
+                        text: '发布页'
+                        onClicked: AppController.updates.openReleasePage()
+                    }
+                }
+            }
+
+            SettingRow {
+                label: '自动检查更新'
+                hint: '启动后与每天各查一次 GitHub 的发布信息。只读取一小段 JSON,不上传任何本机信息。'
+                HusSwitch {
+                    checked: AppController.updates.automatic
+                    onToggled: AppController.updates.automatic = checked
+                }
+            }
+
+            // Only appears when there is something to do.
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                visible: AppController.updates.updateAvailable
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    HusText {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        font.pixelSize: 12
+                        text: '新版本 ' + AppController.updates.latestVersion
+                              + (AppController.updates.downloaded
+                                 ? ' 已下载并通过 SHA-256 校验'
+                                 : (AppController.updates.busy
+                                    ? ' 下载中 ' + AppController.updates.downloadPercent + '%'
+                                    : ' 可用'))
+                    }
+
+                    HusButton {
+                        text: '下载'
+                        type: HusButton.Type_Primary
+                        visible: !AppController.updates.downloaded
+                        enabled: !AppController.updates.busy
+                        onClicked: AppController.updates.download()
+                    }
+
+                    HusButton {
+                        text: '安装并重启'
+                        type: HusButton.Type_Primary
+                        visible: AppController.updates.downloaded
+                        onClicked: AppController.updates.installNow()
+                    }
+                }
+
+                HusText {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: 11
+                    opacity: 0.5
+                    // Said plainly rather than left as a surprise: installing
+                    // replaces a component that lives inside audiodg.exe, so
+                    // the audio service restarts and the machine goes quiet.
+                    text: '安装会关闭 DreamDSP 并重启音频服务,全机声音会中断一瞬 —— '
+                          + '不会在你没点之前自动进行。'
+                }
+            }
+
             HusText {
                 Layout.fillWidth: true
                 Layout.topMargin: 4
                 Layout.bottomMargin: 8
-                text: 'DreamDSP · 均衡由 Equalizer APO 执行,本程序只生成配置'
+                text: 'DreamDSP ' + AppController.version
                 font.pixelSize: 11
                 opacity: 0.35
             }

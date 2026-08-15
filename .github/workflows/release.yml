@@ -1,0 +1,168 @@
+# Builds an installer and publishes it as a GitHub release.
+#
+# Triggered by a version tag, because the tag is where the version comes from:
+# cmake/Version.cmake reads `git describe`, so a build from tag v0.2.0 reports
+# 0.2.0 and a build from anywhere else says which commit it is instead. There
+# is no version number to remember to edit.
+#
+# The workflow also computes the installer's SHA-256 and puts it in the release
+# notes. That is not decoration -- the in-app updater refuses to download an
+# asset it cannot check against a published checksum, so a release without one
+# simply will not update anybody.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  QT_VERSION: 6.8.3
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out, with submodules and tags
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Version.cmake needs the tags, and `git describe` needs enough
+          # history to find the nearest one.
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtshadertools
+          cache: true
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build HuskarUI
+        shell: pwsh
+        run: |
+          # Installed into the working tree rather than into the Qt SDK, so the
+          # build cannot pick up a different copy by accident -- the same
+          # reasoning as scripts/build-huskarui.bat.
+          cmake -G Ninja -S third_party/HuskarUI -B build/huskarui `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/third_party/HuskarUI-install" `
+            -DBUILD_HUSKARUI_GALLERY=OFF `
+            -DINSTALL_HUSKARUI_IN_DEFAULT_LOCATION=OFF
+          cmake --build build/huskarui --parallel
+          cmake --install build/huskarui
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -G Ninja -S . -B build/dreamdsp `
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+            -DHuskarUI_DIR="$env:GITHUB_WORKSPACE/third_party/HuskarUI-install/lib/cmake/HuskarUI"
+
+      - name: Build
+        run: cmake --build build/dreamdsp --parallel
+
+      - name: Run the DSP tests
+        shell: pwsh
+        run: |
+          # The offline suite proves the signal processing before anything is
+          # published. It needs no audio device, so it runs on the runner.
+          & build/dreamdsp/dspharness.exe --test
+          if ($LASTEXITCODE -ne 0) { throw "dspharness reported failures" }
+
+      - name: Stage the payload
+        shell: pwsh
+        run: |
+          $stage = "build/stage"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item build/dreamdsp/DreamDSP.exe        $stage
+          Copy-Item build/dreamdsp/DreamDspApo.dll     $stage
+          Copy-Item build/dreamdsp/HuskarUIBasic.dll   $stage
+          Copy-Item build/dreamdsp/HuskarUIImpl.dll    $stage
+          # windeployqt brings the Qt runtime and the QML plugins the app
+          # actually imports; --qmldir is what makes it see HuskarUI's.
+          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" `
+              --release --no-translations --no-system-d3d-compiler `
+              --qmldir qml `
+              --qmldir third_party/HuskarUI-install/qml `
+              "$stage/DreamDSP.exe"
+          Copy-Item third_party/HuskarUI-install/qml/HuskarUI $stage/HuskarUI -Recurse -Force
+
+      - name: Work out the version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $version = $tag -replace '^v',''
+          "tag=$tag"         | Out-File -Append $env:GITHUB_OUTPUT
+          "version=$version" | Out-File -Append $env:GITHUB_OUTPUT
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          # Inno Setup is not on the runner image by default.
+          choco install innosetup --no-progress -y
+          & "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe" `
+              /DAppVersion=${{ steps.version.outputs.version }} `
+              /DStageDir=$env:GITHUB_WORKSPACE\build\stage `
+              /DOutDir=$env:GITHUB_WORKSPACE\build\installer `
+              installer\DreamDSP.iss
+
+      - name: Checksum
+        id: checksum
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem build/installer/*.exe | Select-Object -First 1
+          $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
+          "file=$($file.FullName)" | Out-File -Append $env:GITHUB_OUTPUT
+          "name=$($file.Name)"     | Out-File -Append $env:GITHUB_OUTPUT
+          "sha256=$hash"           | Out-File -Append $env:GITHUB_OUTPUT
+          Write-Host "$hash  $($file.Name)"
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: DreamDSP ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          files: ${{ steps.checksum.outputs.file }}
+          body: |
+            ## DreamDSP ${{ steps.version.outputs.version }}
+
+            系统级音频 DSP:参数均衡、效果机架、任意采样率的卷积。
+
+            安装后到「设置 → 系统音效 (APO)」安装音频组件并接入你的输出设备。
+            接入需要重启一次音频服务,全机声音会短暂中断。
+
+            ### 校验
+
+            下载后请核对,应用内的自动更新也是照这一行校验的:
+
+            ```
+            SHA-256: ${{ steps.checksum.outputs.sha256 }}  ${{ steps.checksum.outputs.name }}
+            ```
+
+            ### 卸载
+
+            卸载程序会先移除音频组件再删除文件。若曾手动接入过其他设备,
+            请先在设置页把它们关掉。

@@ -15,6 +15,7 @@
 #include "platform/ApoLocator.h"
 #include "platform/AudioDevices.h"
 #include "platform/HotkeyManager.h"
+#include "platform/UpdateChecker.h"
 #include "platform/LoopbackCapture.h"
 #include "platform/PeakMeter.h"
 #include "platform/TrayIcon.h"
@@ -112,6 +113,8 @@ class AppController : public QObject
     Q_PROPERTY(bool closeToTray READ closeToTray WRITE setCloseToTray NOTIFY closeToTrayChanged)
     Q_PROPERTY(bool startHidden READ startHidden CONSTANT)
     Q_PROPERTY(bool quitting READ quitting NOTIFY quittingChanged)
+    Q_PROPERTY(QString version READ version CONSTANT)
+    Q_PROPERTY(dreamdsp::UpdateChecker *updates READ updates CONSTANT)
 
 public:
     explicit AppController(QObject *parent = nullptr);
@@ -208,6 +211,10 @@ public:
     // window, and the process stayed alive forever. The close handler consults
     // this to tell a real quit from a window close.
     bool quitting() const { return m_quitting; }
+
+    // The full string, which says so when a build is not a release.
+    QString version() const { return QString::fromLatin1(DREAMDSP_VERSION_FULL); }
+    UpdateChecker *updates() { return &m_updates; }
 
     // Called once from QML with the main window, to hang the tray icon off it.
     Q_INVOKABLE void attachWindow(QObject *window);
@@ -394,6 +401,7 @@ private:
 
     TrayIcon m_tray;
     HotkeyManager m_hotkeys;
+    UpdateChecker m_updates;
     PeakMeter m_meter;
     QTimer m_meterTimer;
     AutoEqDatabase m_autoEq;

@@ -59,6 +59,12 @@ AppController::AppController(QObject *parent)
 
     connect(&m_hotkeys, &HotkeyManager::triggered, this, &AppController::onHotkey);
 
+    // Installing an update replaces files this process has open, so the
+    // updater asks rather than doing it: quitApplication is the same door the
+    // tray menu uses, which flushes settings on the way out.
+    connect(&m_updates, &UpdateChecker::quitRequested,
+            this, &AppController::quitApplication);
+
     // 30 Hz is smooth enough for a level meter and cheap; it only runs while
     // something is actually looking at it.
     m_meterTimer.setInterval(33);
@@ -126,6 +132,12 @@ AppController::AppController(QObject *parent)
     if (m_apo.found)
         writeNow();
     markDirty(false);
+
+    // Checked shortly after start-up rather than during it: the window should
+    // appear without waiting on the network, and a failed check must never be
+    // able to delay or break launching.
+    if (m_updates.automatic())
+        QTimer::singleShot(4000, &m_updates, &UpdateChecker::checkNow);
 }
 
 AppController::~AppController()
