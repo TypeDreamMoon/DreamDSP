@@ -121,7 +121,11 @@ jobs:
         run: |
           # Inno Setup is not on the runner image by default.
           choco install innosetup --no-progress -y
-          & "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe" `
+          # ${env:...} braces are required: PowerShell parses $env:ProgramFiles
+          # and then treats the "(x86)" as a separate expression.
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          & $iscc `
               /DAppVersion=${{ steps.version.outputs.version }} `
               /DStageDir=$env:GITHUB_WORKSPACE\build\stage `
               /DOutDir=$env:GITHUB_WORKSPACE\build\installer `

@@ -65,7 +65,11 @@ CloseApplicationsFilter=*.exe,*.dll
 RestartApplications=no
 
 [Languages]
-Name: "chinese"; MessagesFile: "compiler:Default.isl"
+; Inno Setup ships no Chinese message file, so naming a language "chinese" and
+; pointing it at Default.isl would produce an English installer wearing a
+; Chinese label. The interface strings this installer adds are Chinese either
+; way; the wizard's own are Inno's.
+Name: "default"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"
