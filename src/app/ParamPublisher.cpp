@@ -4,6 +4,7 @@
 #include "ImpulseBlob.h"
 #include "WavFile.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -22,6 +23,12 @@ namespace {
 // top of this.
 constexpr int kWriteDebounceMs = 30;
 constexpr int kStatusPollMs = 1000;
+
+// How old the APO's report may be and still count as a description of now.
+// Generous: it is rewritten on every stream event and at least every few
+// seconds while one is open, so anything past this means no stream is running
+// -- or that nothing is loading the object at all.
+constexpr int kStatusStaleSeconds = 15;
 
 } // namespace
 
@@ -521,6 +528,24 @@ void ParamPublisher::pollStatus()
             m_statusFresh = false;
             emit statusChanged();
         }
+        return;
+    }
+
+    // A parseable status file is not a live one. The APO writes this while it
+    // is streaming and simply stops when it is not, so the last block it wrote
+    // stays on disk indefinitely -- and reporting on it is how "正在生效" came
+    // to be displayed for nineteen days after the object had stopped being
+    // loaded at all. The one number that could have told the truth was already
+    // in the block and unread.
+    const QDateTime written = QFileInfo(statusFilePath()).lastModified();
+    const bool live = written.isValid()
+                      && written.secsTo(QDateTime::currentDateTime()) <= kStatusStaleSeconds;
+    if (!live) {
+        if (m_statusFresh) {
+            m_statusFresh = false;
+            emit statusChanged();
+        }
+        m_status = s;
         return;
     }
 

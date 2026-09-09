@@ -12,6 +12,7 @@
 #include "app/AppController.h"
 #include "app/SelfTest.h"
 #include "platform/ApoInstaller.h"
+#include "platform/AudioDevices.h"
 #include "platform/SingleInstance.h"
 #include "platform/TonePlayer.h"
 
@@ -85,6 +86,49 @@ int main(int argc, char *argv[])
     // ShellExecute "runas" so the user sees a single consent prompt per action
     // instead of being sent to a PowerShell script. They must be handled before
     // anything else: no window, no single-instance guard, no QML engine.
+    // --apo-attach [endpointId] / --apo-detach [endpointId] drive the endpoint
+    // side from the command line. Attaching needs no elevation -- BUILTIN\Users
+    // holds SetValue on an endpoint's FxProperties -- so this is a plain
+    // diagnostic like --playtone rather than one of the elevated modes below,
+    // and it is the only way to exercise the path without a window.
+    {
+        const int attachAt = args.indexOf(QStringLiteral("--apo-attach"));
+        const int detachAt = args.indexOf(QStringLiteral("--apo-detach"));
+        if (attachAt >= 0 || detachAt >= 0) {
+            attachConsoleIfNeeded();
+            const int at = attachAt >= 0 ? attachAt : detachAt;
+            QString id = (at + 1 < args.size() && !args.at(at + 1).startsWith(QLatin1String("--")))
+                             ? args.at(at + 1)
+                             : QString();
+
+            const HRESULT hr0 = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            if (id.isEmpty()) {
+                for (const dreamdsp::AudioDevice &d : dreamdsp::enumerateRenderDevices()) {
+                    if (d.isDefault) { id = d.id; break; }
+                }
+            }
+
+            const dreamdsp::ApoSlot before = dreamdsp::apoSlotOf(id);
+            std::printf("endpoint      %s\n", id.toLocal8Bit().constData());
+            std::printf("slot before   %s%s\n",
+                        before.clsid.isEmpty() ? "(free)" : before.clsid.toLocal8Bit().constData(),
+                        before.sysFxDisabled ? "   [enhancements OFF]" : "");
+
+            const QString err = (attachAt >= 0) ? dreamdsp::attachApo(id)
+                                                : dreamdsp::detachApo(id);
+            const dreamdsp::ApoSlot after = dreamdsp::apoSlotOf(id);
+            std::printf("slot after    %s%s\n",
+                        after.clsid.isEmpty() ? "(free)" : after.clsid.toLocal8Bit().constData(),
+                        after.sysFxDisabled ? "   [enhancements OFF]" : "");
+            std::printf("%s\n", err.isEmpty() ? "ok" : err.toLocal8Bit().constData());
+            std::fflush(stdout);
+
+            if (SUCCEEDED(hr0))
+                ::CoUninitialize();
+            return err.isEmpty() ? 0 : 1;
+        }
+    }
+
     {
         const bool doInstall = args.contains(QStringLiteral("--apo-install"));
         const bool doUninstall = args.contains(QStringLiteral("--apo-uninstall"));

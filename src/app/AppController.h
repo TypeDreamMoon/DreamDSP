@@ -132,7 +132,15 @@ class AppController : public QObject
     // explanations, and the user has no way to tell which one they have.
     Q_PROPERTY(bool apoLive READ apoLive NOTIFY apoStatusChanged)
     Q_PROPERTY(bool apoInSync READ apoInSync NOTIFY apoStatusChanged)
+    // The text is a function of the installation state as well as the APO's
+    // own report, so refreshApoState() emits apoStatusChanged alongside
+    // apoStateChanged -- binding it to the report alone left it frozen at
+    // whatever it said when the page was built.
     Q_PROPERTY(QString apoStatusText READ apoStatusText NOTIFY apoStatusChanged)
+
+    // The endpoint's own "disable all enhancements" switch. Surfaced because it
+    // makes every other indicator on the settings page a lie.
+    Q_PROPERTY(bool apoSysFxDisabled READ apoSysFxDisabled NOTIFY apoStateChanged)
 
     Q_PROPERTY(bool trayActive READ trayActive NOTIFY trayActiveChanged)
     Q_PROPERTY(bool autostart READ autostart WRITE setAutostart NOTIFY autostartChanged)
@@ -238,7 +246,8 @@ public:
     // per device. Neither becomes audible until the audio service restarts.
     bool apoInstalled() const { return m_apoState.installed(); }
     bool apoUpToDate() const { return m_apoState.upToDate; }
-    bool apoAttached() const { return m_apoSlot.isOurs; }
+    bool apoAttached() const { return m_apoSlot.live(); }
+    bool apoSysFxDisabled() const { return m_apoSlot.sysFxDisabled; }
     // Who holds the current device's post-mix slot: empty when free, our own
     // name when attached, otherwise the product that would be displaced.
     QString apoSlotOwner() const { return m_apoSlot.friendlyName; }

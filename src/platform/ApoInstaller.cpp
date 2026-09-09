@@ -24,6 +24,18 @@ const wchar_t *kClsidKey =
 // APO installation keeps working ahead of us rather than being displaced twice.
 const wchar_t *kSlotValue = L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2";
 
+// PKEY_AudioEndpoint_Disable_SysFx. One DWORD, and while it is 1 Windows builds
+// no effect chain for the endpoint at all -- no processing object is
+// instantiated, nothing is logged, and every registration still reads as
+// correct. It is the box the Sound control panel calls "Disable all
+// enhancements", and Equalizer APO's uninstaller sets it when it hands an
+// endpoint back.
+//
+// Which is how a working install becomes a silent one: DreamDSP still in the
+// post-mix slot, still registered, still loadable, and audiodg never going to
+// ask for it.
+const wchar_t *kDisableSysFx = L"{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5";
+
 QString programDataDir() { return QStringLiteral("C:/ProgramData/DreamDSP"); }
 QString stagedDllPath()  { return programDataDir() + QStringLiteral("/DreamDspApo.dll"); }
 
@@ -93,6 +105,39 @@ LSTATUS writeStringPrecise(HKEY root, const QString &sub, const QString &name,
         key, reinterpret_cast<const wchar_t *>(name.utf16()), 0, REG_SZ,
         reinterpret_cast<const BYTE *>(value.utf16()),
         DWORD((value.size() + 1) * sizeof(wchar_t)));
+    ::RegCloseKey(key);
+    return rc;
+}
+
+// The same precise-rights dance as the string pair above. Returns `dflt` when
+// the value is absent, which for the sysfx switch means "not disabled".
+DWORD readDwordPrecise(HKEY root, const QString &sub, const QString &name, DWORD dflt)
+{
+    HKEY key = nullptr;
+    if (::RegOpenKeyExW(root, reinterpret_cast<const wchar_t *>(sub.utf16()),
+                        0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+        return dflt;
+    }
+    DWORD value = 0;
+    DWORD bytes = sizeof(value);
+    DWORD type = 0;
+    const LSTATUS rc = ::RegQueryValueExW(key, reinterpret_cast<const wchar_t *>(name.utf16()),
+                                          nullptr, &type,
+                                          reinterpret_cast<BYTE *>(&value), &bytes);
+    ::RegCloseKey(key);
+    return (rc == ERROR_SUCCESS && type == REG_DWORD) ? value : dflt;
+}
+
+LSTATUS writeDwordPrecise(HKEY root, const QString &sub, const QString &name, DWORD value)
+{
+    HKEY key = nullptr;
+    const LSTATUS open = ::RegOpenKeyExW(root, reinterpret_cast<const wchar_t *>(sub.utf16()),
+                                         0, KEY_SET_VALUE | KEY_QUERY_VALUE, &key);
+    if (open != ERROR_SUCCESS)
+        return open;
+    const LSTATUS rc = ::RegSetValueExW(key, reinterpret_cast<const wchar_t *>(name.utf16()),
+                                        0, REG_DWORD,
+                                        reinterpret_cast<const BYTE *>(&value), sizeof(value));
     ::RegCloseKey(key);
     return rc;
 }
@@ -175,6 +220,12 @@ ApoSlot apoSlotOf(const QString &endpointId)
     if (endpointId.isEmpty())
         return slot;
 
+    // Read before the early return on an empty slot: a device with its effects
+    // switched off is worth reporting whether or not anything holds the slot,
+    // because that is precisely the state where holding it means nothing.
+    slot.sysFxDisabled = readDwordPrecise(HKEY_LOCAL_MACHINE, fxPropertiesKey(endpointId),
+                                          QString::fromWCharArray(kDisableSysFx), 0) != 0;
+
     slot.clsid = readString(HKEY_LOCAL_MACHINE, fxPropertiesKey(endpointId),
                             QString::fromWCharArray(kSlotValue));
     if (slot.clsid.isEmpty())
@@ -196,8 +247,26 @@ QString attachApo(const QString &endpointId)
         return QStringLiteral("没有选中设备");
 
     const ApoSlot current = apoSlotOf(endpointId);
+
+    // Clearing the endpoint's sysfx switch is part of attaching rather than a
+    // separate courtesy: with it set Windows builds no chain, so a slot written
+    // underneath it is a registration that will never be asked for.
+    //
+    // Done even when the slot is already ours, because that is exactly what
+    // something else leaves behind on its way out -- and the resulting state
+    // reads as fully working from every angle except the sound.
+    if (current.sysFxDisabled) {
+        writeHkcuString(backupKey(endpointId), QStringLiteral("SysFxWasDisabled"),
+                        QStringLiteral("1"));
+        const LSTATUS fx = writeDwordPrecise(HKEY_LOCAL_MACHINE, fxPropertiesKey(endpointId),
+                                             QString::fromWCharArray(kDisableSysFx), 0);
+        if (fx != ERROR_SUCCESS) {
+            return QStringLiteral("无法开启这台设备的系统音效:%1").arg(lastErrorText(fx));
+        }
+    }
+
     if (current.isOurs)
-        return {};   // already attached, nothing to do and nothing to back up
+        return {};   // the slot was already ours; nothing to displace or back up
 
     // Remember what we are about to displace, before displacing it. An empty
     // string records "the slot was free", which detach must honour by removing

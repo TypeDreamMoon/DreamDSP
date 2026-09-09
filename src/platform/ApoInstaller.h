@@ -22,6 +22,16 @@ struct ApoSlot {
     QString clsid;          // empty when the slot is free
     QString friendlyName;   // resolved via AudioEngine\AudioProcessingObjects
     bool isOurs = false;
+
+    // The endpoint's own "disable all enhancements" switch. While it is set
+    // Windows builds no effect chain at all, so owning the slot above means
+    // nothing -- registered, attached, loadable, and never asked for. Carried
+    // separately because every other indicator reads as healthy while it is on,
+    // which is exactly how it hides.
+    bool sysFxDisabled = false;
+
+    // Ours *and* actually reachable. What the interface should call attached.
+    bool live() const { return isOurs && !sysFxDisabled; }
 };
 
 // Machine-wide state. All three must hold before an endpoint attachment can do

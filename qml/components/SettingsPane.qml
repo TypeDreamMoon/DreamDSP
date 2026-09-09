@@ -161,7 +161,13 @@ Item {
                         id: stateLabel
                         anchors.centerIn: parent
                         font.pixelSize: 11
+                        // "接入" has to mean the device actually processes.
+                        // Holding the post-mix slot on an endpoint whose
+                        // enhancements are switched off is a registration
+                        // nobody reads, and calling that attached is the lie
+                        // that hid a dead install for nineteen days.
                         text: !AppController.apoInstalled ? '未安装'
+                              : AppController.apoSysFxDisabled ? '设备已关闭声音增强'
                               : (AppController.apoAttached ? '已接入当前设备' : '已安装 · 未接入')
                         color: AppController.apoAttached
                                ? HusTheme.Primary.colorSuccess
@@ -211,6 +217,11 @@ Item {
                 hint: {
                     if (!AppController.apoInstalled)
                         return '先安装音频组件';
+                    // Checked before the occupant, because with enhancements
+                    // switched off the slot is ours and inert at the same time
+                    // -- and warning about displacing ourselves is nonsense.
+                    if (AppController.apoSysFxDisabled)
+                        return '⚠ 这台设备关闭了「所有声音增强」,打开开关会一并开启它';
                     if (AppController.apoAttached)
                         return '本设备的后混槽位由 DreamDSP 占用';
                     if (AppController.apoSlotOwner !== '')

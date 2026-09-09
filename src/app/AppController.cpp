@@ -678,6 +678,15 @@ QString AppController::apoStatusText() const
 {
     if (!m_apoState.installed())
         return QStringLiteral("音频组件未安装");
+
+    // Checked ahead of everything else because it explains an otherwise
+    // impossible-looking state: registered, attached, and completely inert.
+    if (m_apoSlot.sysFxDisabled) {
+        return QStringLiteral("这台设备关闭了「所有声音增强」—— Windows 不会加载任何音效对象,"
+                              "包括 DreamDSP。点上面的「接入当前输出设备」可以打开它");
+    }
+    if (!m_apoSlot.isOurs)
+        return QStringLiteral("未接入这台设备");
     if (!m_publisher.statusFresh())
         return QStringLiteral("尚未收到运行反馈 —— 播放一点声音看看");
 
@@ -722,6 +731,11 @@ void AppController::refreshApoState()
     m_apoSlot = apoSlotOf(apoTargetDevice());
     emit apoStateChanged();
     emit eqEngineChanged();
+    // The running-state line reads m_apoState and m_apoSlot as well as the
+    // APO's own report, so it has to be told when those change. Binding it to
+    // the report alone left it frozen at whatever it happened to say when the
+    // page was first built.
+    emit apoStatusChanged();
 
     // Attaching to an endpoint is the moment the equalizer moves house. Doing
     // it here rather than in setApoAttached covers every route to the same
@@ -1796,8 +1810,10 @@ void AppController::flushParams()
 bool AppController::nativeProcessing() const
 {
     // DreamDSP does the work itself whenever its own processing object is
-    // actually in this endpoint's chain.
-    return m_apoState.installed() && m_apoSlot.isOurs;
+    // actually in this endpoint's chain -- which requires the endpoint to have
+    // a chain at all. Holding the slot on a device with its effects switched
+    // off is not processing, it is a registration nobody reads.
+    return m_apoState.installed() && m_apoSlot.live();
 }
 
 bool AppController::eqRunsHere() const

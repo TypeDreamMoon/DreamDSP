@@ -11,6 +11,7 @@
 #include "core/DreamPreset.h"
 #include "core/GraphicCurve.h"
 #include "core/PeacePreset.h"
+#include "platform/ApoInstaller.h"
 #include "platform/ApoLocator.h"
 #include "platform/AudioDevices.h"
 #include "platform/UpdateChecker.h"
@@ -222,18 +223,52 @@ void testPresets(const ApoInstall &apo)
 void testEnvironment(const ApoInstall &apo)
 {
     out() << "\n[environment]" << Qt::endl;
-    check(apo.found, QStringLiteral("Equalizer APO found: %1 (v%2)")
-                         .arg(apo.configPath, apo.version));
-    check(apo.configWritable, QStringLiteral("config directory is writable without elevation"));
+
+    // Equalizer APO's absence is not a fault any more, so it is reported rather
+    // than checked. Asserting it left a correctly configured machine showing two
+    // failures, which is the fastest way to teach someone to stop reading the
+    // output of a test suite.
+    out() << (apo.found
+                  ? QStringLiteral("  --   Equalizer APO %1 present (optional): %2")
+                        .arg(apo.version, apo.configPath)
+                  : QStringLiteral("  --   Equalizer APO not installed (fine -- not required)"))
+          << Qt::endl;
+
+    // DreamDSP's own component is what has to be right, so that is what gets
+    // checked.
+    const ApoState st = apoState();
+    check(st.dllStaged, QStringLiteral("audio component staged at %1").arg(st.stagedDll));
+    check(st.clsidRegistered, QStringLiteral("CLSID registered"));
+    check(st.engineRegistered, QStringLiteral("registered with the audio engine"));
+    if (st.dllStaged && !st.upToDate) {
+        out() << "  --   staged copy is older than the one beside this build"
+              << Qt::endl;
+    }
 
     QString err;
     const auto devices = enumerateRenderDevices(&err);
     check(!devices.isEmpty(), QStringLiteral("enumerated %1 render endpoint(s)").arg(devices.size()));
     for (const AudioDevice &d : devices) {
-        out() << QStringLiteral("    %1%2  %3")
+        // The slot occupant and the endpoint's enhancement switch, side by side.
+        // A device can hold our processing object and still be silent, and
+        // without this line the two states are indistinguishable from here --
+        // which is exactly how one went unnoticed for nineteen days.
+        QString note;
+        if (d.active) {
+            const ApoSlot slot = apoSlotOf(d.id);
+            if (slot.sysFxDisabled)
+                note = QStringLiteral("  [enhancements OFF -- no APO will load]");
+            else if (slot.isOurs)
+                note = QStringLiteral("  [DreamDSP attached]");
+            else if (!slot.clsid.isEmpty())
+                note = QStringLiteral("  [slot: %1]").arg(slot.friendlyName.isEmpty()
+                                                              ? slot.clsid : slot.friendlyName);
+        }
+        out() << QStringLiteral("    %1%2  %3%4")
                      .arg(d.isDefault ? QStringLiteral("* ") : QStringLiteral("  "))
                      .arg(d.name, -44)
                      .arg(d.active ? QStringLiteral("active") : QStringLiteral("inactive"))
+                     .arg(note)
               << Qt::endl;
     }
 }
@@ -297,7 +332,11 @@ void testAutoEq(const ApoInstall &apo)
     QString err;
     if (!db.load({ PresetStore::userDirectory() + QStringLiteral("/autoeq"),
                    PresetStore::userDirectory(), apo.configPath }, &err)) {
-        check(false, QStringLiteral("load databases: %1").arg(err));
+        // Absent databases are missing optional data, not a fault. They ship
+        // with Peace and Equalizer APO, and uninstalling either takes the path
+        // DreamDSP used to find them with -- which is a thing to say, not a
+        // thing to fail on. Copy them into <presets>/autoeq to keep them.
+        out() << QStringLiteral("  --   AutoEQ databases not present: %1").arg(err) << Qt::endl;
         return;
     }
     check(db.entries().size() > 1000,
