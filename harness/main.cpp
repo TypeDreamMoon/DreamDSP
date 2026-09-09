@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <limits>
 #include <thread>
@@ -2930,14 +2931,162 @@ int processFile(const char *in, const char *out)
 
 } // namespace
 
+// ---------------------------------------------------------------- benchmark
+
+// What each stage costs, as a percentage of one core at real time.
+//
+// Not a test -- it asserts nothing and is not run by --test. It exists because
+// "can we afford this?" is the first question about any new effect, and the
+// only honest answer is measured on the machine in question. The number that
+// matters is not milliseconds but the fraction of the audio callback's budget:
+// at 48 kHz a 480-frame buffer must be finished in 10 ms, and everything else
+// on the machine is entitled to the rest.
+int runBench()
+{
+    std::printf("dspharness -- per-stage cost, %% of one core at real time\n");
+
+    struct Case { const char *name; double rate; int channels; int frames; };
+    const Case cases[] = {
+        { "48 kHz stereo",   48000.0, 2, 480 },
+        { "96 kHz stereo",   96000.0, 2, 960 },
+        { "96 kHz 7.1",      96000.0, 8, 960 },
+    };
+
+    struct Stage { uint32_t bit; const char *name; };
+    const Stage stages[] = {
+        { kEnEqualizer,   "equalizer (32 bands)" },
+        { kEnGraphic,     "graphic eq (31 bands)" },
+        { kEnLoudness,    "loudness" },
+        { kEnDynBass,     "dynamic bass" },
+        { kEnBass,        "virtual bass" },
+        { kEnExciter,     "exciter" },
+        { kEnTube,        "tube" },
+        { kEnComp,        "compressor" },
+        { kEnMultiband,   "multiband" },
+        { kEnReverb,      "reverb" },
+        { kEnWidth,       "width" },
+        { kEnCrossfeed,   "crossfeed" },
+        { kEnMatrix,      "matrix" },
+        { kEnDelay,       "delay" },
+        { kEnLimiter,     "limiter" },
+    };
+
+    for (const Case &c : cases) {
+        std::printf("\n[%s]  buffer %d frames (%.2f ms)\n",
+                    c.name, c.frames, 1000.0 * c.frames / c.rate);
+
+        std::vector<std::vector<float>> data(size_t(c.channels),
+                                             std::vector<float>(size_t(c.frames), 0.0f));
+        std::vector<float *> ptrs(size_t(c.channels), nullptr);
+        for (int ch = 0; ch < c.channels; ++ch)
+            ptrs[size_t(ch)] = data[size_t(ch)].data();
+
+        // Real material, not silence: the dynamics stages branch on level and
+        // an all-zero buffer measures the cheap path.
+        uint32_t seed = 0x5EED1234u;
+        const auto refill = [&] {
+            for (auto &v : data)
+                for (auto &x : v)
+                    x = 0.25f * float(int(xorshift(seed) & 0xFFFFu) - 32768) / 32768.0f;
+        };
+
+        // Every stage set to something that does work rather than to its
+        // neutral value -- a compressor above its threshold, an equalizer with
+        // gain in every band.
+        ParamBlock base = transparentBlock();
+        base.eq.bandCount = uint32_t(Equalizer::kMaxBands);
+        for (int i = 0; i < Equalizer::kMaxBands; ++i) {
+            base.eq.band[i] = eqBand(FilterKind::PK, 30.0 * std::pow(1.22, double(i)),
+                                     (i % 2) ? 3.0 : -3.0, 1.4);
+        }
+        for (int i = 0; i < GraphicEq::kBands; ++i)
+            base.graphic.gainDb[i] = (i % 2) ? 3.0f : -3.0f;
+        base.graphic.amount = 1.0f;
+        base.comp.thresholdDb = -30.0f;
+        base.comp.ratio = 4.0f;
+        base.multiband.band[0].ratio = 3.0f;
+        base.multiband.band[1].ratio = 3.0f;
+        base.multiband.band[2].ratio = 3.0f;
+        base.reverb.wet = 0.3f;
+        base.tube.mix = 0.6f;
+        base.tube.drive = 6.0f;
+        base.exciter.amount = 0.5f;
+        base.bass.amount = 0.6f;
+        base.dynBass.maxGainDb = 9.0f;
+        base.width.width = 1.5f;
+        base.loudness.referenceDb = 0.0f;
+        base.loudness.volumeDb = -20.0f;
+        base.loudness.amount = 1.0f;
+        base.limiter.thresholdDb = -3.0f;
+        base.limiter.gainDb = 12.0f;
+        base.delay.ms[0] = 2.0f;
+        base.matrix.gain[0][1] = 0.2f;
+
+        const double budgetNs = 1e9 * double(c.frames) / c.rate;
+
+        const auto measure = [&](uint32_t mask) {
+            EffectChain chain;
+            chain.prepare(c.rate, c.channels, c.frames);
+            ParamBlock p = base;
+            p.enableMask = mask;
+            p.generation = 1;
+            chain.apply(sanitise(p));
+
+            AudioBuffer buf{ ptrs.data(), c.channels, c.frames };
+            // Warm up: first call designs filters and touches every page.
+            for (int i = 0; i < 16; ++i) { refill(); chain.process(buf); }
+
+            constexpr int kRuns = 400;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < kRuns; ++i) {
+                refill();
+                chain.process(buf);
+            }
+            const auto t1 = std::chrono::steady_clock::now();
+
+            // The refill is inside the loop because it also dirties the cache
+            // the way a real stream does; measure it alone and subtract.
+            const auto t2 = std::chrono::steady_clock::now();
+            for (int i = 0; i < kRuns; ++i)
+                refill();
+            const auto t3 = std::chrono::steady_clock::now();
+
+            const double total = double(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+            const double fill = double(std::chrono::duration_cast<std::chrono::nanoseconds>(t3 - t2).count());
+            return std::max(0.0, (total - fill) / double(kRuns));
+        };
+
+        const double idle = measure(0);
+        double sum = 0.0;
+        for (const Stage &st : stages) {
+            const double ns = measure(st.bit) - idle;
+            sum += ns;
+            std::printf("  %-24s %8.1f us   %5.2f %% of one core\n",
+                        st.name, ns / 1000.0, 100.0 * ns / budgetNs);
+        }
+
+        const double all = measure(kEnKnown & ~kEnConvolution) - idle;
+        std::printf("  %-24s %8.1f us   %5.2f %% of one core   (sum of parts %.2f %%)\n",
+                    "ALL (no convolution)", all / 1000.0, 100.0 * all / budgetNs,
+                    100.0 * sum / budgetNs);
+    }
+
+    std::printf("\nConvolution is excluded: its cost is set by the impulse response\n"
+                "length, not by the stage, and it is measured in [convolution].\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && std::strcmp(argv[1], "--test") == 0)
         return runTests();
+    if (argc >= 2 && std::strcmp(argv[1], "--bench") == 0)
+        return runBench();
     if (argc >= 3)
         return processFile(argv[1], argv[2]);
 
     std::printf("usage: dspharness --test\n"
+                "       dspharness --bench\n"
                 "       dspharness <in.wav> <out.wav>\n");
     return runTests();
 }
