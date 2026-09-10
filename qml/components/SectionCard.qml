@@ -44,21 +44,36 @@ Rectangle {
             spacing: 8
             visible: root.title !== '' || root.headerRight !== null
 
-            HusText {
-                text: root.title
-                font.pixelSize: 13
-                font.weight: Font.DemiBold
-                visible: root.title !== ''
-            }
-            HusText {
-                text: root.hint
-                font.pixelSize: 11
-                opacity: 0.55
-                visible: root.hint !== ''
-                elide: Text.ElideRight
-            }
+            // Title and description side by side while there is room, stacked
+            // when there is not.
+            //
+            // The description used to be a bare Text with elide set and no
+            // fillWidth, which means it never elided -- a layout gives an item
+            // with no width policy its implicit width, and the elide only
+            // engages once something narrows it. On a full-width card that was
+            // invisible; put two cards side by side and the description ran out
+            // of its own card and across the title of the next one.
+            GridLayout {
+                Layout.fillWidth: true
+                columns: root.width >= 620 ? 2 : 1
+                columnSpacing: 8
+                rowSpacing: 0
 
-            Item { Layout.fillWidth: true }
+                HusText {
+                    text: root.title
+                    font.pixelSize: 13
+                    font.weight: Font.DemiBold
+                    visible: root.title !== ''
+                }
+                HusText {
+                    text: root.hint
+                    font.pixelSize: 11
+                    opacity: 0.55
+                    visible: root.hint !== ''
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+            }
 
             Loader {
                 active: root.headerRight !== null

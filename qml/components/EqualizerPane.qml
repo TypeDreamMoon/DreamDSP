@@ -184,14 +184,24 @@ Item {
         SectionCard {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            title: '均衡'
+            title: '参数均衡'
             hint: root.bandView === 0 ? '拖动滑块调整增益 · ±15 dB'
                                       : '逐段编辑频率 / 增益 / Q / 滤波器类型'
 
-            headerRight: HusSegmented {
-                options: [{ label: '图形' }, { label: '参数' }]
-                Component.onCompleted: currentIndex = root.bandView
-                onCurrentIndexChanged: root.bandView = currentIndex
+            // The view selector and the stage's own switch. Every other effect
+            // in the application has one of these; this one did not, which is
+            // why the parametric equalizer looked like it was always on.
+            headerRight: RowLayout {
+                spacing: 10
+                HusSegmented {
+                    options: [{ label: '图形' }, { label: '参数' }]
+                    Component.onCompleted: currentIndex = root.bandView
+                    onCurrentIndexChanged: root.bandView = currentIndex
+                }
+                HusSwitch {
+                    checked: AppController.eqEnabled
+                    onToggled: AppController.eqEnabled = checked
+                }
             }
 
             StackLayout {

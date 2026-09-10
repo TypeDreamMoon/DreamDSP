@@ -127,9 +127,15 @@ HusWindow {
                     anchors.rightMargin: 16
                     spacing: 12
 
+                    // Bypasses the whole rack. It used to be bound to the
+                    // equalizer's enable bit while carrying this label, which
+                    // left the equalizer as the one effect with no switch of
+                    // its own -- and made it look like it could not be turned
+                    // off, because the only control that did was disguised as
+                    // the application's master switch.
                     HusSwitch {
-                        checked: AppController.eqEnabled
-                        onToggled: AppController.eqEnabled = checked
+                        checked: AppController.masterEnabled
+                        onToggled: AppController.masterEnabled = checked
                     }
 
                     HusText {
@@ -143,7 +149,8 @@ HusWindow {
                     // so the answer is on screen rather than inferable.
                     StatusPill {
                         text: '均衡 · ' + AppController.eqEngine
-                        dotColor: !AppController.eqEnabled ? HusTheme.Primary.colorTextQuaternary
+                        dotColor: (!AppController.masterEnabled
+                                   || !AppController.eqEnabled) ? HusTheme.Primary.colorTextQuaternary
                                 : AppController.eqNative   ? HusTheme.Primary.colorSuccess
                                 : AppController.engaged    ? HusTheme.Primary.colorWarning
                                                            : HusTheme.Primary.colorError
