@@ -6,6 +6,8 @@
 
 #include "ParamBlock.h"
 
+#include "app/Defaults.h"
+
 namespace dreamdsp {
 
 // The output stage: channel routing, per-channel delay, loudness correction.
@@ -51,6 +53,7 @@ class OutputModel : public QObject
     Q_PROPERTY(double limiterThreshold READ limiterThreshold WRITE setLimiterThreshold NOTIFY changed)
     Q_PROPERTY(double limiterRelease READ limiterRelease WRITE setLimiterRelease NOTIFY changed)
     Q_PROPERTY(double limiterLookahead READ limiterLookahead WRITE setLimiterLookahead NOTIFY changed)
+    Q_PROPERTY(bool limiterTruePeak READ limiterTruePeak WRITE setLimiterTruePeak NOTIFY changed)
 
     // How many channels the endpoint actually has, so the interface does not
     // offer eight faders to a pair of headphones. Taken from the APO's own
@@ -60,6 +63,14 @@ class OutputModel : public QObject
 
 public:
     explicit OutputModel(QObject *parent = nullptr);
+
+    // The value this control would have had out of the box, for the reset
+    // button beside it. Empty for a name that is not a property of this model.
+    Q_INVOKABLE QVariant defaultOf(const QString &name) const
+    {
+        return defaultPropertyOf<OutputModel>(name);
+    }
+
 
     static constexpr int kMaxChannels = dsp::ChannelMatrix::kMaxChannels;
 
@@ -110,6 +121,8 @@ public:
     void setLimiterRelease(double v);
     double limiterLookahead() const { return m_limiter.lookaheadMs; }
     void setLimiterLookahead(double v);
+    bool limiterTruePeak() const { return m_limiter.truePeak; }
+    void setLimiterTruePeak(bool v);
     dsp::Limiter::Params limiterParams() const { return m_limiter; }
 
     int channels() const { return m_channels; }

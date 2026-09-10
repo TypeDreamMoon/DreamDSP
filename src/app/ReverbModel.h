@@ -5,6 +5,8 @@
 
 #include "Reverb.h"
 
+#include "app/Defaults.h"
+
 namespace dreamdsp {
 
 // QML-facing wrapper around the reverb's parameters.
@@ -32,6 +34,14 @@ class ReverbModel : public QObject
 
 public:
     explicit ReverbModel(QObject *parent = nullptr);
+
+    // The value this control would have had out of the box, for the reset
+    // button beside it. Empty for a name that is not a property of this model.
+    Q_INVOKABLE QVariant defaultOf(const QString &name) const
+    {
+        return defaultPropertyOf<ReverbModel>(name);
+    }
+
 
     bool enabled() const { return m_enabled; }
     void setEnabled(bool v);

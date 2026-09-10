@@ -3,11 +3,16 @@
 #include <QObject>
 #include <QtQml/qqmlregistration.h>
 
+#include "AutoGain.h"
 #include "BassBoost.h"
+#include "Clipper.h"
 #include "MultibandCompressor.h"
 #include "ParamBlock.h"
 #include "Saturation.h"
 #include "Stereo.h"
+#include "Transient.h"
+
+#include "app/Defaults.h"
 
 namespace dreamdsp {
 
@@ -55,11 +60,13 @@ class EffectsModel : public QObject
     Q_PROPERTY(double exciterFreq READ exciterFreq WRITE setExciterFreq NOTIFY changed)
     Q_PROPERTY(double exciterDrive READ exciterDrive WRITE setExciterDrive NOTIFY changed)
     Q_PROPERTY(double exciterAmount READ exciterAmount WRITE setExciterAmount NOTIFY changed)
+    Q_PROPERTY(double exciterThreshold READ exciterThreshold WRITE setExciterThreshold NOTIFY changed)
 
     // --- stereo width ---
     Q_PROPERTY(bool widthEnabled MEMBER m_widthEnabled NOTIFY changed)
     Q_PROPERTY(double stereoWidth READ stereoWidth WRITE setStereoWidth NOTIFY changed)
     Q_PROPERTY(double monoBelow READ monoBelow WRITE setMonoBelow NOTIFY changed)
+    Q_PROPERTY(double widthPhase READ widthPhase WRITE setWidthPhase NOTIFY changed)
 
     // --- crossfeed ---
     Q_PROPERTY(bool crossfeedEnabled MEMBER m_crossfeedEnabled NOTIFY changed)
@@ -71,8 +78,44 @@ class EffectsModel : public QObject
     Q_PROPERTY(double lowCross READ lowCross WRITE setLowCross NOTIFY changed)
     Q_PROPERTY(double highCross READ highCross WRITE setHighCross NOTIFY changed)
 
+    // --- transient shaper ---
+    Q_PROPERTY(bool transientEnabled MEMBER m_transientEnabled NOTIFY changed)
+    Q_PROPERTY(double transientAttack READ transientAttack WRITE setTransientAttack NOTIFY changed)
+    Q_PROPERTY(double transientSustain READ transientSustain WRITE setTransientSustain NOTIFY changed)
+    Q_PROPERTY(double transientAttackMs READ transientAttackMs WRITE setTransientAttackMs NOTIFY changed)
+    Q_PROPERTY(double transientReleaseMs READ transientReleaseMs WRITE setTransientReleaseMs NOTIFY changed)
+
+    // --- soft clipper ---
+    Q_PROPERTY(bool clipperEnabled MEMBER m_clipperEnabled NOTIFY changed)
+    Q_PROPERTY(double clipperDrive READ clipperDrive WRITE setClipperDrive NOTIFY changed)
+    Q_PROPERTY(double clipperCeiling READ clipperCeiling WRITE setClipperCeiling NOTIFY changed)
+    Q_PROPERTY(double clipperKnee READ clipperKnee WRITE setClipperKnee NOTIFY changed)
+    Q_PROPERTY(bool clipperOversample READ clipperOversample WRITE setClipperOversample NOTIFY changed)
+
+    // --- auto volume ---
+    Q_PROPERTY(bool autoGainEnabled MEMBER m_autoGainEnabled NOTIFY changed)
+    Q_PROPERTY(double autoGainTarget READ autoGainTarget WRITE setAutoGainTarget NOTIFY changed)
+    Q_PROPERTY(double autoGainMax READ autoGainMax WRITE setAutoGainMax NOTIFY changed)
+    Q_PROPERTY(double autoGainRate READ autoGainRate WRITE setAutoGainRate NOTIFY changed)
+    Q_PROPERTY(double autoGainWindow READ autoGainWindow WRITE setAutoGainWindow NOTIFY changed)
+
+    // --- night mode ---
+    Q_PROPERTY(bool nightModeEnabled MEMBER m_nightModeEnabled NOTIFY changed)
+    Q_PROPERTY(int nightProfile READ nightProfile WRITE setNightProfile NOTIFY changed)
+    Q_PROPERTY(double nightBoost READ nightBoost WRITE setNightBoost NOTIFY changed)
+    Q_PROPERTY(double nightCut READ nightCut WRITE setNightCut NOTIFY changed)
+    Q_PROPERTY(double nightReference READ nightReference WRITE setNightReference NOTIFY changed)
+
 public:
     explicit EffectsModel(QObject *parent = nullptr);
+
+    // The value this control would have had out of the box, for the reset
+    // button beside it. Empty for a name that is not a property of this model.
+    Q_INVOKABLE QVariant defaultOf(const QString &name) const
+    {
+        return defaultPropertyOf<EffectsModel>(name);
+    }
+
 
     double tubeDrive() const { return m_tube.drive; }   void setTubeDrive(double v);
     double tubeBias() const  { return m_tube.bias; }    void setTubeBias(double v);
@@ -87,9 +130,12 @@ public:
     double exciterFreq() const   { return m_exciter.frequencyHz; } void setExciterFreq(double v);
     double exciterDrive() const  { return m_exciter.drive; }       void setExciterDrive(double v);
     double exciterAmount() const { return m_exciter.amount; }      void setExciterAmount(double v);
+    double exciterThreshold() const { return m_exciter.thresholdDb; }
+    void setExciterThreshold(double v);
 
     double stereoWidth() const { return m_width.width; }       void setStereoWidth(double v);
     double monoBelow() const   { return m_width.monoBelowHz; } void setMonoBelow(double v);
+    double widthPhase() const  { return m_width.phaseAmount; } void setWidthPhase(double v);
 
     double crossfeedCutoff() const { return m_crossfeed.cutoffHz; } void setCrossfeedCutoff(double v);
     double crossfeedLevel() const  { return m_crossfeed.feedDb; }   void setCrossfeedLevel(double v);
@@ -122,6 +168,42 @@ public:
     dsp::Crossfeed::Params crossfeedParams() const      { return m_crossfeed; }
     dsp::MultibandCompressor::Params multibandParams() const { return m_multiband; }
 
+    // --- the stages added in v6 ---
+    double transientAttack() const  { return m_transient.attack; }
+    void setTransientAttack(double v);
+    double transientSustain() const { return m_transient.sustain; }
+    void setTransientSustain(double v);
+    double transientAttackMs() const { return m_transient.attackMs; }
+    void setTransientAttackMs(double v);
+    double transientReleaseMs() const { return m_transient.releaseMs; }
+    void setTransientReleaseMs(double v);
+
+    double clipperDrive() const   { return m_clipper.driveDb; }   void setClipperDrive(double v);
+    double clipperCeiling() const { return m_clipper.ceilingDb; } void setClipperCeiling(double v);
+    double clipperKnee() const    { return m_clipper.kneeDb; }    void setClipperKnee(double v);
+    bool clipperOversample() const { return m_clipper.oversample; }
+    void setClipperOversample(bool v);
+
+    double autoGainTarget() const { return m_autoGain.targetLufs; }  void setAutoGainTarget(double v);
+    double autoGainMax() const    { return m_autoGain.maxGainDb; }   void setAutoGainMax(double v);
+    double autoGainRate() const   { return m_autoGain.rateDbPerSec; } void setAutoGainRate(double v);
+    double autoGainWindow() const { return m_autoGain.windowDb; }    void setAutoGainWindow(double v);
+
+    int nightProfile() const      { return m_nightMode.profile; }       void setNightProfile(int v);
+    double nightBoost() const     { return m_nightMode.boost; }         void setNightBoost(double v);
+    double nightCut() const       { return m_nightMode.cut; }           void setNightCut(double v);
+    double nightReference() const { return m_nightMode.referenceLufs; } void setNightReference(double v);
+
+    bool transientOn() const { return m_transientEnabled; }
+    bool clipperOn() const   { return m_clipperEnabled; }
+    bool autoGainOn() const  { return m_autoGainEnabled; }
+    bool nightModeOn() const { return m_nightModeEnabled; }
+
+    dsp::TransientShaper::Params transientParams() const  { return m_transient; }
+    dsp::SoftClipper::Params clipperParams() const        { return m_clipper; }
+    dsp::LoudnessLeveller::Params autoGainParams() const  { return m_autoGain; }
+    dsp::DynamicRange::Params nightModeParams() const     { return m_nightMode; }
+
     // Bulk restore, for reloading a saved session. Takes the whole block
     // because the enable bits live in its mask rather than beside each set of
     // parameters.
@@ -138,6 +220,10 @@ private:
     dsp::StereoWidener::Params m_width;
     dsp::Crossfeed::Params m_crossfeed;
     dsp::MultibandCompressor::Params m_multiband;
+    dsp::TransientShaper::Params m_transient;
+    dsp::SoftClipper::Params m_clipper;
+    dsp::LoudnessLeveller::Params m_autoGain;
+    dsp::DynamicRange::Params m_nightMode;
 
     bool m_tubeEnabled = false;
     bool m_bassEnabled = false;
@@ -146,6 +232,10 @@ private:
     bool m_widthEnabled = false;
     bool m_crossfeedEnabled = false;
     bool m_multibandEnabled = false;
+    bool m_transientEnabled = false;
+    bool m_clipperEnabled = false;
+    bool m_autoGainEnabled = false;
+    bool m_nightModeEnabled = false;
 };
 
 } // namespace dreamdsp

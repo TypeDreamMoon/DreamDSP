@@ -272,6 +272,14 @@ void OutputModel::setLimiterLookahead(double v)
         emit changed();
 }
 
+void OutputModel::setLimiterTruePeak(bool v)
+{
+    if (m_limiter.truePeak == v)
+        return;
+    m_limiter.truePeak = v;
+    emit changed();
+}
+
 // ------------------------------------------------------------------ general
 
 void OutputModel::setChannels(int n)

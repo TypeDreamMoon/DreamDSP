@@ -101,7 +101,15 @@ dsp::ParamBlock blockFromModels(const CompressorModel *comp,
         b.width = effects->widthParams();
         b.crossfeed = effects->crossfeedParams();
         b.dynBass = effects->dynBassParams();
+        b.transient = effects->transientParams();
+        b.clipper = effects->clipperParams();
+        b.autoGain = effects->autoGainParams();
+        b.nightMode = effects->nightModeParams();
 
+        if (effects->transientOn()) b.enableMask |= dsp::kEnTransient;
+        if (effects->clipperOn())   b.enableMask |= dsp::kEnClipper;
+        if (effects->autoGainOn())  b.enableMask |= dsp::kEnAutoGain;
+        if (effects->nightModeOn()) b.enableMask |= dsp::kEnNightMode;
         if (effects->bassOn())      b.enableMask |= dsp::kEnBass;
         if (effects->exciterOn())   b.enableMask |= dsp::kEnExciter;
         if (effects->tubeOn())      b.enableMask |= dsp::kEnTube;
@@ -205,6 +213,11 @@ void ParamPublisher::setEqualizer(double preampDb, bool enabled)
     m_eqEnabled = enabled;
 }
 
+void ParamPublisher::setMasterEnabled(bool enabled)
+{
+    m_masterEnabled = enabled;
+}
+
 void ParamPublisher::setGraphic(const dsp::GraphicEq::Params &p, bool enabled)
 {
     m_graphic = p;
@@ -236,6 +249,12 @@ bool ParamPublisher::publishNow()
     if (m_graphicEnabled)
         b.enableMask |= dsp::kEnGraphic;
     std::memcpy(b.order, m_order, sizeof b.order);
+
+    // A flag, not an empty mask. The mask has to keep saying which effects are
+    // switched on, because this file is also where that is remembered.
+    if (!m_masterEnabled)
+        b.flags |= dsp::kPfBypass;
+
     b = dsp::sanitise(b);
     b.generation = ++m_generation;
 
@@ -412,21 +431,36 @@ void ParamPublisher::load()
 
     // Older versions are accepted and migrated, not rejected.
     //
-    // Every stage added since v2 was appended to the block rather than inserted
-    // into it, so an older file is byte-for-byte a current one with the newer
-    // stages left zeroed -- which is exactly what "the version that wrote this
-    // did not have them" should restore to. Refusing it instead would silently
-    // reset every effect the user had switched on, on the one launch where they
-    // least expect it, and this file is the only place those settings are kept.
+    // Refusing them instead would silently reset every effect the user had
+    // switched on, on the one launch where they least expect it, and this file
+    // is the only place those settings are kept.
     //
-    // Nothing before v2 is accepted: v1 predates several field additions in the
-    // middle of the struct and cannot be migrated by truncation.
+    // Through v5 every addition was *appended* to the block, so an older file
+    // was byte-for-byte a current one with the newer stages left zeroed and a
+    // truncation check was enough. v6 broke that: three of the existing Params
+    // structs grew a field, so everything after the exciter sits at a different
+    // offset and a v5 file read straight into a v6 block would put the stereo
+    // widener's numbers into the crossfeed. Migration is therefore member by
+    // member, against the v5 offsets -- which v2, v3 and v4 are all prefixes
+    // of, so one table covers every legacy version.
+    //
+    // Nothing before v2 is accepted: v1 predates field additions this table
+    // cannot express.
     struct Legacy { uint32_t version; qint64 size; };
     static const Legacy kLegacy[] = {
         { 2u, 300 },    // before the equalizer
         { 3u, 820 },    // before routing, delay and loudness
         { 4u, 1124 },   // before the limiter, dynamic bass, graphic eq, order
+        { 5u, 1300 },   // before the transient shaper, clipper, auto volume and night mode
     };
+
+    // v6 and v7 have identical layouts -- v7 only gave the header's reserved
+    // word a meaning -- so a v6 file needs its version stamped forward and its
+    // flags cleared, not a field-by-field migration.
+    if (got == qint64(sizeof b) && b.version == 6u && b.sizeBytes == sizeof b) {
+        b.version = dsp::kParamVersion;
+        b.flags = 0u;
+    }
 
     bool ok = (got == qint64(sizeof b) && b.version == dsp::kParamVersion
                && b.sizeBytes == sizeof b);
@@ -446,6 +480,96 @@ void ParamPublisher::load()
         // asking the new version number what the old one supported.
         const uint32_t wrote = b.version;
 
+        // The bytes as they were laid out by the writing version. `b` is about
+        // to be rebuilt from them, so they have to be taken out of it first.
+        // Two arguments: one would declare a function. Ninth time in this tree.
+        std::vector<unsigned char> raw(size_t(got), 0u);
+        std::memcpy(raw.data(), &b, raw.size());
+        std::memset(&b, 0, sizeof b);
+
+        struct Field { void *dst; size_t oldOffset; size_t bytes; };
+        const Field fields[] = {
+            { &b.generation,  12,  4 },
+            { &b.enableMask,  16,  4 },
+            { &b.comp,        24,  28 },
+            { &b.reverb,      52,  32 },
+            { &b.tube,        84,  16 },
+            { &b.exciter,    100,  12 },   // v6 appended thresholdDb
+            { &b.bass,       112,  16 },
+            { &b.width,      128,   8 },   // v6 appended phaseAmount
+            { &b.crossfeed,  136,  12 },
+            { &b.multiband,  148, 108 },
+            { &b.convolution,256,  44 },
+            { &b.eq,         300, 520 },
+            { &b.matrix,     820, 256 },
+            { &b.delay,     1076,  32 },
+            { &b.loudness,  1108,  16 },
+            { &b.limiter,   1124,  16 },   // v6 appended truePeak
+            { &b.dynBass,   1140,  16 },
+            { &b.graphic,   1156, 128 },
+            { &b.order,     1284,  16 },   // v5 had 16 stages, v6 has 20
+        };
+        for (const Field &f : fields) {
+            if (f.oldOffset + f.bytes <= raw.size())
+                std::memcpy(f.dst, raw.data() + f.oldOffset, f.bytes);
+        }
+
+        // The four stages v5 did not have, slotted into whatever order the user
+        // had arranged the other sixteen into.
+        //
+        // Keeping their arrangement matters -- the old stage ids did not move,
+        // so throwing it away would be a needless loss. But appending the new
+        // four on the end is not neutral either: it would put the leveller and
+        // the clipper *after* the limiter, which is backwards for both. So each
+        // one is placed next to the stage it belongs beside, and only falls back
+        // to the end if that stage somehow is not in the list.
+        if (wrote >= 5u) {
+            struct Placement { uint8_t stage; uint8_t anchor; bool before; };
+            static const Placement kPlace[] = {
+                // Nothing to anchor to -- levelling goes first, so everything
+                // downstream sees a predictable level.
+                { dsp::kStageAutoGain,   0xFFu,               true },
+                { dsp::kStageTransient,  dsp::kStageComp,     true },
+                { dsp::kStageNightMode,  dsp::kStageMultiband, false },
+                { dsp::kStageClipper,    dsp::kStageLimiter,  true },
+            };
+
+            uint8_t built[dsp::kStageCount];
+            int n = 0;
+            for (int i = 0; i < 16; ++i)
+                built[n++] = b.order[i];
+
+            for (const Placement &p2 : kPlace) {
+                int at = n;                    // fall back to the end
+                if (p2.anchor == 0xFFu) {
+                    at = 0;
+                } else {
+                    for (int i = 0; i < n; ++i) {
+                        if (built[i] == p2.anchor) {
+                            at = p2.before ? i : i + 1;
+                            break;
+                        }
+                    }
+                }
+                for (int i = n; i > at; --i)
+                    built[i] = built[i - 1];
+                built[at] = p2.stage;
+                ++n;
+            }
+            std::memcpy(b.order, built, sizeof b.order);
+        }
+
+        // Fields that v6 added inside existing structs. Zero is a legitimate
+        // number for most of them and the wrong one for all of them, so each
+        // gets the default the interface would have offered.
+        b.exciter.thresholdDb = dsp::Exciter::Params{}.thresholdDb;
+        b.width.phaseAmount = dsp::StereoWidener::Params{}.phaseAmount;
+        b.limiter.truePeak = dsp::Limiter::Params{}.truePeak;
+        b.transient = dsp::TransientShaper::Params{};
+        b.clipper = dsp::SoftClipper::Params{};
+        b.autoGain = dsp::LoudnessLeveller::Params{};
+        b.nightMode = dsp::DynamicRange::Params{};
+
         b.version = dsp::kParamVersion;
         b.sizeBytes = uint32_t(sizeof b);
 
@@ -460,6 +584,8 @@ void ParamPublisher::load()
             keep |= dsp::kEnEqualizer;
         if (wrote >= 4u)
             keep |= dsp::kEnMatrix | dsp::kEnDelay | dsp::kEnLoudness;
+        if (wrote >= 5u)
+            keep |= dsp::kEnLimiter | dsp::kEnDynBass | dsp::kEnGraphic;
         b.enableMask &= keep;
         if (wrote < 4u)
             b.matrix = dsp::ChannelMatrix::identity();

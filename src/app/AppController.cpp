@@ -260,6 +260,17 @@ void AppController::setPreamp(double db)
     scheduleWrite();
 }
 
+void AppController::setMasterEnabled(bool on)
+{
+    if (m_masterEnabled == on)
+        return;
+    m_masterEnabled = on;
+    emit masterEnabledChanged();
+    emit eqEnabledChanged();      // the engine label reads both
+    refreshTrayIcon();
+    scheduleWrite();
+}
+
 void AppController::setEqEnabled(bool on)
 {
     if (m_eqEnabled == on)
@@ -355,6 +366,8 @@ void appendBlock(QString &out, const Preset &p, const QString &deviceName,
 
 QString AppController::eqEngine() const
 {
+    if (!m_masterEnabled)
+        return QStringLiteral("总开关已关");
     if (!m_eqEnabled)
         return QStringLiteral("已旁通");
     if (m_apo.found && m_engaged)
@@ -892,7 +905,7 @@ void AppController::refreshTrayIcon()
 
     const QColor on(0x3d, 0x7e, 0xff);
     const QColor off(0x9a, 0x9a, 0x9a);
-    p.setBrush(m_eqEnabled ? on : off);
+    p.setBrush((m_masterEnabled && m_eqEnabled) ? on : off);
     p.setPen(Qt::NoPen);
 
     // Three bars at different heights -- a tiny equalizer.
@@ -909,7 +922,7 @@ void AppController::refreshTrayIcon()
     p.end();
 
     m_tray.setIcon(img);
-    m_tray.setToolTip(m_eqEnabled
+    m_tray.setToolTip((m_masterEnabled && m_eqEnabled)
                           ? QStringLiteral("DreamDSP — 均衡器已启用%1")
                                 .arg(m_engaged ? QString() : QStringLiteral(" (未接管)"))
                           : QStringLiteral("DreamDSP — 均衡器已关闭"));
@@ -1666,7 +1679,11 @@ const StageInfo kStages[] = {
     { dsp::kStageMatrix,      "声道路由",   "输出 = 输入的加权和",    3 },
     { dsp::kStageConvolution, "卷积",       "脉冲响应 · 任意采样率",  2 },
     { dsp::kStageDelay,       "声道延时",   "音箱时间对齐",           3 },
-    { dsp::kStageLimiter,     "限制器",     "前瞻峰值限制",           3 },
+    { dsp::kStageLimiter,     "限制器",     "真峰值前瞻限制",         3 },
+    { dsp::kStageTransient,   "瞬态整形",   "起音与延音,无阈值",     1 },
+    { dsp::kStageClipper,     "削波器",     "软拐点 · 限制器之前",    3 },
+    { dsp::kStageAutoGain,    "自动音量",   "按 BS.1770 响度找平",    3 },
+    { dsp::kStageNightMode,   "夜间模式",   "杜比 DRC 曲线",          3 },
 };
 // Page indices follow the navigation rail: 0 equalizer, 1 effects,
 // 2 convolution, 3 output, 4 chain, 5 AutoEQ, 6 settings.
@@ -1699,6 +1716,15 @@ bool AppController::chainIsDefault() const
     return std::memcmp(m_order, dsp::kDefaultOrder, sizeof m_order) == 0;
 }
 
+// Both of the switches below have to name every stage, and neither the
+// compiler nor the sanitiser can tell when one of them does not -- an
+// unhandled id silently reads back as "off" and silently ignores being
+// switched on, which is exactly the drift the chain page was built to avoid.
+// This is the tripwire: adding a stage bumps kStageCount, which breaks the
+// build here rather than in a bug report.
+static_assert(dsp::kStageCount == 20,
+              "a new stage needs a case in stageEnabled() and setStageEnabled()");
+
 bool AppController::stageEnabled(int stageId) const
 {
     switch (stageId) {
@@ -1718,6 +1744,10 @@ bool AppController::stageEnabled(int stageId) const
     case dsp::kStageConvolution: return m_convolutionEnabled;
     case dsp::kStageDelay:       return m_output.delayOn();
     case dsp::kStageLimiter:     return m_output.limiterOn();
+    case dsp::kStageTransient:   return m_effects.transientOn();
+    case dsp::kStageClipper:     return m_effects.clipperOn();
+    case dsp::kStageAutoGain:    return m_effects.autoGainOn();
+    case dsp::kStageNightMode:   return m_effects.nightModeOn();
     default:                     return false;
     }
 }
@@ -1745,6 +1775,10 @@ void AppController::setStageEnabled(int stageId, bool on)
     case dsp::kStageConvolution: setConvolutionEnabled(on); break;
     case dsp::kStageDelay:       m_output.setDelayOn(on); break;
     case dsp::kStageLimiter:     m_output.setLimiterOn(on); break;
+    case dsp::kStageTransient:   m_effects.setProperty("transientEnabled", on); break;
+    case dsp::kStageClipper:     m_effects.setProperty("clipperEnabled", on); break;
+    case dsp::kStageAutoGain:    m_effects.setProperty("autoGainEnabled", on); break;
+    case dsp::kStageNightMode:   m_effects.setProperty("nightModeEnabled", on); break;
     default: return;
     }
     emit chainChanged();
@@ -1790,6 +1824,7 @@ void AppController::scheduleWrite()
     // coalesces on its own, which is why this is not behind the timer.
     m_publisher.setEqualizer(m_preamp, eqRunsHere());
     m_publisher.setGraphic(m_graphic, m_graphicEnabled);
+    m_publisher.setMasterEnabled(m_masterEnabled);
     m_publisher.setOrder(m_order);
     m_publisher.schedule();
 
@@ -1803,6 +1838,7 @@ void AppController::flushParams()
 {
     m_publisher.setEqualizer(m_preamp, eqRunsHere());
     m_publisher.setGraphic(m_graphic, m_graphicEnabled);
+    m_publisher.setMasterEnabled(m_masterEnabled);
     m_publisher.setOrder(m_order);
     m_publisher.publishNow();
 }
@@ -1919,6 +1955,7 @@ void AppController::saveSession()
 {
     QSettings s(QStringLiteral("DreamDSP"), QStringLiteral("DreamDSP"));
     s.setValue(QStringLiteral("eqEnabled"), m_eqEnabled);
+    s.setValue(QStringLiteral("masterEnabled"), m_masterEnabled);
     s.setValue(QStringLiteral("closeToTray"), m_closeToTray);
     s.setValue(QStringLiteral("currentPreset"), m_currentPreset);
     s.setValue(QStringLiteral("deviceId"),
@@ -1950,6 +1987,7 @@ void AppController::restoreSession()
 
     QSettings s(QStringLiteral("DreamDSP"), QStringLiteral("DreamDSP"));
     m_eqEnabled = s.value(QStringLiteral("eqEnabled"), true).toBool();
+    m_masterEnabled = s.value(QStringLiteral("masterEnabled"), true).toBool();
     m_closeToTray = s.value(QStringLiteral("closeToTray"), true).toBool();
     m_perDevice = s.value(QStringLiteral("perDevice"), false).toBool();
     m_hotkeys.load(s);

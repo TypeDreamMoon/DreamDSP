@@ -63,6 +63,9 @@ class AppController : public QObject
     Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
 
     Q_PROPERTY(double preamp READ preamp WRITE setPreamp NOTIFY preampChanged)
+    // The header switch. Gates the whole rack, not the equalizer -- which is
+    // what it always claimed to do and never did.
+    Q_PROPERTY(bool masterEnabled READ masterEnabled WRITE setMasterEnabled NOTIFY masterEnabledChanged)
     Q_PROPERTY(bool eqEnabled READ eqEnabled WRITE setEqEnabled NOTIFY eqEnabledChanged)
     Q_PROPERTY(bool engaged READ engaged WRITE setEngaged NOTIFY engagedChanged)
 
@@ -180,6 +183,8 @@ public:
 
     double preamp() const { return m_preamp; }
     void setPreamp(double db);
+    bool masterEnabled() const { return m_masterEnabled; }
+    void setMasterEnabled(bool on);
     bool eqEnabled() const { return m_eqEnabled; }
     void setEqEnabled(bool on);
     bool engaged() const { return m_engaged; }
@@ -359,6 +364,7 @@ signals:
     void devicesChanged();
     void currentDeviceChanged();
     void preampChanged();
+    void masterEnabledChanged();
     void eqEnabledChanged();
     void engagedChanged();
     void eqEngineChanged();
@@ -465,6 +471,7 @@ private:
 
     double m_preamp = 0.0;
     bool m_eqEnabled = true;
+    bool m_masterEnabled = true;
     bool m_engaged = false;
     bool m_dirty = false;
     bool m_restoring = false;

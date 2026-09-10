@@ -63,6 +63,16 @@ public:
     // Preamp, bypass, the graphic curve and the chain order are the
     // controller's rather than any one model's.
     void setEqualizer(double preampDb, bool enabled);
+
+    // The one switch that turns everything off.
+    //
+    // Not a per-effect bit and not a separate code path: the wire format
+    // already says an empty enable mask means "pass audio through untouched",
+    // so a master bypass is that mask and nothing else. Every effect keeps its
+    // own switch position and every parameter keeps its value, because the
+    // block is also the session store -- switching back on has to restore what
+    // was running, not a set of defaults.
+    void setMasterEnabled(bool enabled);
     void setGraphic(const dsp::GraphicEq::Params &p, bool enabled);
     void setOrder(const uint8_t *order);
 
@@ -139,6 +149,7 @@ private:
     OutputModel *m_output = nullptr;
     double m_preampDb = 0.0;
     bool m_eqEnabled = true;
+    bool m_masterEnabled = true;
     dsp::GraphicEq::Params m_graphic{};
     bool m_graphicEnabled = false;
     uint8_t m_order[dsp::kStageCount];

@@ -5,6 +5,8 @@
 
 #include "Compressor.h"
 
+#include "app/Defaults.h"
+
 namespace dreamdsp {
 
 // QML-facing wrapper around the compressor's parameters.
@@ -41,6 +43,14 @@ class CompressorModel : public QObject
 
 public:
     explicit CompressorModel(QObject *parent = nullptr);
+
+    // The value this control would have had out of the box, for the reset
+    // button beside it. Empty for a name that is not a property of this model.
+    Q_INVOKABLE QVariant defaultOf(const QString &name) const
+    {
+        return defaultPropertyOf<CompressorModel>(name);
+    }
+
 
     bool enabled() const { return m_enabled; }
     void setEnabled(bool v);
