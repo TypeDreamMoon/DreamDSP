@@ -25,8 +25,12 @@ set(DREAMDSP_CORE_SOURCES
     Equalizer.h           Equalizer.cpp
     GraphicEq.h           GraphicEq.cpp
     Limiter.h             Limiter.cpp
+    Clipper.h             Clipper.cpp
     BassBoost.h           BassBoost.cpp
     Loudness.h            Loudness.cpp
+    LoudnessMeter.h       LoudnessMeter.cpp
+    AutoGain.h            AutoGain.cpp
+    Transient.h           Transient.cpp
     Routing.h             Routing.cpp
     BiquadFilter.h        BiquadFilter.cpp
     Oversampler.h         Oversampler.cpp

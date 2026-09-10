@@ -58,6 +58,34 @@ public:
         return a;
     }
 
+    // Runs only the interpolation half, handing `f` both oversampled phases.
+    //
+    // For measuring rather than processing: an inter-sample peak detector needs
+    // to see the reconstructed waveform, and the reconstruction *is* this
+    // filter, but it has no use for the decimated result. Skipping the
+    // decimation half halves the cost.
+    //
+    // Shares filter state with process(), so one instance does one job. Nest
+    // two of these -- the inner one prepared at twice the outer's rate -- for
+    // the 4x that ITU-R BS.1770 specifies for true-peak measurement.
+    template <class F>
+    void tap(float x, F &&f)
+    {
+        if (!m_ready) {
+            f(x);
+            return;
+        }
+        float a = x * 2.0f;
+        for (int i = 0; i < kStages; ++i)
+            a = m_up[i].process(a);
+        f(a);
+
+        float b = 0.0f;
+        for (int i = 0; i < kStages; ++i)
+            b = m_up[i].process(b);
+        f(b);
+    }
+
 private:
     static constexpr int kStages = 4;   // 4 biquads = 8th order
 

@@ -1,6 +1,8 @@
 #pragma once
 
+#include "AutoGain.h"
 #include "BassBoost.h"
+#include "Clipper.h"
 #include "Compressor.h"
 #include "Convolver.h"
 #include "Equalizer.h"
@@ -13,6 +15,7 @@
 #include "Routing.h"
 #include "Saturation.h"
 #include "Stereo.h"
+#include "Transient.h"
 
 namespace dreamdsp::dsp {
 
@@ -48,12 +51,16 @@ public:
     int latencySamples() const noexcept
     {
         return int(m_conv.latencySamples()) + m_delay.latencySamples()
-               + m_limiter.latencySamples();
+               + m_limiter.latencySamples() + m_width.latencySamples();
     }
 
     const Limiter &limiter() const noexcept { return m_limiter; }
+    const SoftClipper &clipper() const noexcept { return m_clipper; }
     const DynamicBass &dynamicBass() const noexcept { return m_dynBass; }
     const GraphicEq &graphicEq() const noexcept { return m_graphic; }
+    const LoudnessLeveller &autoGain() const noexcept { return m_autoGain; }
+    const DynamicRange &nightMode() const noexcept { return m_nightMode; }
+    const TransientShaper &transient() const noexcept { return m_transient; }
 
     // Not real-time in the strict sense (it clears delay lines), but allocation
     // free -- safe from Reset().
@@ -80,6 +87,11 @@ public:
     // mid-stream against a latency figure the engine queried once.
     uint32_t activeMask() const noexcept
     {
+        // The bypass is checked here rather than in apply(), so that every
+        // stage still receives its parameters while it is switched out and the
+        // rack comes back exactly as it was rather than a buffer late.
+        if (m_applied.flags & kPfBypass)
+            return 0u;
         return m_applied.enableMask | (m_conv.armed() ? kEnConvolution : 0u);
     }
     uint32_t appliedMask() const noexcept { return activeMask(); }
@@ -112,7 +124,11 @@ private:
     ConvolutionStage m_conv;
     ChannelMatrix m_matrix;
     ChannelDelay m_delay;
+    SoftClipper m_clipper;
     Limiter m_limiter;
+    TransientShaper m_transient;
+    LoudnessLeveller m_autoGain;
+    DynamicRange m_nightMode;
 
     // The order the stages run in, copied out of the last block installed.
     // Held separately from m_applied so process() reads one contiguous array

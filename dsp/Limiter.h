@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DspTypes.h"
+#include "Oversampler.h"
 
 #include <cstdint>
 #include <vector>
@@ -35,6 +36,17 @@ public:
         float thresholdDb = -0.3f;
         float releaseMs = 100.0f;
         float lookaheadMs = 1.5f;
+        // Measure the peak of the reconstructed waveform, not of the samples.
+        //
+        // Without this the guarantee above is true but narrower than it sounds:
+        // it bounds the *sample* values, and a DAC's reconstruction filter
+        // draws a continuous curve between them that can overshoot every one.
+        // Measured on this limiter, the overshoot reaches +1.28 dBTP -- so a
+        // ceiling set to -0.3 dBFS could still present nearly +1 dBFS to the
+        // converter. ITU-R BS.1770 defines true peak by oversampling, and this
+        // uses the 4x the standard specifies.
+        bool truePeak = true;
+        uint8_t pad[3] = {};
     };
 
     void prepare(double sampleRate, int channels, int maxFrames);
@@ -80,6 +92,11 @@ private:
 
     SlidingMin m_min;
     std::vector<float> m_line;   // channels * lineLength
+    // One linked peak per frame, delayed alongside the audio, so the final
+    // clamp can be checked against the same number the gain was computed from.
+    std::vector<float> m_peakLine;
+    // 4x, as two nested 2x stages. Only the interpolation half runs.
+    Oversampler2x m_tp1[kMaxChannels], m_tp2[kMaxChannels];
 };
 
 } // namespace dreamdsp::dsp

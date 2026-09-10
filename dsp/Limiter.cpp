@@ -59,7 +59,12 @@ void Limiter::prepare(double sampleRate, int channels, int maxFrames)
 
     m_lineLength = int(m_sampleRate * double(kMaxLookaheadMs) / 1000.0 + 0.5) + 2;
     m_line.assign(size_t(m_channels) * size_t(m_lineLength), 0.0f);
+    m_peakLine.assign(size_t(m_lineLength), 0.0f);
     m_min.prepare(m_lineLength + 2);
+    for (int c = 0; c < m_channels; ++c) {
+        m_tp1[c].prepare(m_sampleRate);
+        m_tp2[c].prepare(m_sampleRate * 2.0);
+    }
 
     m_p = Params{};
     setParams(m_p);
@@ -70,7 +75,13 @@ void Limiter::reset() noexcept
 {
     if (!m_line.empty())
         std::memset(m_line.data(), 0, m_line.size() * sizeof(float));
+    if (!m_peakLine.empty())
+        std::memset(m_peakLine.data(), 0, m_peakLine.size() * sizeof(float));
     m_min.reset();
+    for (int c = 0; c < m_channels; ++c) {
+        m_tp1[c].reset();
+        m_tp2[c].reset();
+    }
     m_write = 0;
     m_gain = 1.0f;
 }
@@ -109,6 +120,8 @@ void Limiter::process(const AudioBuffer &buf)
     // Stereo-linked: one gain for every channel. A limiter that moved the
     // channels independently would shift the stereo image every time it worked,
     // which is a far more audible fault than the level it is controlling.
+    const bool truePeak = m_p.truePeak;
+
     for (int f = 0; f < frames; ++f) {
         float peak = 0.0f;
         for (int c = 0; c < channels; ++c) {
@@ -120,7 +133,19 @@ void Limiter::process(const AudioBuffer &buf)
             const float a = v < 0.0f ? -v : v;
             if (a > peak)
                 peak = a;
+            if (truePeak) {
+                // The interpolated phases are where the overshoot lives; the
+                // sample itself is already counted above.
+                m_tp1[c].tap(v, [&](float u) {
+                    m_tp2[c].tap(u, [&](float w) {
+                        const float m = w < 0.0f ? -w : w;
+                        if (m > peak)
+                            peak = m;
+                    });
+                });
+            }
         }
+        m_peakLine[size_t(m_write)] = peak;
 
         // The gain this sample would need on its own. Clamped at 1 so the
         // limiter can only ever reduce.
@@ -139,13 +164,18 @@ void Limiter::process(const AudioBuffer &buf)
         // turns the threshold from an aim into a guarantee: whatever the
         // envelope is doing, no output sample leaves above it.
         const int r = (m_write - m_lookahead + m_lineLength) % m_lineLength;
+        // One clamp for every channel, derived from the frame's linked peak.
+        // Deriving it per channel -- which is what this used to do -- can hand
+        // the two sides different gains for the one sample where the clamp
+        // engages, and a limiter that moves the image is a worse fault than the
+        // level it is controlling.
+        const float ap = m_peakLine[size_t(r)];
+        const float g = (ap * m_gain > m_threshold && ap > 0.0f) ? m_threshold / ap : m_gain;
         for (int c = 0; c < channels; ++c) {
             float *x = buf.channels[c];
             if (!x)
                 continue;
             const float d = m_line[size_t(c) * size_t(m_lineLength) + size_t(r)];
-            const float a = d < 0.0f ? -d : d;
-            const float g = (a * m_gain > m_threshold) ? m_threshold / a : m_gain;
             bool bad = false;
             x[f] = railed(d * g, &bad);
             if (bad) {

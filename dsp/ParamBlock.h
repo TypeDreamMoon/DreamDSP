@@ -5,6 +5,8 @@
 #include <cstring>
 #include <type_traits>
 
+#include "AutoGain.h"
+#include "Clipper.h"
 #include "Compressor.h"
 #include "BassBoost.h"
 #include "Convolver.h"
@@ -17,6 +19,7 @@
 #include "Routing.h"
 #include "Saturation.h"
 #include "Stereo.h"
+#include "Transient.h"
 
 // The complete parameter payload that travels from the GUI to the copy of the
 // DSP running inside audiodg.exe.
@@ -33,7 +36,23 @@ namespace dreamdsp::dsp {
 
 enum : uint32_t {
     kParamMagic = 0x42505244u,   // reads as DRPB in a hex dump
-    kParamVersion = 5u
+    kParamVersion = 7u
+};
+
+// Header flags, which are about the block rather than about any one effect.
+enum : uint32_t {
+    // Run nothing, but remember everything.
+    //
+    // A master bypass could have been expressed by publishing an empty enable
+    // mask -- the format already says that means "pass audio through
+    // untouched" -- and that is what it did for about an hour. It is wrong,
+    // because this block is also the session store: clearing the mask does not
+    // suspend the switches, it forgets them, and the next launch comes up with
+    // every effect off and no way to know which had been on. A flag leaves the
+    // mask saying what the interface is showing and answers a different
+    // question.
+    kPfBypass = 1u << 0,
+    kPfKnown  = 0x00000001u
 };
 
 // One bit per effect. The dsp layer has no enable flag of its own; these bits
@@ -68,7 +87,15 @@ enum : uint32_t {
     kEnLimiter   = 1u << 13,
     kEnDynBass   = 1u << 14,
     kEnGraphic   = 1u << 15,
-    kEnKnown     = 0x0000FFFFu
+    // Shapes the envelope without a threshold, so it belongs with the other
+    // dynamics rather than with the tone controls.
+    kEnTransient = 1u << 16,
+    // Ahead of the limiter, always: the clipper's job is to take the sparse
+    // peaks off so the limiter never has to reach for them.
+    kEnClipper   = 1u << 17,
+    kEnAutoGain  = 1u << 18,
+    kEnNightMode = 1u << 19,
+    kEnKnown     = 0x000FFFFFu
 };
 
 // One id per stage, and the entire vocabulary of the order array below. These
@@ -90,9 +117,14 @@ enum : uint8_t {
     kStageConvolution,
     kStageDelay,
     kStageLimiter,
+    kStageTransient,
+    kStageClipper,
+    kStageAutoGain,
+    kStageNightMode,
     kStageCount
 };
-static_assert(kStageCount == 16, "kDefaultOrder and ParamBlock::order are sized for 16");
+static_assert(kStageCount == 20, "kDefaultOrder and ParamBlock::order are sized for 20");
+static_assert(kStageCount <= 32, "isPermutation() tracks stages in a uint32_t bitmask");
 
 // The order the stages run in when nobody has said otherwise. Reproduces what
 // the chain did when it was hard-coded, and is what the sanitiser falls back to
@@ -113,36 +145,40 @@ struct ParamBlock {
     uint32_t sizeBytes;    // +  8   catches truncation
     uint32_t generation;   // + 12   strictly increasing
     uint32_t enableMask;   // + 16   kEn* bits; 0 means fully transparent
-    uint32_t reserved0;    // + 20
+    uint32_t flags;        // + 20   kPf* bits
 
-    Compressor::Params          comp;        // + 24    28
-    Reverb::Params              reverb;      // + 52    32
-    TubeStage::Params           tube;        // + 84    16
-    Exciter::Params             exciter;     // +100    12
-    VirtualBass::Params         bass;        // +112    16
-    StereoWidener::Params       width;       // +128     8
-    Crossfeed::Params           crossfeed;   // +136    12
-    MultibandCompressor::Params multiband;   // +148   108
-    Convolution::Params         convolution; // +256    44
+    Compressor::Params          comp;     //   +24    28
+    Reverb::Params              reverb;     //   +52    32
+    TubeStage::Params           tube;     //   +84    16
+    Exciter::Params             exciter;     //  +100    16
+    VirtualBass::Params         bass;     //  +116    16
+    StereoWidener::Params       width;     //  +132    12
+    Crossfeed::Params           crossfeed;     //  +144    12
+    MultibandCompressor::Params multiband;     //  +156   108
+    Convolution::Params         convolution;     //  +264    44
     // Appended rather than placed in chain order. Struct order carries no
     // meaning -- EffectChain::process is the order -- and appending leaves every
     // offset above unchanged, so the assertions below still guard what they did.
-    Equalizer::Params           eq;          // +300   520
-    ChannelMatrix::Params       matrix;      // +820   256
-    ChannelDelay::Params        delay;       //+1076    32
-    LoudnessCorrection::Params  loudness;    //+1108    16
-    Limiter::Params             limiter;     //+1124    16
-    DynamicBass::Params         dynBass;     //+1140    16
-    GraphicEq::Params           graphic;     //+1156   128
+    Equalizer::Params           eq;     //  +308   520
+    ChannelMatrix::Params       matrix;     //  +828   256
+    ChannelDelay::Params        delay;     // +1084    32
+    LoudnessCorrection::Params  loudness;     // +1116    16
+    Limiter::Params             limiter;     // +1132    20
+    DynamicBass::Params         dynBass;     // +1152    16
+    GraphicEq::Params           graphic;     // +1168   128
+    TransientShaper::Params     transient;     // +1296    20
+    SoftClipper::Params         clipper;     // +1316    16
+    LoudnessLeveller::Params    autoGain;     // +1332    20
+    DynamicRange::Params        nightMode;     // +1352    16
 
     // Which stage runs when. A permutation of 0..kStageCount-1; anything else
     // is replaced wholesale by kDefaultOrder, because a duplicate would run a
     // stage twice and an omission would silently drop an effect whose switch
     // says it is on.
-    uint8_t order[kStageCount];              //+1284    16
-};                                           // = 1300
+    uint8_t order[kStageCount];              // +1368    20
+};                                           // = 1376
 
-static_assert(sizeof(ParamBlock) == 1300, "wire layout changed; bump kParamVersion");
+static_assert(sizeof(ParamBlock) == 1388, "wire layout changed; bump kParamVersion");
 static_assert(alignof(ParamBlock) == 4, "wire layout changed; bump kParamVersion");
 static_assert(std::is_trivially_copyable<ParamBlock>::value, "must be memcpy-able");
 static_assert(offsetof(ParamBlock, enableMask) == 16, "wire layout changed");
@@ -150,19 +186,23 @@ static_assert(offsetof(ParamBlock, comp) == 24, "wire layout changed");
 static_assert(offsetof(ParamBlock, reverb) == 52, "wire layout changed");
 static_assert(offsetof(ParamBlock, tube) == 84, "wire layout changed");
 static_assert(offsetof(ParamBlock, exciter) == 100, "wire layout changed");
-static_assert(offsetof(ParamBlock, bass) == 112, "wire layout changed");
-static_assert(offsetof(ParamBlock, width) == 128, "wire layout changed");
-static_assert(offsetof(ParamBlock, crossfeed) == 136, "wire layout changed");
-static_assert(offsetof(ParamBlock, multiband) == 148, "wire layout changed");
-static_assert(offsetof(ParamBlock, convolution) == 256, "wire layout changed");
-static_assert(offsetof(ParamBlock, eq) == 300, "wire layout changed");
-static_assert(offsetof(ParamBlock, matrix) == 820, "wire layout changed");
-static_assert(offsetof(ParamBlock, delay) == 1076, "wire layout changed");
-static_assert(offsetof(ParamBlock, loudness) == 1108, "wire layout changed");
-static_assert(offsetof(ParamBlock, limiter) == 1124, "wire layout changed");
-static_assert(offsetof(ParamBlock, dynBass) == 1140, "wire layout changed");
-static_assert(offsetof(ParamBlock, graphic) == 1156, "wire layout changed");
-static_assert(offsetof(ParamBlock, order) == 1284, "wire layout changed");
+static_assert(offsetof(ParamBlock, bass) == 116, "wire layout changed");
+static_assert(offsetof(ParamBlock, width) == 132, "wire layout changed");
+static_assert(offsetof(ParamBlock, crossfeed) == 144, "wire layout changed");
+static_assert(offsetof(ParamBlock, multiband) == 156, "wire layout changed");
+static_assert(offsetof(ParamBlock, convolution) == 264, "wire layout changed");
+static_assert(offsetof(ParamBlock, eq) == 308, "wire layout changed");
+static_assert(offsetof(ParamBlock, matrix) == 828, "wire layout changed");
+static_assert(offsetof(ParamBlock, delay) == 1084, "wire layout changed");
+static_assert(offsetof(ParamBlock, loudness) == 1116, "wire layout changed");
+static_assert(offsetof(ParamBlock, limiter) == 1132, "wire layout changed");
+static_assert(offsetof(ParamBlock, dynBass) == 1152, "wire layout changed");
+static_assert(offsetof(ParamBlock, graphic) == 1168, "wire layout changed");
+static_assert(offsetof(ParamBlock, transient) == 1296, "wire layout changed");
+static_assert(offsetof(ParamBlock, clipper) == 1316, "wire layout changed");
+static_assert(offsetof(ParamBlock, autoGain) == 1332, "wire layout changed");
+static_assert(offsetof(ParamBlock, nightMode) == 1352, "wire layout changed");
+static_assert(offsetof(ParamBlock, order) == 1368, "wire layout changed");
 
 // --------------------------------------------------------------- sanitising
 

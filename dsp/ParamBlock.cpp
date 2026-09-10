@@ -5,11 +5,29 @@ namespace dreamdsp::dsp {
 // Correction first, then things that add content, then dynamics, then the
 // output stage. Reproduces the order the chain ran in when it was hard-coded.
 const uint8_t kDefaultOrder[kStageCount] = {
+    // Levelling first, so every stage downstream sees a signal at a predictable
+    // level. This matters most for the ones whose behaviour is a function of
+    // absolute level -- the compressor and the night-mode curve -- and it is
+    // the order Orban's broadcast chain uses for exactly that reason.
+    kStageAutoGain,
     kStageEqualizer, kStageGraphic, kStageLoudness,
     kStageDynBass, kStageBass, kStageExciter, kStageTube,
-    kStageComp, kStageMultiband, kStageReverb,
+    // Envelope shaping ahead of the compressor, so the compressor sees the
+    // shape we asked for rather than fighting it.
+    kStageTransient,
+    kStageComp, kStageMultiband,
+    // Night mode after the compressors: it is a *decoder* function, and its
+    // curve is calibrated against programme loudness, not against whatever the
+    // multiband happened to leave behind.
+    kStageNightMode,
+    kStageReverb,
     kStageWidth, kStageCrossfeed,
-    kStageMatrix, kStageConvolution, kStageDelay, kStageLimiter
+    kStageMatrix, kStageConvolution, kStageDelay,
+    // Clipper immediately before the limiter. At one decibel of peak reduction
+    // the clipper adds 0.1 dB of modulation to sustained content where the
+    // limiter adds 17 to 20; putting it first means the limiter only ever has
+    // slow, shallow, well-masked work left to do.
+    kStageClipper, kStageLimiter
 };
 
 namespace {
@@ -78,7 +96,7 @@ ParamBlock sanitise(const ParamBlock &in) noexcept
     o.sizeBytes = uint32_t(sizeof(ParamBlock));
     o.generation = in.generation;
     o.enableMask = in.enableMask & kEnKnown;
-    o.reserved0 = 0;
+    o.flags = in.flags & kPfKnown;
 
     sanitiseCompressor(o.comp, in.comp, 0.0f, 0.0f, 5.0f, 50.0f);
 
@@ -100,6 +118,10 @@ ParamBlock sanitise(const ParamBlock &in) noexcept
     o.exciter.frequencyHz = sanF(in.exciter.frequencyHz, 20.0f, 20000.0f, 3500.0f);
     o.exciter.drive       = sanF(in.exciter.drive, 1.0f, 32.0f, 1.0f);
     o.exciter.amount      = sanF(in.exciter.amount, 0.0f, 1.0f, 0.0f);
+    // -120 dB is the "off" end: below any signal the stage will ever see, so
+    // the shaper is always engaged and the stage behaves as it did before the
+    // threshold existed.
+    o.exciter.thresholdDb = sanF(in.exciter.thresholdDb, -120.0f, -12.0f, -45.0f);
 
     o.bass.cutoffHz      = sanF(in.bass.cutoffHz, 20.0f, 400.0f, 90.0f);
     o.bass.amount        = sanF(in.bass.amount, 0.0f, 1.0f, 0.0f);
@@ -108,6 +130,7 @@ ParamBlock sanitise(const ParamBlock &in) noexcept
 
     o.width.width = sanF(in.width.width, 0.0f, 2.0f, 1.0f);
     o.width.monoBelowHz = sanF(in.width.monoBelowHz, 0.0f, 500.0f, 0.0f);
+    o.width.phaseAmount = sanF(in.width.phaseAmount, 0.0f, 1.0f, 0.0f);
     // The widener switches the filter on for any value > 0 but designs it on
     // clamp(20, 500) -- so 0.001 Hz would silently engage a 20 Hz filter. Snap
     // the dead zone to off instead.
@@ -200,6 +223,8 @@ ParamBlock sanitise(const ParamBlock &in) noexcept
     o.limiter.thresholdDb = sanF(in.limiter.thresholdDb, -30.0f, 0.0f, -0.3f);
     o.limiter.releaseMs   = sanF(in.limiter.releaseMs, 1.0f, 1000.0f, 100.0f);
     o.limiter.lookaheadMs = sanF(in.limiter.lookaheadMs, 0.0f, Limiter::kMaxLookaheadMs, 1.5f);
+    o.limiter.truePeak    = sanB(in.limiter.truePeak);
+    o.limiter.pad[0] = o.limiter.pad[1] = o.limiter.pad[2] = 0;
 
     o.dynBass.maxGainDb = sanF(in.dynBass.maxGainDb, 0.0f, 24.0f, 0.0f);
     o.dynBass.cutoffHz  = sanF(in.dynBass.cutoffHz, 30.0f, 250.0f, 100.0f);
@@ -212,6 +237,45 @@ ParamBlock sanitise(const ParamBlock &in) noexcept
     for (int i = 0; i < GraphicEq::kBands; ++i)
         o.graphic.gainDb[i] = sanF(in.graphic.gainDb[i], -40.0f, 40.0f, 0.0f);
     o.graphic.amount = sanF(in.graphic.amount, 0.0f, 1.0f, 0.0f);
+
+    // 1 ms and 5 s are Calf's published bounds for the same two controls, and
+    // the knobs are the +/-1 the wire format wants everywhere else.
+    o.transient.attack      = sanF(in.transient.attack, -1.0f, 1.0f, 0.0f);
+    o.transient.sustain     = sanF(in.transient.sustain, -1.0f, 1.0f, 0.0f);
+    o.transient.attackMs    = sanF(in.transient.attackMs, 1.0f, 500.0f, 30.0f);
+    o.transient.releaseMs   = sanF(in.transient.releaseMs, 1.0f, 5000.0f, 300.0f);
+    o.transient.thresholdDb = sanF(in.transient.thresholdDb, -90.0f, -20.0f, -60.0f);
+
+    // The knee is bounded at 6 dB rather than left open: past about 2 dB this
+    // stops behaving like a clipper and starts behaving like a saturator, and
+    // a saturator in front of the limiter is the configuration the whole stage
+    // exists to avoid.
+    o.clipper.driveDb   = sanF(in.clipper.driveDb, 0.0f, 24.0f, 0.0f);
+    o.clipper.ceilingDb = sanF(in.clipper.ceilingDb, -24.0f, 0.0f, -0.3f);
+    o.clipper.kneeDb    = sanF(in.clipper.kneeDb, 0.0f, 6.0f, 1.0f);
+    o.clipper.oversample = sanB(in.clipper.oversample);
+    o.clipper.pad[0] = o.clipper.pad[1] = o.clipper.pad[2] = 0;
+
+    // 20 dB/s is the aggressive end of Orban's AGC range and is audibly a
+    // compressor; 0.25 is slower than anything that ships. Both are bounds, not
+    // recommendations -- the default of 3 dB/s sits where four independent
+    // implementations converged.
+    o.autoGain.targetLufs   = sanF(in.autoGain.targetLufs, -40.0f, -10.0f, -20.0f);
+    o.autoGain.maxGainDb    = sanF(in.autoGain.maxGainDb, 0.0f, 25.0f, 12.0f);
+    o.autoGain.rateDbPerSec = sanF(in.autoGain.rateDbPerSec, 0.25f, 20.0f, 3.0f);
+    o.autoGain.windowDb     = sanF(in.autoGain.windowDb, 0.0f, 12.0f, 3.0f);
+    o.autoGain.gateLufs     = sanF(in.autoGain.gateLufs, -70.0f, -20.0f, -50.0f);
+
+    // The profile is an index into a fixed table of five published curves, so
+    // an out-of-range value becomes "none" rather than being clamped into a
+    // neighbouring profile the user did not choose.
+    o.nightMode.profile = (in.nightMode.profile > DynamicRange::kProfileNone
+                           && in.nightMode.profile < DynamicRange::kProfileCount)
+                              ? in.nightMode.profile
+                              : int32_t(DynamicRange::kProfileNone);
+    o.nightMode.boost         = sanF(in.nightMode.boost, 0.0f, 1.0f, 1.0f);
+    o.nightMode.cut           = sanF(in.nightMode.cut, 0.0f, 1.0f, 1.0f);
+    o.nightMode.referenceLufs = sanF(in.nightMode.referenceLufs, -40.0f, -10.0f, -24.0f);
 
     if (isPermutation(in.order))
         std::memcpy(o.order, in.order, sizeof o.order);

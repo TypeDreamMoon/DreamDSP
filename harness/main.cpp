@@ -15,7 +15,10 @@
 #include "BassBoost.h"
 #include "Equalizer.h"
 #include "GraphicEq.h"
+#include "AutoGain.h"
+#include "Clipper.h"
 #include "Limiter.h"
+#include "LoudnessMeter.h"
 #include "Fft.h"
 #include "Loudness.h"
 #include "ImpulseAnalysis.h"
@@ -29,6 +32,7 @@
 #include "Saturation.h"
 #include "StatusBlock.h"
 #include "Stereo.h"
+#include "Transient.h"
 #include "WavFile.h"
 
 #include <algorithm>
@@ -565,6 +569,740 @@ void testCrossover()
 
 // ----------------------------------------------------------------- saturation
 
+// --------------------------------------------------- dry/wet time alignment
+
+// A parallel-mixed nonlinear stage must not comb-filter itself.
+//
+// The oversampler is an 8th-order Butterworth run on both the interpolation and
+// the decimation pass, so the wet path comes back with a few samples of group
+// delay. The dry path has none. Summing them is then a comb filter, and at the
+// default mix of 0.5 the null is nearly total -- a cancellation in the presence
+// region that no amount of tuning the drive would explain.
+//
+// Measured in the linear regime (tiny signal, low drive) where the shaper is
+// effectively a wire, so anything that is not flat is the alignment and not the
+// distortion.
+void testDryWetAlignment()
+{
+    std::printf("\n[dry/wet alignment]\n");
+
+    constexpr double sr = 48000.0;
+    Fft fft(8192);
+    const int len = fft.realSize();
+
+    // Impulse response magnitude, in dB, bin by bin. The impulse is tiny so
+    // every stage stays in its linear regime -- this measures the *structure*,
+    // not the distortion.
+    const auto response = [&](auto &&configure) {
+        std::vector<float> imp(size_t(len), 0.0f);
+        imp[0] = 1e-4f;
+        float *ch[1] = { imp.data() };
+        AudioBuffer b{ ch, 1, len };
+        configure(b);
+
+        std::vector<std::complex<float>> spec(size_t(fft.realBins()));
+        fft.realForward(imp.data(), spec.data());
+
+        std::vector<double> db(spec.size(), 0.0);
+        for (size_t k = 0; k < spec.size(); ++k)
+            db[k] = 20.0 * std::log10(double(std::abs(spec[k])) / 1e-4 + 1e-20);
+        return db;
+    };
+
+    const auto binHz = [&](size_t k) { return double(k) * sr / double(len); };
+
+    // -- TubeStage. `mix` is a genuine dry/wet control, so the guarantee is
+    // exact: a parallel blend of two paths must never be quieter than the
+    // quieter of the two. Anything below that is cancellation.
+    {
+        const auto tube = [&](float mix) {
+            return response([&](const AudioBuffer &b) {
+                TubeStage t;
+                t.prepare(sr, 1);
+                TubeStage::Params p;
+                p.drive = 1.0f; p.bias = 0.0f; p.mix = mix; p.outputDb = 0.0f;
+                t.setParams(p);
+                t.process(b);
+            });
+        };
+
+        const auto dry = tube(0.0f);
+        const auto wet = tube(1.0f);
+
+        double worst = 0.0, worstAt = 0.0;
+        float worstMix = 0.0f;
+        for (float mix : { 0.25f, 0.5f, 0.75f }) {
+            const auto mid = tube(mix);
+            for (size_t k = 1; k < mid.size(); ++k) {
+                const double hz = binHz(k);
+                if (hz < 50.0 || hz > 20000.0)
+                    continue;
+                const double floorDb = std::min(dry[k], wet[k]);
+                const double margin = mid[k] - floorDb;
+                if (margin < worst) { worst = margin; worstAt = hz; worstMix = mix; }
+            }
+        }
+        std::printf("    tube: worst blend loss %.2f dB at %.0f Hz (mix %.2f)\n",
+                    worst, worstAt, worstMix);
+        check(worst > -0.25,
+              fmt("a partly-wet tube stage never cancels against itself (%.2f dB at %.0f Hz)",
+                  worst, worstAt));
+    }
+
+    // -- Exciter. `amount` is additive, not a blend, and the stage genuinely
+    // does dip near its corner: adding a 4th-order high-pass copy of the
+    // signal subtracts where that filter's phase passes 180 degrees. That dip
+    // is the design, and it lives at the corner. The oversampler comb, if it
+    // came back, would sit an octave or two below Nyquist -- so measure well
+    // clear of the corner and require the band to be lifted, not notched.
+    {
+        const auto exc = [&](float amount) {
+            return response([&](const AudioBuffer &b) {
+                Exciter e;
+                e.prepare(sr, 1);
+                Exciter::Params p;
+                p.frequencyHz = 3500.0f; p.drive = 3.0f; p.amount = amount;
+                // Below any signal, so the shaper is always engaged. This test
+                // is about the *structure* -- whether the added band lines up
+                // with the dry one -- and the transient threshold would
+                // otherwise gate a -80 dBFS impulse away entirely.
+                p.thresholdDb = -120.0f;
+                e.setParams(p);
+                e.process(b);
+            });
+        };
+
+        const auto off = exc(0.0f);
+        const auto on = exc(0.3f);
+
+        double worst = 1e9, worstAt = 0.0;
+        for (size_t k = 1; k < on.size(); ++k) {
+            const double hz = binHz(k);
+            if (hz < 8000.0 || hz > 20000.0)
+                continue;
+            const double lift = on[k] - off[k];
+            if (lift < worst) { worst = lift; worstAt = hz; }
+        }
+        std::printf("    exciter: least lift above 8 kHz %+.2f dB at %.0f Hz\n", worst, worstAt);
+        check(worst > 0.0,
+              fmt("the exciter lifts its whole band rather than notching it (%+.2f dB at %.0f Hz)",
+                  worst, worstAt));
+    }
+}
+
+
+// ---------------------------------------------------------------- new stages
+
+void testLoudnessMeter()
+{
+    std::printf("\n[loudness meter]\n");
+    constexpr double sr = 48000.0;
+
+    // The published coefficient tables are the external check on the design
+    // code. BS.1770-4 tabulates 48 kHz only; the design constants cover every
+    // rate, and this asserts that they reproduce the tabulated case exactly.
+    {
+        KWeighting k;
+        k.prepare(sr);
+        double b[3], a[3], hp[3];
+        k.coefficients(b, a, hp);
+
+        const double refB[3] = { 1.53512485958697, -2.69169618940638, 1.19839281085285 };
+        const double refA[3] = { 1.0, -1.69065929318241, 0.73248077421585 };
+        const double refH[3] = { 1.0, -1.99004745483398, 0.99007225036621 };
+
+        double worst = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            worst = std::max(worst, std::fabs(b[i] - refB[i]));
+            worst = std::max(worst, std::fabs(a[i] - refA[i]));
+            worst = std::max(worst, std::fabs(hp[i] - refH[i]));
+        }
+        std::printf("    K-weighting vs BS.1770-4 tables at 48 kHz: worst %.2e\n", worst);
+        check(worst < 5e-12,
+              fmt("the designed coefficients are the published ones (%.2e)", worst));
+    }
+
+    // Level scaling and channel summing, which is all a meter has to promise
+    // beyond its filter.
+    {
+        const int n = 48000 * 4;
+        const auto measure = [&](float amp, int channels) {
+            LoudnessMeter m;
+            m.prepare(sr, channels, 3000.0);
+            auto a = sine(1000.0, sr, n, amp);
+            auto b = a;
+            float *ch[2] = { a.data(), b.data() };
+            AudioBuffer buf{ ch, channels, n };
+            m.process(buf);
+            return m.lufs();
+        };
+        const double mono = measure(0.5f, 1);
+        const double louder = measure(1.0f, 1);
+        const double stereo = measure(0.5f, 2);
+        std::printf("    1 kHz mono %.2f LUFS, +6 dB -> %.2f, same in stereo -> %.2f\n",
+                    mono, louder, stereo);
+        check(std::fabs((louder - mono) - 6.0206) < 0.01,
+              "six decibels in is six decibels out");
+        check(std::fabs((stereo - mono) - 3.0103) < 0.01,
+              "two identical channels read three decibels louder");
+    }
+}
+
+void testTransient()
+{
+    std::printf("\n[transient shaper]\n");
+    constexpr double sr = 48000.0;
+    const int n = 24000;   // 500 ms
+
+    // A decaying burst, which is what the stage is for.
+    const auto burst = [&](float amp) {
+        std::vector<float> x(size_t(n), 0.0f);
+        for (int i = 0; i < n; ++i) {
+            const double t = double(i) / sr;
+            const double env = std::exp(-t * 12.0);
+            x[size_t(i)] = float(amp * env * std::sin(2.0 * 3.14159265358979 * 180.0 * t));
+        }
+        return x;
+    };
+
+    const auto run = [&](float amp, float attack, float sustain) {
+        TransientShaper t;
+        t.prepare(sr, 1);
+        TransientShaper::Params p;
+        p.attack = attack;
+        p.sustain = sustain;
+        p.thresholdDb = -90.0f;      // out of the way; the gate is tested below
+        t.setParams(p);
+        t.reset();
+        auto x = burst(amp);
+        auto dry = x;
+        float *ch[1] = { x.data() };
+        AudioBuffer b{ ch, 1, n };
+        t.process(b);
+        // Gain trajectory, in dB, relative to the untouched burst.
+        std::vector<double> g(size_t(n), 0.0);
+        for (int i = 0; i < n; ++i)
+            g[size_t(i)] = (std::fabs(dry[size_t(i)]) > 1e-7)
+                               ? 20.0 * std::log10(std::fabs(x[size_t(i)] / dry[size_t(i)]))
+                               : 0.0;
+        return g;
+    };
+
+    // The whole point: identical treatment at any level.
+    {
+        const auto loud = run(0.5f, 1.0f, 0.0f);
+        const auto quiet = run(0.05f, 1.0f, 0.0f);     // 20 dB down
+        double worst = 0.0;
+        for (size_t i = 0; i < loud.size(); ++i)
+            worst = std::max(worst, std::fabs(loud[i] - quiet[i]));
+        std::printf("    same burst 20 dB apart: worst gain difference %.3f dB\n", worst);
+        check(worst < 0.1,
+              fmt("a transient shaper treats pianissimo and fortissimo alike (%.3f dB)", worst));
+    }
+
+    // The attack path lifts the onset and must leave the tail alone -- SPL's
+    // "the two do not influence each other". A two-sided gain law fails this.
+    {
+        const auto g = run(0.5f, 1.0f, 0.0f);
+        double onset = 0.0, tail = 0.0;
+        for (int i = 0; i < int(sr * 0.01); ++i)          // first 10 ms
+            onset = std::max(onset, g[size_t(i)]);
+        for (int i = int(sr * 0.2); i < n; ++i)           // past 200 ms
+            tail = std::min(tail, g[size_t(i)]);
+        std::printf("    attack +1: onset %+.2f dB, worst on the tail %+.2f dB\n", onset, tail);
+        check(onset > 3.0, "the attack path lifts the onset");
+        check(tail > -0.05, "and does not duck the decay it is not addressing");
+    }
+
+    // Below the gate, nothing happens at all.
+    {
+        TransientShaper t;
+        t.prepare(sr, 1);
+        TransientShaper::Params p;
+        p.attack = 1.0f;
+        p.thresholdDb = -40.0f;
+        t.setParams(p);
+        t.reset();
+        auto x = burst(0.002f);          // -54 dBFS peak, below the gate
+        auto dry = x;
+        float *ch[1] = { x.data() };
+        AudioBuffer b{ ch, 1, n };
+        t.process(b);
+        double worst = 0.0;
+        for (size_t i = 0; i < x.size(); ++i)
+            worst = std::max(worst, double(std::fabs(x[i] - dry[i])));
+        std::printf("    below the gate: worst change %.2e\n", worst);
+        check(worst < 1e-9, "the gate stops it chasing the noise floor");
+    }
+}
+
+void testClipper()
+{
+    std::printf("\n[soft clipper]\n");
+    constexpr double sr = 48000.0;
+
+    // The ceiling is a guarantee, not an asymptote -- including through the
+    // oversampler's reconstruction ripple.
+    {
+        for (int mode = 0; mode < 2; ++mode) {
+            const bool os = mode != 0;
+            SoftClipper c;
+            c.prepare(sr, 1);
+            SoftClipper::Params p;
+            p.driveDb = 18.0f;
+            p.ceilingDb = -1.0f;
+            p.kneeDb = 1.0f;
+            p.oversample = os;
+            c.setParams(p);
+            c.reset();
+
+            auto x = sine(997.0, sr, 8192, 0.9f);
+            float *ch[1] = { x.data() };
+            AudioBuffer b{ ch, 1, 8192 };
+            c.process(b);
+            float peak = 0.0f;
+            for (float v : x)
+                peak = std::max(peak, std::fabs(v));
+            const double db = 20.0 * std::log10(double(peak));
+            std::printf("    18 dB into a -1.0 dB ceiling (%s): peak %.4f dB\n",
+                        os ? "2x" : "1x", db);
+            // At 1x the shaper's output is the output, so the ceiling is exact.
+            // With oversampling the decimation filter rings past it, and that
+            // overshoot is left in rather than clipped off -- clipping it costs
+            // 17 dB of alias suppression to buy back one decibel of peak. What
+            // is asserted here is that the ring stays bounded and small; the
+            // limiter is the stage that guarantees a ceiling.
+            const double allowed = os ? 1.5 : 1e-4;
+            check(db <= -1.0 + allowed,
+                  fmt("the ceiling holds to within the reconstruction ring (%.4f dB)", db));
+        }
+    }
+
+    // What the knee is worth, measured.
+    //
+    // The tone is deliberately not a neat fraction of the sample rate. With a
+    // bin-aligned fundamental every alias folds back onto a harmonic bin and
+    // the measurement reads clean no matter how bad the aliasing is -- the
+    // classic way to accidentally prove a clipper is transparent.
+    //
+    // Everything within a few bins of a genuine harmonic counts as signal;
+    // everything else is aliasing. Sampling only one narrow band instead --
+    // say, below the fundamental -- catches whichever handful of folded
+    // partials happen to land there and misses the rest, which is how a real
+    // 16 dB difference reads as 2.
+    {
+        const int n = 16384;
+        const double f0 = 1013.7;
+        const auto aliasSnrDrive = [&](float kneeDb, float driveDb, bool os) {
+            SoftClipper c;
+            c.prepare(sr, 1);
+            SoftClipper::Params p;
+            p.driveDb = driveDb;
+            p.ceilingDb = 0.0f;
+            p.kneeDb = kneeDb;
+            p.oversample = os;
+            c.setParams(p);
+            c.reset();
+            auto x = sine(f0, sr, n, 0.5f);
+            float *ch[1] = { x.data() };
+            AudioBuffer b{ ch, 1, n };
+            c.process(b);
+
+            // Hann, because an off-bin tone smears across the whole spectrum
+            // without one and the leakage would swamp what is being measured.
+            for (int i = 0; i < n; ++i) {
+                const double w = 0.5 - 0.5 * std::cos(2.0 * 3.14159265358979
+                                                      * double(i) / double(n));
+                x[size_t(i)] = float(double(x[size_t(i)]) * w);
+            }
+            Fft fft(n / 2);                       // realSize() == n
+            std::vector<std::complex<float>> spec(size_t(fft.realBins()));
+            fft.realForward(x.data(), spec.data());
+
+            const double binHz = sr / double(n);
+            double sig = 0.0, junk = 0.0;
+            for (size_t k = 4; k < spec.size(); ++k) {
+                const double hz = double(k) * binHz;
+                const double m = std::floor(hz / f0 + 0.5);
+                const bool harmonic = m >= 1.0 && m * f0 < sr * 0.5
+                                      && std::fabs(hz - m * f0) < 6.0 * binHz;
+                (harmonic ? sig : junk) += double(std::norm(spec[k]));
+            }
+            return 10.0 * std::log10(sig / (junk + 1e-30));
+        };
+        const auto aliasSnr = [&](float kneeDb, bool os) {
+            return aliasSnrDrive(kneeDb, 9.0f, os);
+        };
+
+        // What the oversampler itself puts on the floor, with nothing to
+        // alias: 0 dB of drive into a 0 dB ceiling never reaches the knee, so
+        // any junk here is the filters own.
+        const double clean1x = aliasSnrDrive(0.0f, 1.0f, false);
+        const double clean2x = aliasSnrDrive(0.0f, 1.0f, true);
+        std::printf("    with nothing to clip: 1x %.1f dB, 2x %.1f dB\n", clean1x, clean2x);
+
+        const double hard = aliasSnr(0.0f, false);
+        const double knee = aliasSnr(1.0f, false);
+        const double kneeOs = aliasSnr(1.0f, true);
+        std::printf("    alias-to-signal: hard %.1f dB, 1 dB knee %.1f dB, knee + 2x %.1f dB\n",
+                    hard, knee, kneeOs);
+        check(knee > hard + 6.0,
+              fmt("a one-decibel knee is worth six decibels of aliasing or more (%.1f -> %.1f)",
+                  hard, knee));
+        check(kneeOs > knee + 6.0, "and oversampling is worth more again");
+        check(clean2x >= clean1x - 0.5,
+              "oversampling puts no floor of its own under the signal");
+    }
+
+    // A clipper is not a saturator: below the knee it must be exactly linear,
+    // or the sustained content gets modulated and the whole reason to prefer it
+    // over a limiter evaporates.
+    {
+        SoftClipper c;
+        c.prepare(sr, 1);
+        SoftClipper::Params p;
+        p.driveDb = 0.0f;
+        p.ceilingDb = 0.0f;
+        p.kneeDb = 1.0f;
+        p.oversample = false;
+        c.setParams(p);
+        c.reset();
+        auto x = sine(997.0, sr, 4096, 0.5f);   // -6 dBFS, well under the knee
+        const auto dry = x;
+        float *ch[1] = { x.data() };
+        AudioBuffer b{ ch, 1, 4096 };
+        c.process(b);
+        double worst = 0.0;
+        for (size_t i = 0; i < x.size(); ++i)
+            worst = std::max(worst, double(std::fabs(x[i] - dry[i])));
+        std::printf("    below the knee: worst deviation %.2e\n", worst);
+        check(worst < 1e-7, "material under the knee passes through untouched");
+    }
+}
+
+void testNightMode()
+{
+    std::printf("\n[night mode]\n");
+
+    // The five published curves, checked against the ratios Dolby documents.
+    // Levels are dB relative to the reference; a ratio of R means R dB in makes
+    // one dB out, so the gain slope is 1 - 1/R.
+    // `probe` is a level inside that profile's boost slope -- the profiles put
+    // their boost regions in different places, which is most of what tells them
+    // apart, so one probe level cannot serve all five.
+    struct Case { int profile; const char *name; float boostRatio; float maxBoost;
+                  float cutRatio; float probe; };
+    const Case cases[] = {
+        { DynamicRange::kProfileFilmStandard,  "Film Standard",  2.0f,  6.0f, 20.0f,  -6.0f },
+        { DynamicRange::kProfileFilmLight,     "Film Light",     2.0f,  6.0f, 20.0f, -16.0f },
+        { DynamicRange::kProfileMusicStandard, "Music Standard", 2.0f, 12.0f, 20.0f, -12.0f },
+        { DynamicRange::kProfileMusicLight,    "Music Light",    2.0f, 12.0f,  2.0f, -22.0f },
+        { DynamicRange::kProfileSpeech,        "Speech",         4.75f, 15.0f, 20.0f, -10.0f },
+    };
+
+    for (const Case &c : cases) {
+        // Maximum boost: the gain a long way below the curve's lowest knot.
+        const float maxBoost = DynamicRange::curveGainDb(c.profile, -80.0f);
+        // Boost ratio, from the slope just above the lowest knot.
+        const float g1 = DynamicRange::curveGainDb(c.profile, c.probe);
+        const float g2 = DynamicRange::curveGainDb(c.profile, c.probe + 1.0f);
+        const float boostRatio = 1.0f / (1.0f + (g2 - g1));
+        // Cut ratio, from the slope at the very top.
+        const float g3 = DynamicRange::curveGainDb(c.profile, 33.0f);
+        const float g4 = DynamicRange::curveGainDb(c.profile, 34.0f);
+        const float cutRatio = 1.0f / (1.0f + (g4 - g3));
+        // The null band: nothing at all happens at the reference level.
+        const float atRef = DynamicRange::curveGainDb(c.profile, 0.0f);
+
+        std::printf("    %-15s max boost %+5.2f dB, boost %.2f:1, cut %.1f:1, at reference %+.2f dB\n",
+                    c.name, maxBoost, boostRatio, cutRatio, atRef);
+        check(std::fabs(maxBoost - c.maxBoost) < 0.3f,
+              std::string(c.name) + " reaches its published maximum boost");
+        check(std::fabs(boostRatio - c.boostRatio) < 0.05f,
+              std::string(c.name) + " boosts at its published ratio");
+        check(std::fabs(cutRatio - c.cutRatio) < 0.5f,
+              std::string(c.name) + " cuts at its published ratio");
+        check(atRef == 0.0f, std::string(c.name) + " leaves the reference level alone");
+    }
+
+    // And it actually compresses: a quiet passage comes up and a loud one comes
+    // down, relative to the same material with the profile switched off.
+    {
+        constexpr double sr = 48000.0;
+        const int n = 48000 * 3;
+        const auto level = [&](float amp, int profile) {
+            DynamicRange d;
+            d.prepare(sr, 1);
+            DynamicRange::Params p;
+            p.profile = profile;
+            p.referenceLufs = -24.0f;
+            d.setParams(p);
+            d.reset();
+            auto x = sine(1000.0, sr, n, amp);
+            float *ch[1] = { x.data() };
+            AudioBuffer b{ ch, 1, n };
+            d.process(b);
+            double sum = 0.0;
+            for (int i = n / 2; i < n; ++i)
+                sum += double(x[size_t(i)]) * double(x[size_t(i)]);
+            return 10.0 * std::log10(sum / double(n / 2) + 1e-30);
+        };
+        const double quietOff = level(0.005f, DynamicRange::kProfileNone);
+        const double quietOn  = level(0.005f, DynamicRange::kProfileSpeech);
+        const double loudOff  = level(0.9f, DynamicRange::kProfileNone);
+        const double loudOn   = level(0.9f, DynamicRange::kProfileSpeech);
+        std::printf("    Speech profile: quiet %+.2f dB, loud %+.2f dB\n",
+                    quietOn - quietOff, loudOn - loudOff);
+        check(quietOn - quietOff > 3.0, "night mode lifts what is too quiet to hear");
+        check(loudOn - loudOff < -3.0, "and holds down what would wake the house");
+    }
+}
+
+void testAutoGain()
+{
+    std::printf("\n[auto volume]\n");
+    constexpr double sr = 48000.0;
+    const int n = int(sr * 30.0);
+
+    {
+        // A signal well below target should be brought up to it.
+        LoudnessLeveller l;
+        l.prepare(sr, 1, n);
+        LoudnessLeveller::Params p;
+        p.targetLufs = -20.0f;
+        p.rateDbPerSec = 5.0f;
+        p.maxGainDb = 25.0f;
+        l.setParams(p);
+        l.reset();
+        auto x = sine(1000.0, sr, n, 0.02f);
+        float *ch[1] = { x.data() };
+        AudioBuffer b{ ch, 1, n };
+        l.process(b);
+        const double lufs = l.lufs();
+        const double gain = double(l.gainDb());
+        std::printf("    input %.1f LUFS -> gain %+.2f dB (target -20)\n", lufs, gain);
+        check(std::fabs(lufs + gain - (-20.0)) < 0.5,
+              fmt("the leveller converges on its target (%.2f LUFS)", lufs + gain));
+    }
+
+    {
+        // And it must not get there faster than it was told to. The rate limit
+        // is the entire difference between a leveller and a compressor.
+        LoudnessLeveller l;
+        l.prepare(sr, 1, n);
+        LoudnessLeveller::Params p;
+        p.targetLufs = -20.0f;
+        p.rateDbPerSec = 2.0f;
+        p.windowDb = 0.0f;          // no dead zone, so the rate is the only limit
+        p.maxGainDb = 25.0f;
+        l.setParams(p);
+        l.reset();
+
+        auto x = sine(1000.0, sr, n, 0.02f);
+        double worstRate = 0.0;
+        float prev = l.gainDb();
+        const int chunk = int(sr * 0.1);
+        for (int off = 0; off + chunk <= n; off += chunk) {
+            float *c2[1] = { x.data() + off };
+            AudioBuffer b{ c2, 1, chunk };
+            l.process(b);
+            const float now = l.gainDb();
+            worstRate = std::max(worstRate, std::fabs(double(now - prev)) / 0.1);
+            prev = now;
+        }
+        // Turning *up* is deliberately a quarter of the configured rate: a
+        // leveller that lifts quickly rides the noise floor up with the music,
+        // which is what people hear as pumping. So the bound here is 0.5 dB/s,
+        // not the 2 dB/s the control says.
+        std::printf("    fastest gain movement while lifting: %.4f dB/s (limit 0.5)\n",
+                    worstRate);
+        check(worstRate <= 0.5 * 1.02,
+              fmt("the gain never moves faster than the rate limit (%.2f dB/s)", worstRate));
+    }
+}
+
+// Peak of the reconstructed waveform, by windowed-sinc interpolation.
+//
+// Deliberately not the engine's own oversampler: a true-peak test that
+// measures with the same filter the limiter detects with would only prove the
+// filter agrees with itself.
+double truePeakOf(const std::vector<float> &x, int factor = 8, int taps = 64)
+{
+    const int n = int(x.size());
+    double peak = 0.0;
+    for (int i = 0; i < n; ++i)
+        peak = std::max(peak, std::fabs(double(x[size_t(i)])));
+
+    for (int i = taps; i < n - taps; ++i) {
+        for (int s = 1; s < factor; ++s) {
+            const double frac = double(s) / double(factor);
+            double acc = 0.0;
+            for (int k = -taps; k < taps; ++k) {
+                const double t = double(k) - frac;
+                double sinc;
+                if (std::fabs(t) < 1e-9) {
+                    sinc = 1.0;
+                } else {
+                    const double a = 3.14159265358979 * t;
+                    sinc = std::sin(a) / a;
+                }
+                // Blackman, over the whole 2*taps span.
+                const double u = (double(k + taps)) / double(2 * taps - 1);
+                const double w = 0.42 - 0.5 * std::cos(2.0 * 3.14159265358979 * u)
+                                 + 0.08 * std::cos(4.0 * 3.14159265358979 * u);
+                acc += double(x[size_t(i + k)]) * sinc * w;
+            }
+            peak = std::max(peak, std::fabs(acc));
+        }
+    }
+    return peak;
+}
+
+void testTruePeak()
+{
+    std::printf("\n[true peak]\n");
+    constexpr double sr = 48000.0;
+    const int n = 4096;
+
+    // A quarter-rate sine, offset an eighth of a period. Every sample lands at
+    // +/-0.707 of the amplitude while the waveform between them reaches the
+    // full amplitude -- 3 dB of peak that a sample-domain meter cannot see.
+    std::vector<float> src(size_t(n), 0.0f);
+    for (int i = 0; i < n; ++i)
+        src[size_t(i)] = float(0.99 * std::sin(3.14159265358979 * 0.5 * double(i)
+                                               + 3.14159265358979 * 0.25));
+
+    const auto run = [&](bool truePeak) {
+        Limiter l;
+        l.prepare(sr, 2, n);
+        Limiter::Params p;
+        p.thresholdDb = -1.0f;
+        p.releaseMs = 50.0f;
+        p.lookaheadMs = 1.5f;
+        p.truePeak = truePeak;
+        l.setParams(p);
+        l.reset();
+        auto a = src;
+        auto b = src;
+        float *ch[2] = { a.data(), b.data() };
+        AudioBuffer buf{ ch, 2, n };
+        l.process(buf);
+        // Skip the look-ahead priming region.
+        std::vector<float> tail(a.begin() + 512, a.end());
+        return 20.0 * std::log10(truePeakOf(tail) + 1e-12);
+    };
+
+    const double off = run(false);
+    const double on = run(true);
+    std::printf("    -1.0 dBFS ceiling, inter-sample peaks: sample mode %+.2f dBTP, "
+                "true-peak mode %+.2f dBTP\n", off, on);
+    // The exact overshoot is signal-dependent -- this construction is a
+    // near-worst case and still only reaches 0.9 dB. What is asserted is that
+    // the sample-domain limiter measurably misses its own ceiling, and that
+    // switching the mode on recovers it.
+    check(off > -1.0 + 0.5,
+          fmt("a sample-domain ceiling really is exceeded between the samples (%.2f dBTP)", off));
+    check(on <= -1.0 + 0.25,
+          fmt("true-peak mode holds the ceiling where it counts (%.2f dBTP)", on));
+    check(off - on > 0.5,
+          fmt("and the mode is what makes the difference (%.2f dB)", off - on));
+}
+
+void testMonoCompatibility()
+{
+    std::printf("\n[mono compatibility]\n");
+    constexpr double sr = 48000.0;
+    Fft fft(4096);
+    const int len = fft.realSize();
+
+    // Response of each output channel, and of their sum, for a mono input.
+    const auto measure = [&](float width, float phaseAmount) {
+        StereoWidener w;
+        w.prepare(sr);
+        StereoWidener::Params p;
+        p.width = width;
+        p.monoBelowHz = 0.0f;
+        p.phaseAmount = phaseAmount;
+        w.setParams(p);
+        w.reset();
+
+        std::vector<float> l(size_t(len), 0.0f), r(size_t(len), 0.0f);
+        l[8] = 1.0f;
+        r[8] = 1.0f;                   // mono impulse
+        float *ch[2] = { l.data(), r.data() };
+        AudioBuffer b{ ch, 2, len };
+        w.process(b);
+
+        // Two arguments, again: `vector<float> sum(size_t(len));` declares a
+        // function. Eighth time in this tree.
+        std::vector<float> sum(size_t(len), 0.0f);
+        for (int i = 0; i < len; ++i)
+            sum[size_t(i)] = l[size_t(i)] + r[size_t(i)];
+
+        const auto spectrum = [&](const std::vector<float> &x) {
+            std::vector<std::complex<float>> spec(size_t(fft.realBins()));
+            std::vector<float> copy = x;
+            fft.realForward(copy.data(), spec.data());
+            return spec;
+        };
+        return std::make_pair(spectrum(l), spectrum(sum));
+    };
+
+    const auto band = [&](const std::vector<std::complex<float>> &spec, double ref) {
+        double lo = 1e9, hi = -1e9, worstHz = 0.0;
+        for (size_t k = 1; k < spec.size(); ++k) {
+            const double hz = double(k) * sr / double(len);
+            if (hz < 50.0 || hz > 18000.0)
+                continue;
+            const double db = 20.0 * std::log10(double(std::abs(spec[k])) / ref + 1e-20);
+            if (db < lo) { lo = db; worstHz = hz; }
+            hi = std::max(hi, db);
+        }
+        return std::make_tuple(lo, hi, worstHz);
+    };
+
+    // Side gain alone is exactly mono-safe: it only ever scales a signal that
+    // vanishes from the sum.
+    {
+        const auto [chan, sum] = measure(1.8f, 0.0f);
+        const auto [slo, shi, shz] = band(sum, 2.0);
+        std::printf("    side gain 1.8: mono sum %+.3f .. %+.3f dB\n", slo, shi);
+        check(std::fabs(slo) < 0.01 && std::fabs(shi) < 0.01,
+              fmt("a side-gain widener cannot damage a mono fold (%.3f dB at %.0f Hz)",
+                  slo, shz));
+        (void)chan;
+    }
+
+    // The phase widener is the one that can widen a mono source at all -- and
+    // the price is a bounded ripple in the sum. Bounded is the point: an
+    // independent filter pair, which is what "decorrelation" usually means,
+    // nulls completely wherever the two phases differ by 180 degrees.
+    {
+        const auto [chan, sum] = measure(1.0f, 1.0f);
+        const auto [clo, chi, chz] = band(chan, 1.0);
+        const auto [slo, shi, shz] = band(sum, 2.0);
+        std::printf("    phase widener: per channel %+.3f .. %+.3f dB, "
+                    "mono sum %+.3f .. %+.3f dB (worst at %.0f Hz)\n",
+                    clo, chi, slo, shi, shz);
+        check(std::fabs(clo) < 0.1 && std::fabs(chi) < 0.1,
+              fmt("each channel stays flat (%.3f .. %.3f dB at %.0f Hz)", clo, chi, chz));
+        check(slo > -3.0 && shi < 0.05,
+              fmt("and the mono fold loses a bounded amount (%.3f dB at %.0f Hz)",
+                  slo, shz));
+    }
+
+    // At zero it is the identity, delay aside -- an effect that colours its own
+    // neutral setting is a trap.
+    {
+        const auto [chan, sum] = measure(1.0f, 0.0f);
+        const auto [clo, chi, chz] = band(chan, 1.0);
+        std::printf("    neutral: per channel %+.4f .. %+.4f dB\n", clo, chi);
+        check(std::fabs(clo) < 1e-3 && std::fabs(chi) < 1e-3,
+              fmt("neutral is exactly neutral (%.4f dB at %.0f Hz)", clo, chz));
+        (void)sum;
+    }
+}
+
 void testTube()
 {
     std::printf("\n[tube saturation]\n");
@@ -656,10 +1394,49 @@ void testVirtualBass()
 
     std::printf("    45 Hz in: 2nd harmonic %.5f -> %.5f, 3rd %.5f\n",
                 before2, after2, after3);
-    check(after2 > before2 * 20.0 + 1e-4,
+    // The assertion is on the third harmonic, not the second. Two reasons,
+    // and they agree: the second harmonic of a 45 Hz tone is at 90 Hz, which
+    // is below this stage's own 100 Hz harmonic high-pass and is therefore
+    // filtered out on purpose; and the dominance region for residue pitch is
+    // harmonics three to five, so the third is the one carrying the illusion.
+    check(after3 > before2 * 20.0 + 1e-4,
           "harmonics of the missing fundamental are synthesised");
-    check(after3 > 1e-4, "the series extends past the second harmonic");
+    check(after2 > 1e-4, "the series includes the second harmonic");
     check(fund > 1e-3, "the original low tone is still there when not removed");
+
+    // Harmonic balance must not depend on how loud the track was mastered.
+    //
+    // A memoryless nonlinearity's harmonic *ratios* are a function of how hard
+    // it is driven, so without a level normaliser in front of the shaper this
+    // stage's timbre -- and its apparent strength -- slide with programme
+    // level. Published measurements of a comparable shaper put the drift at
+    // 26.6 dB on the second harmonic over 21 dB of input level. This runs the
+    // same tone 20 dB apart and compares the ratios between harmonics.
+    {
+        const auto ratios = [&](float amp) {
+            VirtualBass v;
+            v.prepare(sr, 1);
+            v.setParams(p);
+            v.reset();
+            auto sg = sine(f, sr, n, amp);
+            float *cc[1] = { sg.data() };
+            AudioBuffer bb{ cc, 1, n };
+            v.process(bb);
+            const double h3 = magnitudeAt(sg, 3 * f, sr, skip);
+            const double h4 = magnitudeAt(sg, 4 * f, sr, skip);
+            const double h5 = magnitudeAt(sg, 5 * f, sr, skip);
+            return std::make_pair(h4 / (h3 + 1e-12), h5 / (h3 + 1e-12));
+        };
+        const auto loud = ratios(0.5f);
+        const auto quiet = ratios(0.05f);        // 20 dB down
+        const double d4 = 20.0 * std::log10(loud.first / (quiet.first + 1e-12));
+        const double d5 = 20.0 * std::log10(loud.second / (quiet.second + 1e-12));
+        std::printf("    harmonic balance over 20 dB of level: 4th %+.2f dB, 5th %+.2f dB\n",
+                    d4, d5);
+        check(std::fabs(d4) < 3.0 && std::fabs(d5) < 3.0,
+              fmt("the shaper's harmonic balance holds over 20 dB of level "
+                  "(%+.2f dB, %+.2f dB)", d4, d5));
+    }
 
     // With removeOriginal the fundamental should be strongly attenuated -- that
     // is the mode for a speaker that cannot reproduce it at all.
@@ -850,6 +1627,40 @@ void testMultiband()
     }
     std::printf("    bypassed deviation: worst %.3f dB at %.0f Hz\n", worstDb, worstFreq);
     check(std::fabs(worstDb) < 0.6, "all bands at 1:1 is transparent");
+
+    // The three-band tree reconstructs flat -- measured across the spectrum,
+    // not sampled at seven tones.
+    //
+    // A two-crossover tree is not symmetric: the high band leaves through two
+    // cascaded Linkwitz-Riley sections and the low band through none, so their
+    // phases do not line up and the sum dips at the lower crossover. process()
+    // compensates by running the low band through the second crossover's
+    // allpass pair, and that compensation had no test of its own -- which is
+    // how a correct implementation quietly becomes an incorrect one.
+    {
+        mb.reset();
+        Fft fft(8192);
+        const int len = fft.realSize();
+        std::vector<float> imp(size_t(len), 0.0f), imp2(size_t(len), 0.0f);
+        imp[0] = 1.0f;
+        float *ich[2] = { imp.data(), imp2.data() };
+        AudioBuffer ib{ ich, 2, len };
+        mb.process(ib);
+
+        std::vector<std::complex<float>> spec(size_t(fft.realBins()));
+        fft.realForward(imp.data(), spec.data());
+
+        double worst = 0.0, worstAt = 0.0;
+        for (size_t k = 1; k < spec.size(); ++k) {
+            const double hz = double(k) * sr / double(len);
+            if (hz < 30.0 || hz > 18000.0)
+                continue;
+            const double db = 20.0 * std::log10(double(std::abs(spec[k])) + 1e-20);
+            if (std::fabs(db) > std::fabs(worst)) { worst = db; worstAt = hz; }
+        }
+        check(std::fabs(worst) < 0.10,
+              fmt("the three-band tree sums flat: worst %.4f dB at %.0f Hz", worst, worstAt));
+    }
 
     // A loud bass tone must not duck the treble -- the entire point.
     {
@@ -2255,6 +3066,74 @@ void testGraphicEq()
 
 // ---------------------------------------------------------------- chain order
 
+void testMasterBypass()
+{
+    std::printf("\n[master bypass]\n");
+    constexpr double sr = 48000.0;
+    const int n = 2048;
+
+    // Something audible to switch out: an equalizer with real gain in it.
+    ParamBlock p = transparentBlock();
+    p.enableMask = kEnEqualizer | kEnTube;
+    p.eq.bandCount = 2;
+    p.eq.band[0] = eqBand(FilterKind::PK, 1000.0, 9.0, 1.0);
+    p.eq.band[1] = eqBand(FilterKind::HS, 6000.0, -6.0, 0.7);
+    p.tube.drive = 6.0f;
+    p.tube.mix = 0.8f;
+    p = sanitise(p);
+
+    const auto run = [&](const ParamBlock &block) {
+        EffectChain chain;
+        chain.prepare(sr, 2, n);
+        chain.apply(block);
+        auto l = sine(997.0, sr, n, 0.4f);
+        auto r = l;
+        float *ch[2] = { l.data(), r.data() };
+        AudioBuffer b{ ch, 2, n };
+        chain.process(b);
+        return std::make_pair(l, chain.activeMask());
+    };
+
+    const auto dry = sine(997.0, sr, n, 0.4f);
+    const auto [wet, wetMask] = run(p);
+
+    double worstWet = 0.0;
+    for (size_t i = 0; i < wet.size(); ++i)
+        worstWet = std::max(worstWet, double(std::fabs(wet[i] - dry[i])));
+    std::printf("    with the rack running: mask 0x%05X, worst change %.4f\n",
+                wetMask, worstWet);
+    check(worstWet > 1e-3, "the test block actually does something");
+
+    // Bypassed: bit-exact passthrough, and the switch positions untouched.
+    ParamBlock bp = p;
+    bp.flags |= kPfBypass;
+    bp = sanitise(bp);
+    const auto [byp, bypMask] = run(bp);
+
+    int differing = 0;
+    for (size_t i = 0; i < byp.size(); ++i)
+        if (byp[i] != dry[i])
+            ++differing;
+    std::printf("    bypassed: mask 0x%05X, enableMask still 0x%05X, %d samples differ\n",
+                bypMask, bp.enableMask, differing);
+    check(bypMask == 0u, "the bypass switches every stage out");
+    check(differing == 0, fmt("and does it bit-exactly (%.0f samples differ)",
+                              double(differing)));
+
+    // The point of a flag rather than an empty mask: this file is also the
+    // session store, so the switch positions have to survive being bypassed.
+    check(bp.enableMask == p.enableMask,
+          "a bypassed block still remembers which effects are switched on");
+    check((sanitise(bp).flags & kPfBypass) != 0u, "the flag survives sanitising");
+
+    // And an unknown flag bit is not a configuration.
+    ParamBlock junk = p;
+    junk.flags = 0xFFFFFFFFu;
+    check((sanitise(junk).flags & ~uint32_t(kPfKnown)) == 0u,
+          "unknown header flags are dropped");
+}
+
+
 void testChainOrder()
 {
     std::printf("\n[chain order]\n");
@@ -2561,7 +3440,7 @@ void testParamBlock()
 {
     std::printf("\n[parameter block]\n");
 
-    check(sizeof(ParamBlock) == 1300, fmt("wire size is %.0f bytes", double(sizeof(ParamBlock))));
+    check(sizeof(ParamBlock) == 1388, fmt("wire size is %.0f bytes", double(sizeof(ParamBlock))));
     check(sizeof(StatusBlock) == 296, "status block is 296 bytes");
 
     // The transparent default must not be the dsp defaults. This is the test
@@ -2856,6 +3735,7 @@ int runTests()
     testReverb();
     testCrossover();
     testTube();
+    testDryWetAlignment();
     testVirtualBass();
     testExciter();
     testStereo();
@@ -2869,7 +3749,15 @@ int runTests()
     testLoudness();
     testLimiter();
     testDynamicBass();
+    testLoudnessMeter();
+    testTransient();
+    testClipper();
+    testNightMode();
+    testAutoGain();
+    testTruePeak();
+    testMonoCompatibility();
     testChainOrder();
+    testMasterBypass();
     testImpulseAnalysis();
     testImpulseBlob();
     testParamBlock();
@@ -2968,7 +3856,11 @@ int runBench()
         { kEnCrossfeed,   "crossfeed" },
         { kEnMatrix,      "matrix" },
         { kEnDelay,       "delay" },
-        { kEnLimiter,     "limiter" },
+        { kEnLimiter,     "limiter (true peak)" },
+        { kEnTransient,   "transient shaper" },
+        { kEnClipper,     "clipper" },
+        { kEnAutoGain,    "auto volume" },
+        { kEnNightMode,   "night mode" },
     };
 
     for (const Case &c : cases) {
@@ -3019,6 +3911,12 @@ int runBench()
         base.loudness.amount = 1.0f;
         base.limiter.thresholdDb = -3.0f;
         base.limiter.gainDb = 12.0f;
+        base.transient.attack = 0.6f;
+        base.transient.sustain = -0.3f;
+        base.clipper.driveDb = 6.0f;
+        base.clipper.ceilingDb = -1.0f;
+        base.autoGain.targetLufs = -18.0f;
+        base.nightMode.profile = DynamicRange::kProfileFilmStandard;
         base.delay.ms[0] = 2.0f;
         base.matrix.gain[0][1] = 0.2f;
 

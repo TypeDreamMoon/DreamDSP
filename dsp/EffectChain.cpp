@@ -28,7 +28,11 @@ void EffectChain::prepare(double sampleRate, int channels, int maxFrames)
     m_conv.prepare(sampleRate, channels, 64);
     m_matrix.prepare(sampleRate, channels, maxFrames);
     m_delay.prepare(sampleRate, channels, maxFrames);
+    m_clipper.prepare(sampleRate, channels);
     m_limiter.prepare(sampleRate, channels, maxFrames);
+    m_transient.prepare(sampleRate, channels);
+    m_autoGain.prepare(sampleRate, channels, maxFrames);
+    m_nightMode.prepare(sampleRate, channels);
 
     // Zeroed rather than value-initialised: the Params members carry default
     // member initialisers, and `m_applied = {}` would seed an always-on reverb.
@@ -57,7 +61,11 @@ void EffectChain::reset()
     m_conv.reset();
     m_matrix.reset();
     m_delay.reset();
+    m_clipper.reset();
     m_limiter.reset();
+    m_transient.reset();
+    m_autoGain.reset();
+    m_nightMode.reset();
 }
 
 void EffectChain::apply(ParamBlock p) noexcept
@@ -100,6 +108,10 @@ void EffectChain::apply(ParamBlock p) noexcept
     DREAMDSP_STAGE(kEnMatrix, matrix, m_matrix)
     DREAMDSP_STAGE(kEnDelay, delay, m_delay)
     DREAMDSP_STAGE(kEnLimiter, limiter, m_limiter)
+    DREAMDSP_STAGE(kEnTransient, transient, m_transient)
+    DREAMDSP_STAGE(kEnClipper, clipper, m_clipper)
+    DREAMDSP_STAGE(kEnAutoGain, autoGain, m_autoGain)
+    DREAMDSP_STAGE(kEnNightMode, nightMode, m_nightMode)
 
 #undef DREAMDSP_STAGE
 
@@ -127,6 +139,7 @@ void EffectChain::apply(ParamBlock p) noexcept
     std::memcpy(m_order, p.order, sizeof m_order);
 
     m_applied.enableMask = p.enableMask;
+    m_applied.flags = p.flags;
     m_applied.generation = p.generation;
 }
 
@@ -170,6 +183,10 @@ void EffectChain::process(const AudioBuffer &buf)
         case kStageConvolution: if (mask & kEnConvolution) m_conv.process(buf);      break;
         case kStageDelay:       if (mask & kEnDelay)       m_delay.process(buf);     break;
         case kStageLimiter:     if (mask & kEnLimiter)     m_limiter.process(buf);   break;
+        case kStageTransient:   if (mask & kEnTransient)   m_transient.process(buf); break;
+        case kStageClipper:     if (mask & kEnClipper)     m_clipper.process(buf);   break;
+        case kStageAutoGain:    if (mask & kEnAutoGain)    m_autoGain.process(buf);  break;
+        case kStageNightMode:   if (mask & kEnNightMode)   m_nightMode.process(buf); break;
         default: break;
         }
     }

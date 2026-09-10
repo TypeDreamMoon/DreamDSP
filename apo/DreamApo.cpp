@@ -362,10 +362,18 @@ HRESULT DreamApo::LockForProcess(UINT32 u32NumInputConnections,
         std::memset(&initial, 0, sizeof initial);
         m_channel->slots().read(&initial);
         m_chain.convolution().setArmed(initial.convolution.irGeneration != 0u);
-        if (m_chain.convolution().armed()) {
-            trace(L"convolution armed, latency samples",
-                  m_chain.latencySamples());
-        }
+
+        // Install the block before GetLatency is asked, not only on the first
+        // buffer. Convolution is not the only stage whose latency depends on a
+        // parameter -- the limiter's look-ahead and the phase widener's delay
+        // do too -- and the engine asks for the figure once. Applying it here
+        // means what GetLatency reports is what the chain is actually about to
+        // do; the first APOProcess then re-applies the same block and finds
+        // nothing to change.
+        m_pending = initial;
+        m_chain.apply(m_pending);
+
+        trace(L"initial params applied, latency samples", m_chain.latencySamples());
     }
 
     m_locked = true;

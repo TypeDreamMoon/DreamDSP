@@ -68,7 +68,12 @@ Everything runs in DreamDSP's own APO.
 | Psychoacoustic virtual bass | done |
 | Stereo widener, crossfeed | done |
 | Dynamic bass boost (level-following) | done |
-| Look-ahead peak limiter | done |
+| Look-ahead peak limiter, true-peak (BS.1770, 4x) | done |
+| Soft clipper with a quadratic knee, ahead of the limiter | done |
+| Transient shaper (attack / sustain, no threshold) | done |
+| Auto volume (BS.1770 loudness levelling) | done |
+| Night mode (the five Dolby DRC curves) | done |
+| Phantom-source widening (Zotter-Frank) | done |
 | User-orderable chain | done |
 | Channel routing matrix (APO `Copy:`) | done |
 | Per-channel delay (APO `Delay:`), sub-sample | done |
@@ -93,10 +98,47 @@ formula, reproduced exactly.
 
 **The chain order is the user's.** Stages run in whatever order the chain
 editor puts them in; `kDefaultOrder` is a default, not a constraint. The order
-travels as a permutation of the sixteen stage ids, and the sanitiser replaces
+travels as a permutation of the twenty stage ids, and the sanitiser replaces
 anything that is not a permutation wholesale rather than patching it -- a
 duplicate would run a stage twice and an omission would silently drop an effect
 whose switch says it is on.
+
+**The four newest stages came out of a measurement exercise**, written up in
+[`docs/effects-research.md`](docs/effects-research.md). Three of them exist
+because the measurement said something a datasheet would not:
+
+- **The clipper goes before the limiter** because at one decibel of peak
+  reduction a clipper adds 0.1 dB of amplitude modulation to sustained content
+  where a look-ahead limiter adds 17 to 20 dB, and delivers more loudness for
+  the same ceiling. The reason is duty cycle: clipping touches 0.02% of samples
+  in bursts under three samples long, each masked by the transient that caused
+  it. This only holds for a near-hard knee -- `tanh` and friends add as much
+  modulation as the limiter, because they compress everything all the time.
+- **Its knee is one decibel wide** because that is the cheapest decibel in the
+  rack: measured here, 51.5 dB of alias-to-signal becomes 69.0 dB for one
+  hundredth of a decibel of loudness. Adding 2x oversampling takes it to
+  82.6 dB.
+- **The transient shaper has no threshold** because its gain comes from the
+  difference between two envelopes of the same signal, which is a ratio and
+  therefore scale-invariant. Measured, the same drum burst 20 dB apart draws
+  gain trajectories 0.000 dB apart -- something a compressor cannot do, because
+  its gain is a function of level minus threshold. It does need a *gate*, which
+  is a different thing: level independence means it would chase a -75 dBFS room
+  tone exactly as hard as a -30 dBFS one.
+- **Night mode's curves are not from the AC-3 specification**, which
+  standardises only the transport of the gain word. They are Dolby's five
+  published profiles, taken from ETSI TS 103 190-1 Table 161 -- which also
+  carries the time constants Dolby's own metadata guide omits, and which
+  corrects two arithmetic slips in that guide's Film Light row. The self-test
+  checks all five against their documented ratios.
+
+The same exercise found four defects in stages that already shipped: a
+half-wet tube stage was notching itself by 17.8 dB at 18.7 kHz (the dry and wet
+paths were mixed on opposite sides of an oversampler); the exciter ran at 20 dB
+of alias-to-signal where 4x oversampling gives 89; the virtual bass's harmonic
+balance drifted 18.5 dB over 20 dB of programme level; and the limiter's
+"threshold is a guarantee" was true only of the sample values, with the
+reconstructed waveform exceeding it by 0.90 dBTP.
 
 **The graphic equalizer is a filter bank, not an FIR.** JamesDSP and Equalizer
 APO both realise arbitrary magnitude curves with an FIR; this uses 31 ISO
