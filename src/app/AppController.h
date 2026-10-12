@@ -490,6 +490,8 @@ private:
     // change, because those fire on every step of every slider drag.
     quint32 m_announcedStages = 0;
     void announceStagesIfChanged();
+    // A stage that has nothing to process even when switched on.
+    bool stageEmpty(int stageId) const;
     bool m_engaged = false;
     bool m_dirty = false;
     bool m_restoring = false;

@@ -245,7 +245,7 @@ HusWindow {
                     for (let i = 0; i < c.length; ++i) {
                         if (c[i].page !== page) continue;
                         ++all;
-                        if (c[i].on) ++on;
+                        if (c[i].working) ++on;
                     }
                     return '已开启 ' + on + ' / ' + all;
                 }
@@ -265,14 +265,15 @@ HusWindow {
                     text: {
                         switch (win.page) {
                         case 0: return '参数均衡 ' + (AppController.eqEnabled ? '开' : '关')
-                                       + ' · 图形均衡 ' + (AppController.graphicEnabled ? '开' : '关');
+                                       + ' · 图形均衡 ' + (AppController.graphicEnabled && AppController.graphicLoaded ? '开'
+                                                       : AppController.graphicLoaded ? '关' : '未载入曲线');
                         case 1: return parent.stagesOn(1);
                         case 2: return AppController.convolutionEnabled ? '脉冲响应已启用' : '没有启用脉冲响应';
                         case 3: return parent.stagesOn(3);
                         case 4: {
                             const c = AppController.chain;
                             return '信号从上往下依次经过 · 已开启 '
-                                   + c.filter(x => x.on).length + ' / ' + c.length;
+                                   + c.filter(x => x.working).length + ' / ' + c.length;
                         }
                         case 5: return '导入耳机的频响校正曲线';
                         case 6: return 'DreamDSP 是否真的在处理你听到的声音';

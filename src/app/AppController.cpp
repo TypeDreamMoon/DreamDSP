@@ -1656,6 +1656,14 @@ void AppController::setGraphicEnabled(bool on)
 {
     if (m_graphicEnabled == on)
         return;
+    // Switching on a bank of 31 zeroes did nothing and still read as "on"
+    // everywhere a stage is counted. Off is always allowed; on needs a curve.
+    if (on && !graphicLoaded()) {
+        setMessage(QStringLiteral("图形均衡还没有曲线 —— 先粘贴或拖入一条 GraphicEQ 曲线"));
+        emit graphicChanged();   // put the switch that asked back where it was
+        emit chainChanged();
+        return;
+    }
     m_graphicEnabled = on;
     emit graphicChanged();
     emit chainChanged();
@@ -1729,6 +1737,11 @@ QVariantList AppController::chain() const
             { QStringLiteral("hint"), QString::fromUtf8(s.hint) },
             { QStringLiteral("page"), s.page },
             { QStringLiteral("on"), stageEnabled(int(id)) },
+            // Switched on but with nothing to do: only the graphic equalizer
+            // can be in this state, from a session saved before a curve was
+            // required. Shown as such, and not counted as working.
+            { QStringLiteral("empty"), stageEmpty(int(id)) },
+            { QStringLiteral("working"), stageEnabled(int(id)) && !stageEmpty(int(id)) },
         });
     }
     return out;
@@ -1740,10 +1753,18 @@ void AppController::announceStagesIfChanged()
     for (int i = 0; i < dsp::kStageCount; ++i)
         if (stageEnabled(i))
             mask |= 1u << i;
+    // Loading or clearing a curve changes what the chain shows too.
+    if (graphicLoaded())
+        mask |= 1u << 31;
     if (mask == m_announcedStages)
         return;
     m_announcedStages = mask;
     emit chainChanged();
+}
+
+bool AppController::stageEmpty(int stageId) const
+{
+    return stageId == dsp::kStageGraphic && !graphicLoaded();
 }
 
 bool AppController::chainIsDefault() const

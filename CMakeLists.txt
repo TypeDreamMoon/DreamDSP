@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(DreamDSP VERSION 0.3.3 LANGUAGES CXX)
+project(DreamDSP VERSION 0.3.4 LANGUAGES CXX)
 
 # The version comes from the git tag, not from the line above -- that one is
 # only the fallback for a tree with no tags at all. See cmake/Version.cmake.

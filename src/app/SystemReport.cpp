@@ -198,7 +198,7 @@ QVariantMap AppController::systemReport()
     QStringList enabledNames;
     for (const QVariant &v : this->chain()) {
         const QVariantMap m = v.toMap();
-        if (m.value(QStringLiteral("on")).toBool()) {
+        if (m.value(QStringLiteral("working")).toBool()) {
             ++enabledCount;
             enabledNames << m.value(QStringLiteral("name")).toString();
         }

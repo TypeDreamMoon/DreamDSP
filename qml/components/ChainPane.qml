@@ -203,7 +203,7 @@ Item {
                                     spacing: 0
                                     Layout.fillWidth: true
                                     Layout.minimumWidth: 0
-                                    opacity: row.modelData.on ? 1.0 : 0.45
+                                    opacity: row.modelData.working ? 1.0 : 0.45
 
                                     HusText {
                                         text: row.modelData.name
@@ -213,9 +213,12 @@ Item {
                                         Layout.fillWidth: true
                                     }
                                     HusText {
-                                        text: row.modelData.hint
+                                        text: row.modelData.empty ? '还没有载入曲线 —— 开着也不会改变声音'
+                                                                  : row.modelData.hint
                                         font.pixelSize: 11
-                                        opacity: 0.55
+                                        color: row.modelData.empty ? HusTheme.Primary.colorWarning
+                                                                   : HusTheme.Primary.colorTextBase
+                                        opacity: row.modelData.empty ? 0.9 : 0.55
                                         elide: Text.ElideRight
                                         Layout.fillWidth: true
                                     }
