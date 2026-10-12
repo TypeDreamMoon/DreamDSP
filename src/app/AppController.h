@@ -481,6 +481,15 @@ private:
     double m_preamp = 0.0;
     bool m_eqEnabled = true;
     bool m_masterEnabled = true;
+
+    // Which stages were switched on when the chain was last announced. The
+    // chain page and the page headers read the switches through chain(), and
+    // nothing told them when a switch moved anywhere but on the chain page
+    // itself -- so a switch flipped on the effects page left the chain page
+    // showing the old position. Compared rather than emitted on every model
+    // change, because those fire on every step of every slider drag.
+    quint32 m_announcedStages = 0;
+    void announceStagesIfChanged();
     bool m_engaged = false;
     bool m_dirty = false;
     bool m_restoring = false;

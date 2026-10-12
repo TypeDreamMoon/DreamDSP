@@ -3,9 +3,13 @@ import QtQuick.Layouts
 import HuskarUI.Basic
 import DreamDSP
 
-// Preset row: pick one to load, name-and-save the current curve, delete.
-// Presets living in Equalizer APO's config directory (i.e. an existing Peace
-// install's) are listed too, but read-only.
+// The equalizer's own presets: pick one to load, save over it, save it under
+// a new name, delete it. Presets living in Equalizer APO's config directory
+// (i.e. an existing Peace install's) are listed too, but read-only.
+//
+// The whole-application presets used to share this row and its name field,
+// which made it impossible to tell which button saved what. They are in the
+// header now (FullPresetButton): they are not an equalizer thing.
 RowLayout {
     id: root
 
@@ -14,13 +18,15 @@ RowLayout {
     // Rebuild the plain array HusSelect wants whenever the store changes.
     property var entries: []
 
-    // Presets that keep everything -- bands, effects, convolution, AutoEQ --
-    // rather than only the bands, which is all the .peace format can hold.
-    property var fullEntries: []
+    // Typing a new name replaces the selector until it is saved or abandoned.
+    property bool naming: false
+
+    readonly property var selected:
+        presetSelect.currentIndex >= 0 && presetSelect.currentIndex < entries.length
+        ? entries[presetSelect.currentIndex] : null
 
     function reload() {
         entries = AppController.presets.entries();
-        fullEntries = AppController.fullPresets();
         // Assigning a model makes ComboBox write currentIndex itself, which
         // breaks any declarative binding on it -- so drive it imperatively,
         // after the model change has settled.
@@ -40,6 +46,21 @@ RowLayout {
         presetSelect.currentIndex = found;
     }
 
+    function startNaming() {
+        nameField.text = AppController.currentPreset;
+        naming = true;
+        nameField.forceActiveFocus();
+        nameField.selectAll();
+    }
+
+    function commitName() {
+        const name = nameField.text.trim();
+        if (name.length === 0)
+            return;
+        if (AppController.savePreset(name))
+            naming = false;
+    }
+
     Component.onCompleted: reload()
 
     Connections {
@@ -50,117 +71,112 @@ RowLayout {
     Connections {
         target: AppController
         function onCurrentPresetChanged() { root.syncSelection(); }
-        function onFullPresetsChanged() { root.fullEntries = AppController.fullPresets(); }
+    }
+
+    HusIconText {
+        iconSource: HusIcon.SaveOutlined
+        iconSize: 14
+        opacity: 0.55
     }
 
     HusText {
-        text: '预设'
-        font.pixelSize: 12
+        text: '曲线预设'
+        font.pixelSize: Ui.label
         opacity: 0.6
     }
 
     HusSelect {
         id: presetSelect
-        // Both selects share what is left after the fixed controls, so adding
-        // the full-preset row did not simply push the last button off the edge.
+        visible: !root.naming
         Layout.fillWidth: true
-        Layout.minimumWidth: 130
-        Layout.preferredWidth: 200
+        Layout.maximumWidth: 360
+        Layout.minimumWidth: 160
         model: root.entries
         // Start unselected so the placeholder shows -- otherwise the first
         // preset in the list looks active when nothing has been loaded.
         currentIndex: -1
-        placeholderText: root.entries.length > 0 ? '选择预设…' : '暂无预设'
+        placeholderText: root.entries.length > 0 ? '选择预设…' : '暂无预设 —— 调好后点「另存为」'
         onActivated: (index) => AppController.loadPreset(index)
-    }
-
-    HusIconButton {
-        iconSource: HusIcon.DeleteOutlined
-        enabled: presetSelect.currentIndex >= 0
-                 && presetSelect.currentIndex < root.entries.length
-                 && !root.entries[presetSelect.currentIndex].imported
-        onClicked: {
-            if (AppController.deletePreset(presetSelect.currentIndex))
-                presetSelect.currentIndex = -1;
-        }
-    }
-
-    HusDivider {
-        Layout.preferredHeight: 22
-        orientation: Qt.Vertical
     }
 
     HusInput {
         id: nameField
-        Layout.preferredWidth: 120
-        placeholderText: '预设名'
-        text: AppController.currentPreset
-        onAccepted: saveButton.doSave()
+        visible: root.naming
+        Layout.fillWidth: true
+        Layout.maximumWidth: 360
+        Layout.minimumWidth: 160
+        placeholderText: '新预设的名字'
+        onAccepted: root.commitName()
+        Keys.onEscapePressed: root.naming = false
     }
 
+    // Not naming: save over the loaded preset, or start a new one.
     HusButton {
-        id: saveButton
+        visible: !root.naming
         text: '保存'
         type: AppController.dirty ? HusButton.Type_Primary : HusButton.Type_Default
-        enabled: nameField.text.trim().length > 0
+        // Over the loaded preset only, and never over a Peace one: that file
+        // belongs to another program.
+        enabled: root.selected !== null && !root.selected.imported && AppController.dirty
+        onClicked: AppController.savePreset(AppController.currentPreset)
 
-        function doSave() {
-            if (nameField.text.trim().length > 0)
-                AppController.savePreset(nameField.text);
-        }
-        onClicked: doSave()
-    }
-
-    HusDivider {
-        Layout.preferredHeight: 22
-        orientation: Qt.Vertical
-    }
-
-    // The full preset, kept visibly separate from the .peace one. They are not
-    // interchangeable: a .peace file opens in Peace and holds only the bands,
-    // this one holds the whole application and does not.
-    HusSelect {
-        id: fullSelect
-        Layout.fillWidth: true
-        Layout.minimumWidth: 110
-        Layout.preferredWidth: 170
-        model: root.fullEntries
-        textRole: 'name'
-        currentIndex: -1
-        placeholderText: root.fullEntries.length > 0 ? '完整预设…' : '暂无完整预设'
-        onActivated: (index) => {
-            if (index >= 0 && index < root.fullEntries.length)
-                AppController.loadFullPreset(root.fullEntries[index].path);
+        HusToolTip {
+            parent: parent
+            visible: parent.hovered
+            text: root.selected ? '覆盖「' + root.selected.name + '」' : '先选择或另存一个预设'
         }
     }
 
     HusButton {
-        text: '保存全部'
+        visible: !root.naming
+        text: '另存为…'
+        onClicked: root.startNaming()
+    }
+
+    // Naming: confirm or abandon.
+    HusButton {
+        visible: root.naming
+        text: '保存'
+        type: HusButton.Type_Primary
         enabled: nameField.text.trim().length > 0
+        onClicked: root.commitName()
+    }
+
+    HusButton {
+        visible: root.naming
+        text: '取消'
+        type: HusButton.Type_Text
+        onClicked: root.naming = false
+    }
+
+    HusIconButton {
+        visible: !root.naming
+        type: HusButton.Type_Text
+        iconSource: HusIcon.DeleteOutlined
+        enabled: root.selected !== null && !root.selected.imported
         onClicked: {
-            if (nameField.text.trim().length > 0)
-                AppController.saveFullPreset(nameField.text);
+            if (AppController.deletePreset(presetSelect.currentIndex))
+                presetSelect.currentIndex = -1;
         }
 
         HusToolTip {
             parent: parent
             visible: parent.hovered
-            text: '保存均衡器、效果、卷积与 AutoEQ 来源的全部设置'
+            text: '删除选中的预设'
         }
     }
 
-    HusIconButton {
-        iconSource: HusIcon.DeleteOutlined
-        enabled: fullSelect.currentIndex >= 0
-                 && fullSelect.currentIndex < root.fullEntries.length
-        onClicked: {
-            if (AppController.deleteFullPreset(root.fullEntries[fullSelect.currentIndex].path))
-                fullSelect.currentIndex = -1;
-        }
-    }
+    Item { Layout.fillWidth: true }
 
     HusIconButton {
+        type: HusButton.Type_Text
         iconSource: HusIcon.FolderOpenOutlined
         onClicked: AppController.openPresetFolder()
+
+        HusToolTip {
+            parent: parent
+            visible: parent.hovered
+            text: '打开预设文件夹'
+        }
     }
 }

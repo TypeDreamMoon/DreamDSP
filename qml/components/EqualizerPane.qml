@@ -11,15 +11,37 @@ Item {
     // 0 = graphic sliders, 1 = parameter table
     property int bandView: 0
 
+    // The strips are laid out in frequency order, whatever order the bands
+    // are stored in: an AutoEQ import lists them by filter, not by frequency,
+    // and 105, 181, 6.5k, 9.1k, 2.9k across a row reads as noise.
+    property var bandFreqs: []
+    function refreshFreqs() {
+        const out = [];
+        for (let i = 0; i < strips.count; ++i) {
+            const it = strips.itemAt(i);
+            out.push(it ? it.freq : 0);
+        }
+        bandFreqs = out;
+    }
+    function rankOf(i) {
+        if (bandFreqs.length !== strips.count || i >= bandFreqs.length)
+            return i;
+        const f = bandFreqs[i];
+        let r = 0;
+        for (let j = 0; j < bandFreqs.length; ++j)
+            if (bandFreqs[j] < f || (bandFreqs[j] === f && j < i)) ++r;
+        return r;
+    }
+
     ColumnLayout {
         anchors.fill: parent
-        spacing: 12
+        spacing: Ui.gap
 
         PresetBar { Layout.fillWidth: true }
 
         SectionCard {
             Layout.fillWidth: true
-            Layout.preferredHeight: 210
+            Layout.preferredHeight: 250
             title: '频响曲线'
             hint: AppController.spectrumEnabled
                   ? (AppController.spectrumLive ? '预测响应 + 实时频谱' : '实时频谱 · 当前无声音')
@@ -53,6 +75,8 @@ Item {
 
         SectionCard {
             Layout.fillWidth: true
+            collapsible: true
+            active: AppController.graphicEnabled
             title: '图形均衡'
             hint: '31 段 1/3 倍频 —— 贴 AutoEQ 的 GraphicEQ 曲线进来'
 
@@ -209,12 +233,13 @@ Item {
                 currentIndex: root.bandView
 
                 RowLayout {
-                    spacing: 14
+                    spacing: 6
 
                     // The preamp belongs with the bands: it is just another
                     // gain stage in the same chain.
                     ColumnLayout {
                         Layout.fillHeight: true
+                        Layout.preferredWidth: 44
                         spacing: 6
 
                         HusText {
@@ -252,23 +277,42 @@ Item {
 
                     HusDivider {
                         Layout.fillHeight: true
+                        Layout.rightMargin: 8
                         orientation: Qt.Vertical
                     }
 
-                    Repeater {
-                        model: AppController.bands
+                    // Positioned by hand rather than by the row: a layout
+                    // places children in the order they were created, and
+                    // these have to be in frequency order instead.
+                    Item {
+                        id: stripArea
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        readonly property real pitch:
+                            strips.count > 0 ? width / strips.count : width
 
-                        delegate: BandStrip {
-                            required property var model
-                            required property int index
+                        Repeater {
+                            id: strips
+                            model: AppController.bands
+                            onCountChanged: Qt.callLater(root.refreshFreqs)
 
-                            Layout.fillHeight: true
-                            Layout.fillWidth: true
-                            bandIndex: index
-                            gain: model.gain
-                            label: model.label
-                            range: 15
-                            onGainEdited: (v) => AppController.bands.setGain(index, v)
+                            delegate: BandStrip {
+                                required property var model
+                                required property int index
+                                readonly property real freq: model.frequency
+                                onFreqChanged: Qt.callLater(root.refreshFreqs)
+
+                                x: root.rankOf(index) * stripArea.pitch
+                                width: stripArea.pitch
+                                height: stripArea.height
+                                Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+
+                                bandIndex: index
+                                gain: model.gain
+                                label: model.label
+                                range: 15
+                                onGainEdited: (v) => AppController.bands.setGain(index, v)
+                            }
                         }
                     }
                 }

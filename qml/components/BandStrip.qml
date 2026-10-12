@@ -15,8 +15,12 @@ ColumnLayout {
 
     spacing: 6
 
+    // Full-width captions, centred: they are what lets the strip stretch. A
+    // layout's maximum width comes from its children, and with nothing
+    // willing to grow every strip stayed at its implicit 34 px.
     HusText {
-        Layout.alignment: Qt.AlignHCenter
+        Layout.fillWidth: true
+        horizontalAlignment: Text.AlignHCenter
         text: (root.gain > 0.05 ? '+' : '') + root.gain.toFixed(1)
         font.pixelSize: 11
         opacity: Math.abs(root.gain) < 0.05 ? 0.4 : 0.95
@@ -45,7 +49,8 @@ ColumnLayout {
     }
 
     HusText {
-        Layout.alignment: Qt.AlignHCenter
+        Layout.fillWidth: true
+        horizontalAlignment: Text.AlignHCenter
         text: root.label
         font.pixelSize: 10
         opacity: 0.6

@@ -43,8 +43,9 @@ Item {
         SectionCard {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            title: '处理顺序'
-            hint: '信号从上往下依次经过 —— 拖左边的手柄可以直接换位置,灰色的表示没有启用'
+            // No title: the page header already says 链路 and what the order
+            // means. The card keeps only what to do with it.
+            hint: '拖左边的手柄换位置 · 灰色的没有启用 · 点「设置」去它自己的页面'
 
             headerRight: RowLayout {
                 spacing: 8

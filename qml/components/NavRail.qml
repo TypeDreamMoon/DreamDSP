@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import HuskarUI.Basic
+import DreamDSP
 
 // Left-hand navigation.
 //
@@ -32,10 +33,36 @@ Rectangle {
         Repeater {
             model: root.items
 
-            delegate: Rectangle {
-                id: row
+            // A section label above the first entry of each group. Eight
+            // entries in one undivided list read as eight peers; they are not
+            // -- four shape the sound, two are tools, two are about the
+            // machine.
+            delegate: ColumnLayout {
+                id: entry
                 required property int index
                 required property var modelData
+                Layout.fillWidth: true
+                spacing: 4
+
+                readonly property bool firstOfSection:
+                    (entry.modelData.section || '') !== ''
+                    && (entry.index === 0
+                        || root.items[entry.index - 1].section !== entry.modelData.section)
+
+                HusText {
+                    visible: entry.firstOfSection
+                    Layout.topMargin: entry.index === 0 ? 4 : 14
+                    Layout.leftMargin: 12
+                    Layout.bottomMargin: 2
+                    text: entry.modelData.section || ''
+                    font.pixelSize: 11
+                    opacity: 0.4
+                }
+
+            Rectangle {
+                id: row
+                readonly property int index: entry.index
+                readonly property var modelData: entry.modelData
 
                 readonly property bool active: root.currentIndex === row.index
 
@@ -97,8 +124,19 @@ Rectangle {
                 HoverHandler { id: hover; cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: root.currentIndex = row.index }
             }
+            }
         }
 
         Item { Layout.fillHeight: true }
+
+        HusText {
+            Layout.leftMargin: 12
+            Layout.bottomMargin: 4
+            // The release number only: a dev build's "+0.2d09349-dirty" ran
+            // out of the rail and under the status bar. Settings has the rest.
+            text: 'v' + AppController.version.split('+')[0]
+            font.pixelSize: 11
+            opacity: 0.3
+        }
     }
 }

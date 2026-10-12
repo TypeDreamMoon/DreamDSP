@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(DreamDSP VERSION 0.3.1 LANGUAGES CXX)
+project(DreamDSP VERSION 0.3.2 LANGUAGES CXX)
 
 # The version comes from the git tag, not from the line above -- that one is
 # only the fallback for a tree with no tags at all. See cmake/Version.cmake.
@@ -35,17 +35,31 @@ qt_add_executable(DreamDSP
     src/main.cpp
 )
 
+# The design tokens are a singleton; qt_add_qml_module only writes it into the
+# module's qmldir as one when told.
+set_source_files_properties(qml/components/Ui.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+
+# IMPORT_PATH matters for more than tooling: qmlcachegen compiles enum
+# references to constants. Without our HuskarUI on its path it resolved them
+# against an older HuskarUI installed into the Qt SDK, whose HusButton enum is
+# numbered differently -- every Type_Text button came out as Type_Filled.
 qt_add_qml_module(DreamDSP
     URI DreamDSP
     VERSION 1.0
     RESOURCE_PREFIX "/"
+    IMPORT_PATH "${HuskarUI_QML_IMPORT_PATH}"
     QML_FILES
         qml/Main.qml
         qml/components/BandStrip.qml
+        qml/components/Masonry.qml
+        qml/components/Ui.qml
+        qml/components/Note.qml
+        qml/components/GroupHeader.qml
         qml/components/ResetButton.qml
         qml/components/SectionCard.qml
         qml/components/StatusPill.qml
         qml/components/PresetBar.qml
+        qml/components/FullPresetButton.qml
         qml/components/BandTable.qml
         qml/components/TrayMenu.qml
         qml/components/SystemPane.qml

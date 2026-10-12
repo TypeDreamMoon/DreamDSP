@@ -123,18 +123,17 @@ Item {
         boundsBehavior: Flickable.StopAtBounds
         HusScrollBar.vertical: HusScrollBar { }
 
-        GridLayout {
+        // Cards in a masonry flow -- see Masonry.qml for why not a grid.
+        Masonry {
             id: grid
-            width: Math.min(parent.width - 12, 1600)
-            x: Math.max(0, (parent.width - width) / 2)
-            columns: width >= 900 ? 2 : 1
-            columnSpacing: 12
-            rowSpacing: 12
+            width: parent.width - 12
+            minColumnWidth: 520
+            maxColumns: 3
 
             // ------------------------------------------------------ verdict
             Rectangle {
                 Layout.fillWidth: true
-                Layout.columnSpan: grid.columns
+                property bool masonryFull: true
                 implicitHeight: verdictRow.implicitHeight + 32
                 radius: 10
                 color: Qt.alpha(root.levelColor(root.verdict.level), 0.10)
@@ -366,7 +365,7 @@ Item {
             // ----------------------------------------------- all endpoints
             SectionCard {
                 Layout.fillWidth: true
-                Layout.columnSpan: grid.columns
+                property bool masonryFull: true
                 Layout.alignment: Qt.AlignTop
                 title: '所有输出设备'
                 hint: '在哪些设备上接入 DreamDSP —— 改动在重启音频服务后生效'
@@ -572,7 +571,7 @@ Item {
             // ---------------------------------------------------------- log
             SectionCard {
                 Layout.fillWidth: true
-                Layout.columnSpan: grid.columns
+                property bool masonryFull: true
                 Layout.alignment: Qt.AlignTop
                 title: '组件日志'
                 hint: 'C:\\ProgramData\\DreamDSP\\apo.log 的最后几行'

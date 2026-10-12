@@ -93,14 +93,14 @@ HusWindow {
             currentIndex: win.page
             onCurrentIndexChanged: win.page = currentIndex
             items: [
-                { label: '均衡器', icon: HusIcon.SlidersOutlined },
-                { label: '效果',   icon: HusIcon.ThunderboltOutlined },
-                { label: '卷积',   icon: HusIcon.SoundOutlined },
-                { label: '输出',   icon: HusIcon.DeploymentUnitOutlined },
-                { label: '链路',   icon: HusIcon.NodeIndexOutlined },
-                { label: 'AutoEQ', icon: HusIcon.CustomerServiceOutlined },
-                { label: '系统音频', icon: HusIcon.DashboardOutlined },
-                { label: '设置',   icon: HusIcon.SettingOutlined },
+                { label: '均衡器',   icon: HusIcon.SlidersOutlined,         section: '调音' },
+                { label: '效果',     icon: HusIcon.ThunderboltOutlined,     section: '调音' },
+                { label: '卷积',     icon: HusIcon.SoundOutlined,           section: '调音' },
+                { label: '输出',     icon: HusIcon.DeploymentUnitOutlined,  section: '调音' },
+                { label: '链路',     icon: HusIcon.NodeIndexOutlined,       section: '工具' },
+                { label: 'AutoEQ',   icon: HusIcon.CustomerServiceOutlined, section: '工具' },
+                { label: '系统音频', icon: HusIcon.DashboardOutlined,       section: '系统' },
+                { label: '设置',     icon: HusIcon.SettingOutlined,         section: '系统' },
             ]
         }
 
@@ -184,6 +184,23 @@ HusWindow {
 
                     MeterBar { Layout.alignment: Qt.AlignVCenter }
 
+                    FullPresetButton { }
+
+                    // Shows the explanations under the controls. They are
+                    // written for the first time through a page, so they are
+                    // off until asked for.
+                    HusIconButton {
+                        text: '说明'
+                        type: Ui.showNotes ? HusButton.Type_Primary : HusButton.Type_Text
+                        iconSource: HusIcon.ReadOutlined
+                        onClicked: Ui.showNotes = !Ui.showNotes
+                        HusToolTip {
+                            parent: parent
+                            visible: parent.hovered
+                            text: Ui.showNotes ? '隐藏每个控件下面的原理说明' : '显示每个控件下面的原理说明'
+                        }
+                    }
+
                     HusText {
                         text: '输出设备'
                         font.pixelSize: 12
@@ -208,6 +225,63 @@ HusWindow {
                 }
             }
 
+            // -------------------------------------------------- page header
+            // The page's name and one line about its state. The pages used to
+            // open straight onto their first card, so nothing on screen said
+            // where you were or whether anything on the page was doing work.
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: Ui.pagePadding
+                Layout.rightMargin: Ui.pagePadding
+                Layout.topMargin: 16
+                spacing: 12
+
+                readonly property var titles: ['均衡器', '效果', '卷积', '输出', '链路',
+                                               'AutoEQ', '系统音频', '设置']
+
+                function stagesOn(page) {
+                    const c = AppController.chain;
+                    let on = 0, all = 0;
+                    for (let i = 0; i < c.length; ++i) {
+                        if (c[i].page !== page) continue;
+                        ++all;
+                        if (c[i].on) ++on;
+                    }
+                    return '已开启 ' + on + ' / ' + all;
+                }
+
+                HusText {
+                    text: parent.titles[win.page]
+                    font.pixelSize: Ui.pageTitle
+                    font.weight: Font.DemiBold
+                }
+                HusText {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignBottom
+                    Layout.bottomMargin: 3
+                    elide: Text.ElideRight
+                    font.pixelSize: Ui.label
+                    opacity: 0.5
+                    text: {
+                        switch (win.page) {
+                        case 0: return '参数均衡 ' + (AppController.eqEnabled ? '开' : '关')
+                                       + ' · 图形均衡 ' + (AppController.graphicEnabled ? '开' : '关');
+                        case 1: return parent.stagesOn(1);
+                        case 2: return AppController.convolutionEnabled ? '脉冲响应已启用' : '没有启用脉冲响应';
+                        case 3: return parent.stagesOn(3);
+                        case 4: {
+                            const c = AppController.chain;
+                            return '信号从上往下依次经过 · 已开启 '
+                                   + c.filter(x => x.on).length + ' / ' + c.length;
+                        }
+                        case 5: return '导入耳机的频响校正曲线';
+                        case 6: return 'DreamDSP 是否真的在处理你听到的声音';
+                        default: return '';
+                        }
+                    }
+                }
+            }
+
             // ---------------------------------------------- bypass banner
             // The master switch has to be impossible to forget. Every effect
             // page below keeps showing its own switches as they were set --
@@ -215,8 +289,8 @@ HusWindow {
             // the pages would claim effects are on that are not being heard.
             Rectangle {
                 Layout.fillWidth: true
-                Layout.leftMargin: 16
-                Layout.rightMargin: 16
+                Layout.leftMargin: Ui.pagePadding
+                Layout.rightMargin: Ui.pagePadding
                 Layout.topMargin: 12
                 visible: !AppController.masterEnabled && win.page <= 5
                 implicitHeight: 40
@@ -253,7 +327,10 @@ HusWindow {
             StackLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.margins: 16
+                Layout.leftMargin: Ui.pagePadding
+                Layout.rightMargin: Ui.pagePadding - 8
+                Layout.topMargin: 12
+                Layout.bottomMargin: 12
                 currentIndex: win.page
                 // Faded, not disabled: the settings stay editable while
                 // bypassed, they are just not what is being heard.

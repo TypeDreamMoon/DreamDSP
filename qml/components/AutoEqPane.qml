@@ -113,9 +113,11 @@ Item {
 
                     HusTag { text: row.modelData.source }
 
+                    // Primary only on the row under the pointer: a filled
+                    // button on every one of 150 rows is a wall of blue.
                     HusButton {
                         text: '导入'
-                        type: HusButton.Type_Primary
+                        type: hover.hovered ? HusButton.Type_Primary : HusButton.Type_Default
                         onClicked: AppController.importAutoEq(row.modelData.index, false)
 
                         HusToolTip {

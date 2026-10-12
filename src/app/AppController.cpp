@@ -128,6 +128,16 @@ AppController::AppController(QObject *parent)
             &m_publisher, &ParamPublisher::schedule);
     connect(&m_effects, &EffectsModel::changed,
             &m_publisher, &ParamPublisher::schedule);
+
+    for (auto sig : { &AppController::eqEnabledChanged, &AppController::graphicChanged,
+                      &AppController::convolutionChanged })
+        connect(this, sig, this, &AppController::announceStagesIfChanged);
+    connect(&m_effects, &EffectsModel::changed, this, &AppController::announceStagesIfChanged);
+    connect(&m_output, &OutputModel::changed, this, &AppController::announceStagesIfChanged);
+    connect(&m_compressor, &CompressorModel::paramsChanged,
+            this, &AppController::announceStagesIfChanged);
+    connect(&m_reverb, &ReverbModel::paramsChanged,
+            this, &AppController::announceStagesIfChanged);
     connect(&m_publisher, &ParamPublisher::statusChanged, this, [this] {
         // The channel count comes from the APO's own report rather than from a
         // device query: it is the number the processing object is actually
@@ -1722,6 +1732,18 @@ QVariantList AppController::chain() const
         });
     }
     return out;
+}
+
+void AppController::announceStagesIfChanged()
+{
+    quint32 mask = 0;
+    for (int i = 0; i < dsp::kStageCount; ++i)
+        if (stageEnabled(i))
+            mask |= 1u << i;
+    if (mask == m_announcedStages)
+        return;
+    m_announcedStages = mask;
+    emit chainChanged();
 }
 
 bool AppController::chainIsDefault() const
