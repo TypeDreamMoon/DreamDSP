@@ -266,6 +266,7 @@ void AppController::setMasterEnabled(bool on)
         return;
     m_masterEnabled = on;
     emit masterEnabledChanged();
+    emit generatedTextChanged();
     emit eqEnabledChanged();      // the engine label reads both
     refreshTrayIcon();
     scheduleWrite();
@@ -390,6 +391,14 @@ QString AppController::generatedText() const
     if (nativeProcessing())
         out += QStringLiteral("# DreamDSP is processing this endpoint itself; "
                               "nothing includes this file.\r\n");
+
+    // The master switch reaches the Equalizer APO fallback too; otherwise
+    // bypassing everything would leave the equalizer running whenever
+    // Equalizer APO is the one applying it.
+    if (!m_masterEnabled) {
+        out += QStringLiteral("# (bypassed by the master switch)\r\n");
+        return out;
+    }
 
     if (!m_eqEnabled) {
         out += QStringLiteral("# (equalizer disabled)\r\n");
@@ -1257,7 +1266,11 @@ void AppController::nudgeAllGains(double delta)
 
 void AppController::onHotkey(const QString &id)
 {
-    if (id == QLatin1String("toggleEq")) {
+    if (id == QLatin1String("toggleMaster")) {
+        setMasterEnabled(!m_masterEnabled);
+        setMessage(m_masterEnabled ? QStringLiteral("总开关已打开")
+                                   : QStringLiteral("总开关已关闭 · 全部效果旁通"));
+    } else if (id == QLatin1String("toggleEq")) {
         setEqEnabled(!m_eqEnabled);
     } else if (id == QLatin1String("toggleEngage")) {
         setEngaged(!m_engaged);
@@ -1686,7 +1699,7 @@ const StageInfo kStages[] = {
     { dsp::kStageNightMode,   "夜间模式",   "杜比 DRC 曲线",          3 },
 };
 // Page indices follow the navigation rail: 0 equalizer, 1 effects,
-// 2 convolution, 3 output, 4 chain, 5 AutoEQ, 6 settings.
+// 2 convolution, 3 output, 4 chain, 5 AutoEQ, 6 system audio, 7 settings.
 static_assert(std::size(kStages) == size_t(dsp::kStageCount),
               "kStages must stay index-aligned with the kStage* ids");
 

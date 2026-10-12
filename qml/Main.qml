@@ -99,6 +99,7 @@ HusWindow {
                 { label: '输出',   icon: HusIcon.DeploymentUnitOutlined },
                 { label: '链路',   icon: HusIcon.NodeIndexOutlined },
                 { label: 'AutoEQ', icon: HusIcon.CustomerServiceOutlined },
+                { label: '系统音频', icon: HusIcon.DashboardOutlined },
                 { label: '设置',   icon: HusIcon.SettingOutlined },
             ]
         }
@@ -147,13 +148,36 @@ HusWindow {
                     // Which program is applying the curve. Two of them can, and
                     // "the slider does nothing" has a different cause for each,
                     // so the answer is on screen rather than inferable.
+                    // What the whole rack is doing, in one phrase -- not the
+                    // equalizer's state, which is what this used to report and
+                    // which says nothing when the equalizer is the one effect
+                    // switched off. Click through for the full diagnosis.
                     StatusPill {
-                        text: '均衡 · ' + AppController.eqEngine
-                        dotColor: (!AppController.masterEnabled
-                                   || !AppController.eqEnabled) ? HusTheme.Primary.colorTextQuaternary
-                                : AppController.eqNative   ? HusTheme.Primary.colorSuccess
-                                : AppController.engaged    ? HusTheme.Primary.colorWarning
-                                                           : HusTheme.Primary.colorError
+                        id: overall
+                        readonly property int state:
+                            !AppController.apoInstalled ? 0
+                            : (!AppController.apoAttached && !AppController.engaged) ? 1
+                            : !AppController.masterEnabled ? 2
+                            : AppController.engaged ? 3
+                            : AppController.apoLive ? 4 : 5
+                        text: ['音频组件未安装', '未接入当前设备', '已旁通',
+                               '由 Equalizer APO 处理', '正在处理', '已就绪'][state]
+                        dotColor: [HusTheme.Primary.colorError, HusTheme.Primary.colorWarning,
+                                   HusTheme.Primary.colorTextQuaternary, HusTheme.Primary.colorWarning,
+                                   HusTheme.Primary.colorSuccess, HusTheme.Primary.colorSuccess][state]
+
+                        MouseArea {
+                            id: overallHover
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            hoverEnabled: true
+                            onClicked: win.page = 6
+                        }
+                        HusToolTip {
+                            parent: overall
+                            visible: overallHover.containsMouse
+                            text: '查看系统音频诊断'
+                        }
                     }
 
                     Item { Layout.fillWidth: true }
@@ -178,16 +202,49 @@ HusWindow {
                         onClicked: AppController.refreshDevices()
                     }
 
-                    // The fallback path, for a machine where DreamDSP's own
-                    // processing object is not in the chain. Hidden entirely
-                    // when Equalizer APO is not installed -- it is no longer
-                    // something DreamDSP needs.
+                    // The Equalizer APO hand-over that used to sit here lives
+                    // on the 系统音频 page now: it is a fallback for a minority
+                    // of machines, not something to keep in the header.
+                }
+            }
+
+            // ---------------------------------------------- bypass banner
+            // The master switch has to be impossible to forget. Every effect
+            // page below keeps showing its own switches as they were set --
+            // that is the point of a bypass that remembers -- so without this
+            // the pages would claim effects are on that are not being heard.
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                Layout.topMargin: 12
+                visible: !AppController.masterEnabled && win.page <= 5
+                implicitHeight: 40
+                radius: 8
+                color: HusTheme.isDark ? Qt.rgba(1, 1, 1, 0.05) : Qt.rgba(0, 0, 0, 0.04)
+                border.width: 1
+                border.color: HusTheme.isDark ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(0, 0, 0, 0.10)
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 14
+                    anchors.rightMargin: 8
+                    spacing: 10
+                    HusIconText {
+                        iconSource: HusIcon.PoweroffOutlined
+                        iconSize: 14
+                        opacity: 0.6
+                    }
+                    HusText {
+                        Layout.fillWidth: true
+                        text: '总开关已关闭 —— 所有效果都被旁通,声音原样通过。下面各效果的开关和参数都保留着,打开总开关即恢复。'
+                        font.pixelSize: 12
+                        elide: Text.ElideRight
+                    }
                     HusButton {
-                        visible: AppController.apoFound
-                        text: AppController.engaged ? '交回 DreamDSP' : '交给 Equalizer APO'
-                        type: HusButton.Type_Default
-                        enabled: AppController.apoFound && AppController.configWritable
-                        onClicked: AppController.engaged = !AppController.engaged
+                        text: '打开总开关'
+                        type: HusButton.Type_Primary
+                        onClicked: AppController.masterEnabled = true
                     }
                 }
             }
@@ -198,6 +255,10 @@ HusWindow {
                 Layout.fillHeight: true
                 Layout.margins: 16
                 currentIndex: win.page
+                // Faded, not disabled: the settings stay editable while
+                // bypassed, they are just not what is being heard.
+                opacity: (!AppController.masterEnabled && win.page <= 5) ? 0.55 : 1.0
+                Behavior on opacity { NumberAnimation { duration: 160 } }
 
                 EqualizerPane { }
                 EffectsPane { }
@@ -205,7 +266,8 @@ HusWindow {
                 OutputPane { }
                 ChainPane { onGoToPage: (page) => win.page = page }
                 AutoEqPane { }
-                SettingsPane { }
+                SystemPane { }
+                SettingsPane { onGoToPage: (page) => win.page = page }
             }
 
             // --------------------------------------------------- status bar
@@ -252,9 +314,12 @@ HusWindow {
                         readonly property bool isError: AppController.lastError !== ''
                         readonly property bool isInfo: !isError && AppController.lastMessage !== ''
 
+                        // Idle, it says nothing. It used to show Equalizer
+                        // APO's config path, which stopped meaning anything
+                        // once DreamDSP no longer needed Equalizer APO.
                         text: isError ? AppController.lastError
                              : isInfo ? AppController.lastMessage
-                                      : AppController.apoConfigPath
+                                      : ''
                         opacity: (isError || isInfo) ? 0.95 : 0.45
                         color: isError ? HusTheme.Primary.colorError
                              : isInfo ? HusTheme.Primary.colorSuccess

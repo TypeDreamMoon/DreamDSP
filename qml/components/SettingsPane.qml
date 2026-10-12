@@ -6,6 +6,8 @@ import DreamDSP
 Item {
     id: root
 
+    signal goToPage(int page)
+
     // Which hotkey action is waiting for a key press, '' when idle.
     property string capturingId: ''
     property var hotkeys: AppController.hotkeyActions()
@@ -137,134 +139,22 @@ Item {
 
             // ----------------------------------------------------- system fx
             //
-            // Two separate steps, deliberately shown as two: registering the
-            // component is machine-wide and needs administrator rights,
-            // attaching it to a device does not. Conflating them into one
-            // button would mean an elevation prompt every time you switch
-            // device.
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-
-                SectionTitle { text: '系统音效 (APO)'; Layout.fillWidth: false }
-
-                Rectangle {
-                    Layout.alignment: Qt.AlignVCenter
-                    implicitWidth: stateLabel.implicitWidth + 16
-                    implicitHeight: 20
-                    radius: 10
-                    color: AppController.apoAttached
-                           ? HusTheme.Primary.colorSuccessBg
-                           : (AppController.apoInstalled ? HusTheme.Primary.colorWarningBg
-                                                         : HusTheme.Primary.colorFillTertiary)
-                    HusText {
-                        id: stateLabel
-                        anchors.centerIn: parent
-                        font.pixelSize: 11
-                        // "接入" has to mean the device actually processes.
-                        // Holding the post-mix slot on an endpoint whose
-                        // enhancements are switched off is a registration
-                        // nobody reads, and calling that attached is the lie
-                        // that hid a dead install for nineteen days.
-                        text: !AppController.apoInstalled ? '未安装'
-                              : AppController.apoSysFxDisabled ? '设备已关闭声音增强'
-                              : (AppController.apoAttached ? '已接入当前设备' : '已安装 · 未接入')
-                        color: AppController.apoAttached
-                               ? HusTheme.Primary.colorSuccess
-                               : (AppController.apoInstalled ? HusTheme.Primary.colorWarning
-                                                             : HusTheme.Primary.colorTextTertiary)
-                    }
-                }
-
-                Item { Layout.fillWidth: true }
-            }
-
-            HusText {
-                Layout.fillWidth: true
-                text: 'DreamDSP 作为音频处理对象接入 Windows 混音链,对系统里所有声音生效 —— '
-                      + '不再依赖 Equalizer APO 执行。'
-                font.pixelSize: 11
-                opacity: 0.5
-                wrapMode: Text.WordWrap
-            }
-
+            // Moved to its own page. Installing, attaching and the running
+            // state used to live here, as four rows that each reported part of
+            // the story -- and every one of them read as healthy on the day a
+            // driver update moved the device to a composite effect chain and
+            // DreamDSP silently stopped being loaded. The 系统音频 page checks
+            // all of it, in order, and says which condition failed.
             SettingRow {
-                label: '安装音频组件'
-                hint: AppController.apoInstalled
-                      ? (AppController.apoUpToDate ? '已注册,且是当前版本'
-                                                   : '已注册,但文件比程序旧,建议重新安装')
-                      : '需要一次管理员授权,之后切换设备都不再需要'
-                RowLayout {
-                    spacing: 8
-                    HusButton {
-                        text: AppController.apoInstalled ? '重新安装' : '安装'
-                        type: AppController.apoInstalled ? HusButton.Type_Default
-                                                         : HusButton.Type_Primary
-                        enabled: !AppController.apoBusy
-                        onClicked: AppController.installApo()
-                    }
-                    HusButton {
-                        text: '卸载'
-                        visible: AppController.apoInstalled
-                        enabled: !AppController.apoBusy
-                        onClicked: AppController.uninstallApo()
-                    }
-                }
-            }
-
-            SettingRow {
-                label: '接入当前输出设备'
-                hint: {
-                    if (!AppController.apoInstalled)
-                        return '先安装音频组件';
-                    // Checked before the occupant, because with enhancements
-                    // switched off the slot is ours and inert at the same time
-                    // -- and warning about displacing ourselves is nonsense.
-                    if (AppController.apoSysFxDisabled)
-                        return '⚠ 这台设备关闭了「所有声音增强」,打开开关会一并开启它';
-                    if (AppController.apoAttached)
-                        return '本设备的后混槽位由 DreamDSP 占用';
-                    if (AppController.apoSlotOwner !== '')
-                        return '⚠ 该槽位当前是「' + AppController.apoSlotOwner
-                               + '」,接入会顶替它 —— 移除时会自动还原';
-                    return '槽位空闲,可直接接入';
-                }
-                HusSwitch {
-                    checked: AppController.apoAttached
-                    enabled: AppController.apoInstalled && !AppController.apoBusy
-                    onToggled: AppController.setApoAttached(checked)
-                }
-            }
-
-            // The one-way channel's blind spot: without a report from the other
-            // end, "I moved a slider and nothing happened" has half a dozen
-            // indistinguishable causes. This is what tells them apart.
-            SettingRow {
-                label: '运行状态'
-                hint: AppController.apoStatusText
-                Rectangle {
-                    Layout.alignment: Qt.AlignVCenter
-                    implicitWidth: 10
-                    implicitHeight: 10
-                    radius: 5
-                    color: AppController.apoLive
-                           ? (AppController.apoInSync ? HusTheme.Primary.colorSuccess
-                                                      : HusTheme.Primary.colorWarning)
-                           : HusTheme.Primary.colorTextQuaternary
-                }
-            }
-
-            SettingRow {
-                label: '重启音频服务'
-                hint: AppController.apoRestartPending
-                      ? '⚠ 有改动尚未生效 —— 音效链只在服务重启时重建'
-                      : '全机声音会中断一瞬,正在播放的程序通常能自行恢复'
+                label: '音频组件与诊断'
+                hint: !AppController.apoInstalled ? '未安装 —— 在「系统音频」页安装'
+                      : AppController.apoAttached ? '已接入当前设备'
+                      : '未接入当前设备 —— 在「系统音频」页查看原因'
                 HusButton {
-                    text: '重启'
-                    type: AppController.apoRestartPending ? HusButton.Type_Primary
-                                                          : HusButton.Type_Default
-                    enabled: !AppController.apoBusy
-                    onClicked: AppController.restartAudio()
+                    text: '打开系统音频'
+                    type: AppController.apoAttached ? HusButton.Type_Default
+                                                    : HusButton.Type_Primary
+                    onClicked: root.goToPage(6)
                 }
             }
 

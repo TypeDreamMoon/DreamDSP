@@ -25,6 +25,7 @@
 #include <QHash>
 #include <QUrl>
 #include <QVariantList>
+#include <QVariantMap>
 
 namespace dreamdsp {
 
@@ -265,6 +266,14 @@ public:
     Q_INVOKABLE void uninstallApo();
     Q_INVOKABLE void setApoAttached(bool on);
     Q_INVOKABLE void restartAudio();
+
+    // The 系统音频 page. Everything that has to hold for a slider to reach the
+    // speakers, checked in order, plus the effect chain of every output
+    // device as the registry describes it. See SystemReport.cpp.
+    Q_INVOKABLE QVariantMap systemReport();
+    Q_INVOKABLE void setEndpointAttached(const QString &endpointId, bool on);
+    // The verdict's button: "install", "attach", "restart" or "master".
+    Q_INVOKABLE void runSystemAction(const QString &action);
 
     bool trayActive() const;
     bool autostart() const;

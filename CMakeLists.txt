@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(DreamDSP VERSION 0.3.0 LANGUAGES CXX)
+project(DreamDSP VERSION 0.3.1 LANGUAGES CXX)
 
 # The version comes from the git tag, not from the line above -- that one is
 # only the fallback for a tree with no tags at all. See cmake/Version.cmake.
@@ -48,6 +48,7 @@ qt_add_qml_module(DreamDSP
         qml/components/PresetBar.qml
         qml/components/BandTable.qml
         qml/components/TrayMenu.qml
+        qml/components/SystemPane.qml
         qml/components/SettingsPane.qml
         qml/components/AutoEqPane.qml
         qml/components/MeterBar.qml
@@ -83,6 +84,7 @@ qt_add_qml_module(DreamDSP
         src/app/EqBandModel.h          src/app/EqBandModel.cpp
         src/app/PresetStore.h          src/app/PresetStore.cpp
         src/app/AppController.h        src/app/AppController.cpp
+        src/app/SystemReport.cpp
         src/app/SelfTest.h             src/app/SelfTest.cpp
         src/ui/ResponseCurveItem.h     src/ui/ResponseCurveItem.cpp
         src/ui/TransferCurveItem.h     src/ui/TransferCurveItem.cpp

@@ -90,6 +90,12 @@ Window {
             spacing: 2
 
             MenuRow {
+                label: AppController.masterEnabled ? '旁通全部效果' : '恢复全部效果'
+                detail: AppController.masterEnabled ? '总开关 开' : '总开关 关'
+                onTriggered: AppController.masterEnabled = !AppController.masterEnabled
+            }
+
+            MenuRow {
                 label: AppController.eqEnabled ? '关闭均衡器' : '启用均衡器'
                 detail: AppController.eqEnabled ? '开' : '关'
                 onTriggered: AppController.eqEnabled = !AppController.eqEnabled
