@@ -239,6 +239,13 @@ int main(int argc, char *argv[])
         // would shadow the version we build against. Prepend explicitly.
         QStringList importPaths = engine.importPathList();
         importPaths.prepend(QStringLiteral(HUSKARUI_IMPORT_PATH));
+        // Our own module is compiled in under qrc:/DreamDSP (RESOURCE_PREFIX
+        // "/"), and qrc:/ is not a default import path. A build tree never
+        // noticed: it has the module on disk beside the executable. The
+        // installed copy has it only in resources, so `import DreamDSP` found
+        // the C++ types alone -- no qmldir, so no singleton Ui, and every
+        // spacing and font size on every page read as undefined.
+        importPaths.prepend(QStringLiteral("qrc:/"));
         engine.setImportPathList(importPaths);
 
         QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed,

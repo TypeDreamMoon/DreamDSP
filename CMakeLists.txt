@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(DreamDSP VERSION 0.3.2 LANGUAGES CXX)
+project(DreamDSP VERSION 0.3.3 LANGUAGES CXX)
 
 # The version comes from the git tag, not from the line above -- that one is
 # only the fallback for a tree with no tags at all. See cmake/Version.cmake.
@@ -37,7 +37,14 @@ qt_add_executable(DreamDSP
 
 # The design tokens are a singleton; qt_add_qml_module only writes it into the
 # module's qmldir as one when told.
-set_source_files_properties(qml/components/Ui.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+#
+# It lives in a directory of its own. A component's own directory is an
+# implicit import with no qmldir, so from qml/components/ the engine saw
+# Ui.qml as a plain type and that shadowed the module's singleton -- every
+# Ui.* read came out undefined. It went unnoticed because a build tree has the
+# module on disk beside the executable and resolves it from there; only the
+# installed copy, which has the module in resources alone, broke.
+set_source_files_properties(qml/theme/Ui.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 # IMPORT_PATH matters for more than tooling: qmlcachegen compiles enum
 # references to constants. Without our HuskarUI on its path it resolved them
@@ -52,7 +59,7 @@ qt_add_qml_module(DreamDSP
         qml/Main.qml
         qml/components/BandStrip.qml
         qml/components/Masonry.qml
-        qml/components/Ui.qml
+        qml/theme/Ui.qml
         qml/components/Note.qml
         qml/components/GroupHeader.qml
         qml/components/ResetButton.qml
