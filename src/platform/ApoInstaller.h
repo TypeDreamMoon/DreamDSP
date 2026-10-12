@@ -2,6 +2,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 namespace dreamdsp {
 
@@ -29,6 +30,13 @@ struct ApoSlot {
     // separately because every other indicator reads as healthy while it is on,
     // which is exactly how it hides.
     bool sysFxDisabled = false;
+
+    // The endpoint carries a Windows 11 composite effect chain. When it does,
+    // the audio engine reads the composite lists and ignores the legacy
+    // post-mix slot entirely -- so on such an endpoint `clsid` above describes
+    // a value nothing will ever load, and `isOurs` is decided by the composite
+    // endpoint-effect list instead.
+    bool composite = false;
 
     // Ours *and* actually reachable. What the interface should call attached.
     bool live() const { return isOurs && !sysFxDisabled; }
@@ -63,6 +71,37 @@ ApoSlot apoSlotOf(const QString &endpointId);
 // Neither takes effect until the audio service restarts.
 QString attachApo(const QString &endpointId);
 QString detachApo(const QString &endpointId);
+
+// --- reading an endpoint's whole effect chain, for the diagnostics page ----
+
+struct ChainEntry {
+    QString clsid;
+    QString name;       // FriendlyName from the audio engine's registry, if any
+    QString dll;        // InprocServer32, if registered
+    bool isOurs = false;
+};
+
+// One stage of an endpoint's effect chain as the registry describes it.
+struct ChainStage {
+    QString key;        // "SFX", "MFX", "EFX", "LFX", "GFX"
+    QString label;      // what the stage does, in words
+    QVector<ChainEntry> entries;
+    // The value exists but the audio engine will not read it: the legacy slots
+    // of an endpoint that also carries a composite chain. Shown rather than
+    // hidden, because "our CLSID is right there" is exactly what made the
+    // composite case look healthy.
+    bool ignored = false;
+};
+
+struct EndpointChain {
+    bool composite = false;
+    bool sysFxDisabled = false;
+    bool oursPresent = false;   // somewhere the engine will actually read
+    bool oursInert = false;     // only in an ignored slot
+    QVector<ChainStage> stages; // in processing order; effective stages first
+};
+
+EndpointChain endpointChain(const QString &endpointId);
 
 // Re-runs this executable elevated with the given arguments and waits for it.
 // Returns an empty string on success; the user declining the prompt is an

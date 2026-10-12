@@ -6,6 +6,8 @@
 #include <QFileInfo>
 #include <QProcess>
 
+#include <vector>
+
 #include <windows.h>
 #include <shellapi.h>
 #include <winsvc.h>
@@ -23,6 +25,28 @@ const wchar_t *kClsidKey =
 // The post-mix (GFX) slot. Pre-mix is left alone so that an existing Equalizer
 // APO installation keeps working ahead of us rather than being displaced twice.
 const wchar_t *kSlotValue = L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2";
+
+// PKEY_CompositeFX_EndpointEffectClsid: the endpoint-effect (EFX) stage of a
+// Windows 11 composite chain, a REG_MULTI_SZ list of processing objects run in
+// order after the mix. Its neighbours ,13 and ,14 are the stream and mode
+// stages.
+//
+// The reason this exists: once any of the composite lists is present on an
+// endpoint, the audio engine builds the chain from them and does not read the
+// legacy slots at all. A driver that ships its own effects this way -- Realtek's
+// USB audio package does, from RtkMicUUn64.dll -- therefore switches DreamDSP
+// off on that endpoint without touching a single one of our values. The legacy
+// slot still names us, the CLSID is still registered, the DLL still loads when
+// asked; audiodg simply never asks. Found that way: the log stops on the day
+// the driver's composite keys appear and nothing else changes.
+//
+// EFX rather than the stream or mode stage because it is the composite
+// equivalent of where we always sat -- once per endpoint, after every stream
+// has been mixed -- and appended rather than prepended so that the limiter's
+// ceiling is the last thing before the converter, as it is everywhere else.
+const wchar_t *kCompositeEfx = L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15";
+const wchar_t *kCompositeSfx = L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13";
+const wchar_t *kCompositeMfx = L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},14";
 
 // PKEY_AudioEndpoint_Disable_SysFx. One DWORD, and while it is 1 Windows builds
 // no effect chain for the endpoint at all -- no processing object is
@@ -142,6 +166,73 @@ LSTATUS writeDwordPrecise(HKEY root, const QString &sub, const QString &name, DW
     return rc;
 }
 
+// A REG_MULTI_SZ, as a list. `present` reports whether the value exists at
+// all, which for the composite keys is the whole question: an empty list still
+// switches the endpoint to composite mode.
+QStringList readMultiPrecise(HKEY root, const QString &sub, const QString &name,
+                             bool *present = nullptr)
+{
+    if (present)
+        *present = false;
+    HKEY key = nullptr;
+    if (::RegOpenKeyExW(root, reinterpret_cast<const wchar_t *>(sub.utf16()),
+                        0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+        return {};
+    }
+    DWORD type = 0, bytes = 0;
+    const wchar_t *wname = reinterpret_cast<const wchar_t *>(name.utf16());
+    LSTATUS rc = ::RegQueryValueExW(key, wname, nullptr, &type, nullptr, &bytes);
+    if (rc != ERROR_SUCCESS || (type != REG_MULTI_SZ && type != REG_SZ)) {
+        ::RegCloseKey(key);
+        return {};
+    }
+    std::vector<wchar_t> buf(bytes / sizeof(wchar_t) + 2, L'\0');
+    rc = ::RegQueryValueExW(key, wname, nullptr, &type,
+                            reinterpret_cast<BYTE *>(buf.data()), &bytes);
+    ::RegCloseKey(key);
+    if (rc != ERROR_SUCCESS)
+        return {};
+    if (present)
+        *present = true;
+
+    QStringList out;
+    for (const wchar_t *p = buf.data(); *p; p += wcslen(p) + 1)
+        out << QString::fromWCharArray(p);
+    return out;
+}
+
+LSTATUS writeMultiPrecise(HKEY root, const QString &sub, const QString &name,
+                          const QStringList &values)
+{
+    HKEY key = nullptr;
+    const LSTATUS open = ::RegOpenKeyExW(root, reinterpret_cast<const wchar_t *>(sub.utf16()),
+                                         0, KEY_SET_VALUE | KEY_QUERY_VALUE, &key);
+    if (open != ERROR_SUCCESS)
+        return open;
+
+    std::vector<wchar_t> blob;
+    for (const QString &v : values) {
+        const std::wstring w = v.toStdWString();
+        blob.insert(blob.end(), w.begin(), w.end());
+        blob.push_back(L'\0');
+    }
+    blob.push_back(L'\0');
+    const LSTATUS rc = ::RegSetValueExW(key, reinterpret_cast<const wchar_t *>(name.utf16()),
+                                        0, REG_MULTI_SZ,
+                                        reinterpret_cast<const BYTE *>(blob.data()),
+                                        DWORD(blob.size() * sizeof(wchar_t)));
+    ::RegCloseKey(key);
+    return rc;
+}
+
+bool containsClsid(const QStringList &list, const QString &clsid)
+{
+    for (const QString &v : list)
+        if (v.compare(clsid, Qt::CaseInsensitive) == 0)
+            return true;
+    return false;
+}
+
 LSTATUS deleteValuePrecise(HKEY root, const QString &sub, const QString &name)
 {
     HKEY key = nullptr;
@@ -214,6 +305,106 @@ ApoState apoState()
     return s;
 }
 
+namespace {
+
+ChainEntry describeClsid(const QString &clsid)
+{
+    ChainEntry e;
+    e.clsid = clsid;
+    e.isOurs = clsid.compare(QString::fromWCharArray(kClsid), Qt::CaseInsensitive) == 0;
+    e.name = readString(HKEY_LOCAL_MACHINE,
+                        QStringLiteral("SOFTWARE\\Classes\\AudioEngine\\AudioProcessingObjects\\%1")
+                            .arg(clsid),
+                        QStringLiteral("FriendlyName"));
+    e.dll = readString(HKEY_LOCAL_MACHINE,
+                       QStringLiteral("SOFTWARE\\Classes\\CLSID\\%1\\InprocServer32").arg(clsid),
+                       QString());
+    if (e.isOurs && e.name.isEmpty())
+        e.name = QStringLiteral("DreamDSP Effects");
+    return e;
+}
+
+ChainStage readStage(const QString &fx, const wchar_t *value, const char *key,
+                     const QString &label, bool *present)
+{
+    ChainStage st;
+    st.key = QString::fromLatin1(key);
+    st.label = label;
+    bool here = false;
+    const QStringList list = readMultiPrecise(HKEY_LOCAL_MACHINE, fx,
+                                              QString::fromWCharArray(value), &here);
+    for (const QString &c : list) {
+        // An all-zero GUID is how drivers spell "nothing here".
+        if (c.isEmpty() || c.startsWith(QLatin1String("{00000000-0000-0000-0000-000000000000")))
+            continue;
+        st.entries << describeClsid(c);
+    }
+    if (present)
+        *present = here;
+    return st;
+}
+
+} // namespace
+
+EndpointChain endpointChain(const QString &endpointId)
+{
+    EndpointChain ch;
+    if (endpointId.isEmpty())
+        return ch;
+    const QString fx = fxPropertiesKey(endpointId);
+
+    ch.sysFxDisabled = readDwordPrecise(HKEY_LOCAL_MACHINE, fx,
+                                        QString::fromWCharArray(kDisableSysFx), 0) != 0;
+
+    bool hasS = false, hasM = false, hasE = false;
+    ChainStage cs = readStage(fx, kCompositeSfx, "SFX", QStringLiteral("每路音频流各自经过,混音之前"), &hasS);
+    ChainStage cm = readStage(fx, kCompositeMfx, "MFX", QStringLiteral("按处理模式分组,混音之前"), &hasM);
+    ChainStage ce = readStage(fx, kCompositeEfx, "EFX", QStringLiteral("整个设备一次,混音之后"), &hasE);
+    ch.composite = hasS || hasM || hasE;
+
+    // The legacy slots. Pre-mix and post-mix are the Vista-era pair; ,5 ,6 ,7
+    // are the Windows 8.1 single-CLSID versions of the three composite stages.
+    ChainStage lpre  = readStage(fx, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1", "LFX",
+                                 QStringLiteral("旧式 · 混音之前"), nullptr);
+    ChainStage lpost = readStage(fx, kSlotValue, "GFX",
+                                 QStringLiteral("旧式 · 混音之后"), nullptr);
+    ChainStage ls    = readStage(fx, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5", "SFX",
+                                 QStringLiteral("旧式单槽 · 每路音频流"), nullptr);
+    ChainStage lm    = readStage(fx, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},6", "MFX",
+                                 QStringLiteral("旧式单槽 · 处理模式"), nullptr);
+    ChainStage le    = readStage(fx, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},7", "EFX",
+                                 QStringLiteral("旧式单槽 · 整个设备"), nullptr);
+
+    QVector<ChainStage> legacy;
+    for (ChainStage *st : { &lpre, &lpost, &ls, &lm, &le })
+        if (!st->entries.isEmpty())
+            legacy << *st;
+
+    if (ch.composite) {
+        ch.stages << cs << cm << ce;
+        for (ChainStage st : legacy) {
+            st.ignored = true;
+            ch.stages << st;
+        }
+    } else {
+        ch.stages = legacy;
+    }
+
+    for (const ChainStage &st : ch.stages) {
+        for (const ChainEntry &e : st.entries) {
+            if (!e.isOurs)
+                continue;
+            if (st.ignored)
+                ch.oursInert = true;
+            else
+                ch.oursPresent = true;
+        }
+    }
+    if (ch.oursPresent)
+        ch.oursInert = false;
+    return ch;
+}
+
 ApoSlot apoSlotOf(const QString &endpointId)
 {
     ApoSlot slot;
@@ -226,8 +417,25 @@ ApoSlot apoSlotOf(const QString &endpointId)
     slot.sysFxDisabled = readDwordPrecise(HKEY_LOCAL_MACHINE, fxPropertiesKey(endpointId),
                                           QString::fromWCharArray(kDisableSysFx), 0) != 0;
 
-    slot.clsid = readString(HKEY_LOCAL_MACHINE, fxPropertiesKey(endpointId),
-                            QString::fromWCharArray(kSlotValue));
+    // Composite first: if the endpoint has a composite chain, it is the only
+    // thing the engine reads, whatever the legacy slot says.
+    const QString fx = fxPropertiesKey(endpointId);
+    bool hasSfx = false, hasMfx = false, hasEfx = false;
+    readMultiPrecise(HKEY_LOCAL_MACHINE, fx, QString::fromWCharArray(kCompositeSfx), &hasSfx);
+    readMultiPrecise(HKEY_LOCAL_MACHINE, fx, QString::fromWCharArray(kCompositeMfx), &hasMfx);
+    const QStringList efx = readMultiPrecise(HKEY_LOCAL_MACHINE, fx,
+                                             QString::fromWCharArray(kCompositeEfx), &hasEfx);
+    slot.composite = hasSfx || hasMfx || hasEfx;
+    if (slot.composite) {
+        slot.isOurs = containsClsid(efx, QString::fromWCharArray(kClsid));
+        if (slot.isOurs) {
+            slot.clsid = QString::fromWCharArray(kClsid);
+            slot.friendlyName = QStringLiteral("DreamDSP Effects");
+        }
+        return slot;
+    }
+
+    slot.clsid = readString(HKEY_LOCAL_MACHINE, fx, QString::fromWCharArray(kSlotValue));
     if (slot.clsid.isEmpty())
         return slot;
 
@@ -268,6 +476,24 @@ QString attachApo(const QString &endpointId)
     if (current.isOurs)
         return {};   // the slot was already ours; nothing to displace or back up
 
+    if (current.composite) {
+        // Joined, not taken over: the driver's own endpoint effects stay in the
+        // list and keep running, and detach removes exactly the one entry we
+        // added. Nothing is displaced, so nothing needs backing up beyond the
+        // fact that we were here.
+        const QString fx = fxPropertiesKey(endpointId);
+        QStringList efx = readMultiPrecise(HKEY_LOCAL_MACHINE, fx,
+                                           QString::fromWCharArray(kCompositeEfx));
+        efx << QString::fromWCharArray(kClsid);
+        const LSTATUS rc = writeMultiPrecise(HKEY_LOCAL_MACHINE, fx,
+                                             QString::fromWCharArray(kCompositeEfx), efx);
+        if (rc != ERROR_SUCCESS)
+            return QStringLiteral("无法写入设备的复合效果链:%1").arg(lastErrorText(rc));
+        writeHkcuString(backupKey(endpointId), QStringLiteral("CompositeEfx"),
+                        QStringLiteral("1"));
+        return {};
+    }
+
     // Remember what we are about to displace, before displacing it. An empty
     // string records "the slot was free", which detach must honour by removing
     // the value rather than writing an empty one.
@@ -287,7 +513,34 @@ QString detachApo(const QString &endpointId)
         return QStringLiteral("没有选中设备");
 
     const ApoSlot current = apoSlotOf(endpointId);
-    if (!current.isOurs && !current.clsid.isEmpty()) {
+
+    if (current.composite) {
+        // Remove our entry and only ours. The legacy slot may still name us
+        // from before the driver switched the endpoint over; that value is
+        // inert while the composite keys exist, but it is ours, so it is put
+        // back below as well.
+        const QString fx = fxPropertiesKey(endpointId);
+        QStringList efx = readMultiPrecise(HKEY_LOCAL_MACHINE, fx,
+                                           QString::fromWCharArray(kCompositeEfx));
+        QStringList kept;
+        for (const QString &v : efx)
+            if (v.compare(QString::fromWCharArray(kClsid), Qt::CaseInsensitive) != 0)
+                kept << v;
+        if (kept.size() != efx.size()) {
+            const LSTATUS rc = writeMultiPrecise(HKEY_LOCAL_MACHINE, fx,
+                                                 QString::fromWCharArray(kCompositeEfx), kept);
+            if (rc != ERROR_SUCCESS)
+                return QStringLiteral("无法还原设备的复合效果链:%1").arg(lastErrorText(rc));
+        }
+        const QString legacy = readString(HKEY_LOCAL_MACHINE, fx,
+                                          QString::fromWCharArray(kSlotValue));
+        if (legacy.compare(QString::fromWCharArray(kClsid), Qt::CaseInsensitive) != 0) {
+            ::RegDeleteKeyW(HKEY_CURRENT_USER,
+                            reinterpret_cast<const wchar_t *>(backupKey(endpointId).utf16()));
+            return {};
+        }
+        // Fall through to restore the legacy slot from the backup.
+    } else if (!current.isOurs && !current.clsid.isEmpty()) {
         // Someone else owns the slot now. Leave it alone rather than deleting
         // another product's registration.
         return {};
