@@ -81,13 +81,13 @@ jobs:
       - name: Build
         run: cmake --build build/dreamdsp --parallel
 
-      - name: Run the DSP tests
+      - name: Run DSP and preset regression tests
         shell: pwsh
         run: |
           # The offline suite proves the signal processing before anything is
           # published. It needs no audio device, so it runs on the runner.
-          & build/dreamdsp/dspharness.exe --test
-          if ($LASTEXITCODE -ne 0) { throw "dspharness reported failures" }
+          ctest --test-dir build/dreamdsp --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "DSP or preset regression tests failed" }
 
       - name: Stage the payload
         shell: pwsh
