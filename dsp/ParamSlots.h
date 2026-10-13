@@ -2,103 +2,50 @@
 
 #include <atomic>
 #include <cstring>
-
 #include "ParamBlock.h"
 
 namespace dreamdsp::dsp {
 
-// Hand-off of a parameter block from a normal thread to a real-time one.
-//
-// Single producer (whoever loads parameters), single consumer (the audio
-// callback). Deliberately here rather than in the APO: keeping it free of
-// Windows means the concurrency protocol can be exercised in the offline
-// harness with two std::threads and a few hundred thousand iterations, which is
-// the only realistic way to gain confidence in it.
-//
-// Three slots, not two. The writer round-robins, so the slot a reader is copying
-// is two publishes away from being overwritten; the per-slot stamp then makes
-// even that case detectable rather than silent.
+// One publisher, any number of readers. Atomic payload words avoid the data
+// race of a seqlock over plain memory. Sequential consistency orders stamps
+// AND payload accesses. Readers commit only a complete, validated snapshot.
 class ParamSlots
 {
 public:
-    static constexpr int kSlots = 3;
+    static constexpr size_t kWords = sizeof(ParamBlock) / sizeof(uint32_t);
+    static_assert(sizeof(ParamBlock) % sizeof(uint32_t) == 0, "word-aligned payload");
+    static_assert(std::atomic<uint32_t>::is_always_lock_free, "RT requires lock-free words");
+    static_assert(std::atomic<uint64_t>::is_always_lock_free, "RT requires lock-free stamp");
 
-    // Not real-time. Called once before the writer starts.
-    //
-    // Every slot is filled with the transparent block rather than memset to
-    // zero. Both are equally transparent -- enableMask is 0 either way -- but
-    // only the former satisfies the "every slot always holds a sanitised block"
-    // invariant that the safety argument below rests on.
-    void clear() noexcept
+    // Before the publisher/readers start only.
+    void clear() noexcept { publish(transparentBlock()); }
+    void publish(const ParamBlock &block) noexcept
     {
-        const ParamBlock t = transparentBlock();
-        for (int i = 0; i < kSlots; ++i)
-            std::memcpy(&m_slot[i], &t, sizeof(ParamBlock));
-        for (int i = 0; i < kSlots; ++i)
-            m_stamp[i].store(0u, std::memory_order_relaxed);
-        m_active.store(0u, std::memory_order_release);
+        uint32_t words[kWords];
+        std::memcpy(words, &block, sizeof block);
+        const uint64_t stamp = m_stamp.load();
+        m_stamp.store(stamp + 1);
+        for (size_t i = 0; i < kWords; ++i) m_words[i].store(words[i]);
+        m_stamp.store(stamp + 2);
     }
-
-    // Not real-time, single writer. `b` must already be sanitised.
-    void publish(const ParamBlock &b) noexcept
-    {
-        const uint32_t cur = m_active.load(std::memory_order_relaxed);
-        const uint32_t next = (cur + 1u) % uint32_t(kSlots);
-        const uint32_t s = m_stamp[next].load(std::memory_order_relaxed);
-
-        // Fences, not release stores on the stamps themselves. A release store
-        // only stops *earlier* operations moving after it; it does nothing to
-        // stop the payload copy below from being hoisted *before* it. That hole
-        // is not theoretical -- it produced two torn reads in 155,000 in the
-        // harness's two-thread test before the fences went in.
-        //
-        // The first fence keeps the copy after the odd stamp is visible; the
-        // second keeps it before the even one becomes visible.
-        m_stamp[next].store(s + 1u, std::memory_order_relaxed);    // odd: in flux
-        std::atomic_thread_fence(std::memory_order_release);
-        std::memcpy(&m_slot[next], &b, sizeof(ParamBlock));
-        std::atomic_thread_fence(std::memory_order_release);
-        m_stamp[next].store(s + 2u, std::memory_order_relaxed);    // even: settled
-
-        m_active.store(next, std::memory_order_release);
-    }
-
-    // Real-time safe. At most two attempts: no allocation, no lock, no spin, no
-    // syscall, and no loop whose bound depends on another thread making
-    // progress. Returns false only if both attempts caught a slot mid-write, in
-    // which case the caller keeps its previous copy -- itself always a valid
-    // sanitised block.
     bool read(ParamBlock *out) const noexcept
     {
+        if (!out) return false;
+        uint32_t words[kWords];
         for (int attempt = 0; attempt < 2; ++attempt) {
-            const uint32_t i = m_active.load(std::memory_order_acquire) % uint32_t(kSlots);
-            const uint32_t s0 = m_stamp[i].load(std::memory_order_acquire);
-            if (s0 & 1u)
-                continue;
-            std::memcpy(out, &m_slot[i], sizeof(ParamBlock));
-            std::atomic_thread_fence(std::memory_order_acquire);
-            if (m_stamp[i].load(std::memory_order_relaxed) == s0)
+            const uint64_t before = m_stamp.load();
+            if (before & 1u) continue;
+            for (size_t i = 0; i < kWords; ++i) words[i] = m_words[i].load();
+            if (before == m_stamp.load()) {
+                std::memcpy(out, words, sizeof(ParamBlock));
                 return true;
+            }
         }
-        return false;
+        return false; // out stays unchanged, including on the second failure
     }
-
 private:
-    // Honest statement of what this rests on: the payload copy is not itself an
-    // atomic object, so it is the stamps plus the explicit release/acquire
-    // ordering that make an accepted snapshot consistent -- the same guarantee
-    // every seqlock rests on, written out rather than left to x86's TSO.
-    //
-    // Underneath that, and independent of it: every slot always holds a
-    // sanitised block, and every field is clamped independently. So even an
-    // undetected byte-wise mixture of two slots is a valid, in-range parameter
-    // set. No combination can produce a NaN, an infinity, an out-of-range gain
-    // or an invalid bool. The worst undetected outcome is a single callback
-    // running an old reverb.wet against a new reverb.dry, which heals on the
-    // next one.
-    ParamBlock m_slot[kSlots];
-    std::atomic<uint32_t> m_stamp[kSlots];
-    std::atomic<uint32_t> m_active{ 0u };
+    std::atomic<uint32_t> m_words[kWords]{};
+    std::atomic<uint64_t> m_stamp{0};
 };
 
 } // namespace dreamdsp::dsp

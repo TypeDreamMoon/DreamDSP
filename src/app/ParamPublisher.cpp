@@ -94,6 +94,18 @@ dsp::ParamBlock blockFromModels(const CompressorModel *comp,
             b.enableMask |= dsp::kEnReverb;
     }
     if (effects) {
+        b.binaural = effects->binauralParams();
+        if (effects->binauralOn()) b.enableMask |= dsp::kEnBinaural;
+        b.neural = effects->neuralParams();
+        if (effects->neuralOn()) b.enableMask |= dsp::kEnNeural;
+        b.chorus = effects->chorusParams();
+        if (effects->chorusOn()) b.enableMask |= dsp::kEnChorus;
+        b.flanger = effects->flangerParams();
+        if (effects->flangerOn()) b.enableMask |= dsp::kEnFlanger;
+        b.phaser = effects->phaserParams();
+        if (effects->phaserOn()) b.enableMask |= dsp::kEnPhaser;
+        b.fdn = effects->fdnParams();
+        if (effects->fdnOn()) b.enableMask |= dsp::kEnFdn;
         b.bass = effects->bassParams();
         b.exciter = effects->exciterParams();
         b.tube = effects->tubeParams();
@@ -421,185 +433,12 @@ void ParamPublisher::load()
     if (!file.open(QIODevice::ReadOnly))
         return;
 
-    dsp::ParamBlock b;
-    std::memset(&b, 0, sizeof b);
-    const qint64 got = file.read(reinterpret_cast<char *>(&b), sizeof b);
+    // Bounded read; decoding and legacy migration are shared with the harness.
+    if (file.size() > qint64(sizeof(dsp::ParamBlock))) return;
+    const QByteArray bytes = file.readAll();
     file.close();
-
-    if (got < 4 || b.magic != dsp::kParamMagic)
-        return;
-
-    // Older versions are accepted and migrated, not rejected.
-    //
-    // Refusing them instead would silently reset every effect the user had
-    // switched on, on the one launch where they least expect it, and this file
-    // is the only place those settings are kept.
-    //
-    // Through v5 every addition was *appended* to the block, so an older file
-    // was byte-for-byte a current one with the newer stages left zeroed and a
-    // truncation check was enough. v6 broke that: three of the existing Params
-    // structs grew a field, so everything after the exciter sits at a different
-    // offset and a v5 file read straight into a v6 block would put the stereo
-    // widener's numbers into the crossfeed. Migration is therefore member by
-    // member, against the v5 offsets -- which v2, v3 and v4 are all prefixes
-    // of, so one table covers every legacy version.
-    //
-    // Nothing before v2 is accepted: v1 predates field additions this table
-    // cannot express.
-    struct Legacy { uint32_t version; qint64 size; };
-    static const Legacy kLegacy[] = {
-        { 2u, 300 },    // before the equalizer
-        { 3u, 820 },    // before routing, delay and loudness
-        { 4u, 1124 },   // before the limiter, dynamic bass, graphic eq, order
-        { 5u, 1300 },   // before the transient shaper, clipper, auto volume and night mode
-    };
-
-    // v6 and v7 have identical layouts -- v7 only gave the header's reserved
-    // word a meaning -- so a v6 file needs its version stamped forward and its
-    // flags cleared, not a field-by-field migration.
-    if (got == qint64(sizeof b) && b.version == 6u && b.sizeBytes == sizeof b) {
-        b.version = dsp::kParamVersion;
-        b.flags = 0u;
-    }
-
-    bool ok = (got == qint64(sizeof b) && b.version == dsp::kParamVersion
-               && b.sizeBytes == sizeof b);
-    bool migrated = false;
-    for (const Legacy &l : kLegacy) {
-        if (!ok && got == l.size && b.version == l.version && b.sizeBytes == uint32_t(l.size)) {
-            ok = true;
-            migrated = true;
-            break;
-        }
-    }
-    if (!ok)
-        return;
-
-    if (migrated) {
-        // Read before the header is rewritten, or the test below would be
-        // asking the new version number what the old one supported.
-        const uint32_t wrote = b.version;
-
-        // The bytes as they were laid out by the writing version. `b` is about
-        // to be rebuilt from them, so they have to be taken out of it first.
-        // Two arguments: one would declare a function. Ninth time in this tree.
-        std::vector<unsigned char> raw(size_t(got), 0u);
-        std::memcpy(raw.data(), &b, raw.size());
-        std::memset(&b, 0, sizeof b);
-
-        struct Field { void *dst; size_t oldOffset; size_t bytes; };
-        const Field fields[] = {
-            { &b.generation,  12,  4 },
-            { &b.enableMask,  16,  4 },
-            { &b.comp,        24,  28 },
-            { &b.reverb,      52,  32 },
-            { &b.tube,        84,  16 },
-            { &b.exciter,    100,  12 },   // v6 appended thresholdDb
-            { &b.bass,       112,  16 },
-            { &b.width,      128,   8 },   // v6 appended phaseAmount
-            { &b.crossfeed,  136,  12 },
-            { &b.multiband,  148, 108 },
-            { &b.convolution,256,  44 },
-            { &b.eq,         300, 520 },
-            { &b.matrix,     820, 256 },
-            { &b.delay,     1076,  32 },
-            { &b.loudness,  1108,  16 },
-            { &b.limiter,   1124,  16 },   // v6 appended truePeak
-            { &b.dynBass,   1140,  16 },
-            { &b.graphic,   1156, 128 },
-            { &b.order,     1284,  16 },   // v5 had 16 stages, v6 has 20
-        };
-        for (const Field &f : fields) {
-            if (f.oldOffset + f.bytes <= raw.size())
-                std::memcpy(f.dst, raw.data() + f.oldOffset, f.bytes);
-        }
-
-        // The four stages v5 did not have, slotted into whatever order the user
-        // had arranged the other sixteen into.
-        //
-        // Keeping their arrangement matters -- the old stage ids did not move,
-        // so throwing it away would be a needless loss. But appending the new
-        // four on the end is not neutral either: it would put the leveller and
-        // the clipper *after* the limiter, which is backwards for both. So each
-        // one is placed next to the stage it belongs beside, and only falls back
-        // to the end if that stage somehow is not in the list.
-        if (wrote >= 5u) {
-            struct Placement { uint8_t stage; uint8_t anchor; bool before; };
-            static const Placement kPlace[] = {
-                // Nothing to anchor to -- levelling goes first, so everything
-                // downstream sees a predictable level.
-                { dsp::kStageAutoGain,   0xFFu,               true },
-                { dsp::kStageTransient,  dsp::kStageComp,     true },
-                { dsp::kStageNightMode,  dsp::kStageMultiband, false },
-                { dsp::kStageClipper,    dsp::kStageLimiter,  true },
-            };
-
-            uint8_t built[dsp::kStageCount];
-            int n = 0;
-            for (int i = 0; i < 16; ++i)
-                built[n++] = b.order[i];
-
-            for (const Placement &p2 : kPlace) {
-                int at = n;                    // fall back to the end
-                if (p2.anchor == 0xFFu) {
-                    at = 0;
-                } else {
-                    for (int i = 0; i < n; ++i) {
-                        if (built[i] == p2.anchor) {
-                            at = p2.before ? i : i + 1;
-                            break;
-                        }
-                    }
-                }
-                for (int i = n; i > at; --i)
-                    built[i] = built[i - 1];
-                built[at] = p2.stage;
-                ++n;
-            }
-            std::memcpy(b.order, built, sizeof b.order);
-        }
-
-        // Fields that v6 added inside existing structs. Zero is a legitimate
-        // number for most of them and the wrong one for all of them, so each
-        // gets the default the interface would have offered.
-        b.exciter.thresholdDb = dsp::Exciter::Params{}.thresholdDb;
-        b.width.phaseAmount = dsp::StereoWidener::Params{}.phaseAmount;
-        b.limiter.truePeak = dsp::Limiter::Params{}.truePeak;
-        b.transient = dsp::TransientShaper::Params{};
-        b.clipper = dsp::SoftClipper::Params{};
-        b.autoGain = dsp::LoudnessLeveller::Params{};
-        b.nightMode = dsp::DynamicRange::Params{};
-
-        b.version = dsp::kParamVersion;
-        b.sizeBytes = uint32_t(sizeof b);
-
-        // Bits the writing version did not have cannot have been set by it, and
-        // a stage whose parameters arrived as zeros must not come up enabled --
-        // the matrix in particular would be silence rather than a no-op, which
-        // is why it is given the identity here rather than left as read.
-        uint32_t keep = dsp::kEnBass | dsp::kEnExciter | dsp::kEnTube | dsp::kEnComp
-                        | dsp::kEnMultiband | dsp::kEnReverb | dsp::kEnWidth
-                        | dsp::kEnCrossfeed | dsp::kEnConvolution;
-        if (wrote >= 3u)
-            keep |= dsp::kEnEqualizer;
-        if (wrote >= 4u)
-            keep |= dsp::kEnMatrix | dsp::kEnDelay | dsp::kEnLoudness;
-        if (wrote >= 5u)
-            keep |= dsp::kEnLimiter | dsp::kEnDynBass | dsp::kEnGraphic;
-        b.enableMask &= keep;
-        if (wrote < 4u)
-            b.matrix = dsp::ChannelMatrix::identity();
-        // Same reasoning one version on: zeros are not a configuration.
-        if (wrote < 5u) {
-            b.limiter = dsp::Limiter::Params{};
-            b.dynBass = dsp::DynamicBass::Params{};
-            std::memset(&b.graphic, 0, sizeof b.graphic);
-            b.graphic.amount = 1.0f;
-            std::memcpy(b.order, dsp::kDefaultOrder, sizeof b.order);
-        }
-        b = dsp::sanitise(b);
-    }
-
+    dsp::ParamBlock b;
+    if (!dsp::decodeParamBlock(bytes.constData(), size_t(bytes.size()), &b)) return;
     m_generation = b.generation;
 
     // params.bin doubles as the session store for the effects.

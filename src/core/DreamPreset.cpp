@@ -105,6 +105,13 @@ bool saveDreamPreset(const QString &path, const DreamPreset &preset, QString *er
             { dsp::kEnEqualizer, "equalizer" },
             { dsp::kEnMatrix, "matrix" },      { dsp::kEnDelay, "delay" },
             { dsp::kEnLoudness, "loudness" },
+            { dsp::kEnGraphic, "graphic" }, { dsp::kEnDynBass, "dynBass" },
+            { dsp::kEnLimiter, "limiter" }, { dsp::kEnTransient, "transient" },
+            { dsp::kEnClipper, "clipper" }, { dsp::kEnAutoGain, "autoGain" },
+            { dsp::kEnNightMode, "nightMode" },
+            { dsp::kEnBinaural, "binaural" }, { dsp::kEnNeural, "neural" },
+            { dsp::kEnChorus, "chorus" }, { dsp::kEnFlanger, "flanger" },
+            { dsp::kEnPhaser, "phaser" }, { dsp::kEnFdn, "fdn" },
         };
         for (const auto &n : kNames) {
             if (p.enableMask & n.bit)
@@ -167,6 +174,100 @@ bool saveDreamPreset(const QString &path, const DreamPreset &preset, QString *er
             { QStringLiteral("bandEnabled"), mbEnabled },
         };
 
+        fx[QStringLiteral("binaural")] = QJsonObject{
+            {QStringLiteral("speakerAngleDeg"), p.binaural.speakerAngleDeg},
+            {QStringLiteral("yawDeg"), p.binaural.yawDeg},
+            {QStringLiteral("mix"), p.binaural.mix},
+            {QStringLiteral("outputDb"), p.binaural.outputDb},
+            {QStringLiteral("elevationDeg"), p.binaural.elevationDeg},
+            {QStringLiteral("model"), int(p.binaural.model)}
+        };
+        fx[QStringLiteral("neural")] = QJsonObject{
+            {QStringLiteral("driveDb"), p.neural.driveDb},
+            {QStringLiteral("mix"), p.neural.mix},
+            {QStringLiteral("outputDb"), p.neural.outputDb},
+            {QStringLiteral("model"), int(p.neural.model)}
+        };
+        fx[QStringLiteral("chorus")] = QJsonObject{
+            {QStringLiteral("rateHz"), p.chorus.rateHz},
+            {QStringLiteral("depth"), p.chorus.depth},
+            {QStringLiteral("delayMs"), p.chorus.delayMs},
+            {QStringLiteral("feedback"), p.chorus.feedback},
+            {QStringLiteral("mix"), p.chorus.mix},
+            {QStringLiteral("stereoPhase"), p.chorus.stereoPhase}
+        };
+        fx[QStringLiteral("flanger")] = QJsonObject{
+            {QStringLiteral("rateHz"), p.flanger.rateHz},
+            {QStringLiteral("depth"), p.flanger.depth},
+            {QStringLiteral("delayMs"), p.flanger.delayMs},
+            {QStringLiteral("feedback"), p.flanger.feedback},
+            {QStringLiteral("mix"), p.flanger.mix},
+            {QStringLiteral("stereoPhase"), p.flanger.stereoPhase}
+        };
+        fx[QStringLiteral("phaser")] = QJsonObject{
+            {QStringLiteral("rateHz"), p.phaser.rateHz},
+            {QStringLiteral("depth"), p.phaser.depth},
+            {QStringLiteral("delayMs"), p.phaser.delayMs},
+            {QStringLiteral("feedback"), p.phaser.feedback},
+            {QStringLiteral("mix"), p.phaser.mix},
+            {QStringLiteral("stereoPhase"), p.phaser.stereoPhase}
+        };
+        fx[QStringLiteral("fdn")] = QJsonObject{
+            {QStringLiteral("decaySeconds"), p.fdn.decaySeconds},
+            {QStringLiteral("dampingHz"), p.fdn.dampingHz},
+            {QStringLiteral("preDelayMs"), p.fdn.preDelayMs},
+            {QStringLiteral("mix"), p.fdn.mix},
+            {QStringLiteral("width"), p.fdn.width},
+            {QStringLiteral("outputDb"), p.fdn.outputDb}
+        };
+        fx[QStringLiteral("transient")] = QJsonObject{
+            {QStringLiteral("attack"), p.transient.attack},
+            {QStringLiteral("sustain"), p.transient.sustain},
+            {QStringLiteral("attackMs"), p.transient.attackMs},
+            {QStringLiteral("releaseMs"), p.transient.releaseMs},
+            {QStringLiteral("thresholdDb"), p.transient.thresholdDb}
+        };
+        fx[QStringLiteral("clipper")] = QJsonObject{
+            {QStringLiteral("driveDb"), p.clipper.driveDb},
+            {QStringLiteral("ceilingDb"), p.clipper.ceilingDb},
+            {QStringLiteral("kneeDb"), p.clipper.kneeDb},
+            {QStringLiteral("oversample"), p.clipper.oversample}
+        };
+        fx[QStringLiteral("autoGain")] = QJsonObject{
+            {QStringLiteral("targetLufs"), p.autoGain.targetLufs},
+            {QStringLiteral("maxGainDb"), p.autoGain.maxGainDb},
+            {QStringLiteral("rateDbPerSec"), p.autoGain.rateDbPerSec},
+            {QStringLiteral("windowDb"), p.autoGain.windowDb},
+            {QStringLiteral("gateLufs"), p.autoGain.gateLufs}
+        };
+        fx[QStringLiteral("nightMode")] = QJsonObject{
+            {QStringLiteral("profile"), int(p.nightMode.profile)},
+            {QStringLiteral("boost"), p.nightMode.boost},
+            {QStringLiteral("cut"), p.nightMode.cut},
+            {QStringLiteral("referenceLufs"), p.nightMode.referenceLufs}
+        };
+        fx[QStringLiteral("limiter")] = QJsonObject{
+            {QStringLiteral("gainDb"), p.limiter.gainDb},
+            {QStringLiteral("thresholdDb"), p.limiter.thresholdDb},
+            {QStringLiteral("releaseMs"), p.limiter.releaseMs},
+            {QStringLiteral("lookaheadMs"), p.limiter.lookaheadMs},
+            {QStringLiteral("truePeak"), p.limiter.truePeak}
+        };
+        fx[QStringLiteral("dynBass")] = QJsonObject{
+            {QStringLiteral("maxGainDb"), p.dynBass.maxGainDb},
+            {QStringLiteral("cutoffHz"), p.dynBass.cutoffHz},
+            {QStringLiteral("releaseMs"), p.dynBass.releaseMs}
+        };
+        QJsonArray order;
+        for (uint8_t id : p.order) order.append(int(id));
+        fx[QStringLiteral("order")] = order;
+        fx[QStringLiteral("flags")] = int(p.flags);
+        fx[QStringLiteral("exciterThresholdDb")] = p.exciter.thresholdDb;
+        fx[QStringLiteral("widthPhaseAmount")] = p.width.phaseAmount;
+        QJsonArray graphic;
+        for (float db : p.graphic.gainDb) graphic.append(db);
+        fx[QStringLiteral("graphicGainDb")] = graphic;
+        fx[QStringLiteral("graphicAmount")] = p.graphic.amount;
         root[QStringLiteral("effects")] = fx;
     }
 
@@ -273,6 +374,14 @@ bool loadDreamPreset(const QString &path, DreamPreset *out, QString *error)
 
     dsp::ParamBlock &p = out->params;
     const QJsonObject fx = root.value(QStringLiteral("effects")).toObject();
+    p.binaural = dsp::Binaural::Params{};
+    p.neural = dsp::NeuralSaturation::Params{};
+    p.chorus = dsp::Modulation::Params{};
+    p.flanger = dsp::Modulation::Params{};
+    p.phaser = dsp::Modulation::Params{};
+    p.fdn = dsp::FdnReverb::Params{};
+    p.flanger.delayMs = 2.0f;
+    p.flanger.feedback = 0.5f;
     p.enableMask = uint32_t(fx.value(QStringLiteral("enableMask")).toInt(0));
 
     compressorFromJson(fx.value(QStringLiteral("compressor")).toObject(), &p.comp);
@@ -354,6 +463,120 @@ bool loadDreamPreset(const QString &path, DreamPreset *out, QString *error)
         p.loudness.offsetDb = float(ld.value(QStringLiteral("offsetDb")).toDouble(0.0));
         p.loudness.amount = float(ld.value(QStringLiteral("amount")).toDouble(1.0));
     }
+
+    {
+        const QJsonObject o = fx.value(QStringLiteral("binaural")).toObject();
+        p.binaural.speakerAngleDeg = float(o.value(QStringLiteral("speakerAngleDeg")).toDouble(p.binaural.speakerAngleDeg));
+        p.binaural.yawDeg = float(o.value(QStringLiteral("yawDeg")).toDouble(p.binaural.yawDeg));
+        p.binaural.mix = float(o.value(QStringLiteral("mix")).toDouble(p.binaural.mix));
+        p.binaural.outputDb = float(o.value(QStringLiteral("outputDb")).toDouble(p.binaural.outputDb));
+        p.binaural.elevationDeg = float(o.value(QStringLiteral("elevationDeg")).toDouble(0.0));
+        p.binaural.model = uint32_t(o.value(QStringLiteral("model")).toInt(
+            fx.contains(QStringLiteral("binaural")) ? 0 : 1));
+    }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("neural")).toObject();
+        p.neural.driveDb = float(o.value(QStringLiteral("driveDb")).toDouble(p.neural.driveDb));
+        p.neural.mix = float(o.value(QStringLiteral("mix")).toDouble(p.neural.mix));
+        p.neural.outputDb = float(o.value(QStringLiteral("outputDb")).toDouble(p.neural.outputDb));
+        p.neural.model = uint32_t(o.value(QStringLiteral("model")).toInt(int(p.neural.model)));
+    }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("chorus")).toObject();
+        p.chorus.rateHz = float(o.value(QStringLiteral("rateHz")).toDouble(p.chorus.rateHz));
+        p.chorus.depth = float(o.value(QStringLiteral("depth")).toDouble(p.chorus.depth));
+        p.chorus.delayMs = float(o.value(QStringLiteral("delayMs")).toDouble(p.chorus.delayMs));
+        p.chorus.feedback = float(o.value(QStringLiteral("feedback")).toDouble(p.chorus.feedback));
+        p.chorus.mix = float(o.value(QStringLiteral("mix")).toDouble(p.chorus.mix));
+        p.chorus.stereoPhase = float(o.value(QStringLiteral("stereoPhase")).toDouble(p.chorus.stereoPhase));
+    }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("flanger")).toObject();
+        p.flanger.rateHz = float(o.value(QStringLiteral("rateHz")).toDouble(p.flanger.rateHz));
+        p.flanger.depth = float(o.value(QStringLiteral("depth")).toDouble(p.flanger.depth));
+        p.flanger.delayMs = float(o.value(QStringLiteral("delayMs")).toDouble(p.flanger.delayMs));
+        p.flanger.feedback = float(o.value(QStringLiteral("feedback")).toDouble(p.flanger.feedback));
+        p.flanger.mix = float(o.value(QStringLiteral("mix")).toDouble(p.flanger.mix));
+        p.flanger.stereoPhase = float(o.value(QStringLiteral("stereoPhase")).toDouble(p.flanger.stereoPhase));
+    }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("phaser")).toObject();
+        p.phaser.rateHz = float(o.value(QStringLiteral("rateHz")).toDouble(p.phaser.rateHz));
+        p.phaser.depth = float(o.value(QStringLiteral("depth")).toDouble(p.phaser.depth));
+        p.phaser.delayMs = float(o.value(QStringLiteral("delayMs")).toDouble(p.phaser.delayMs));
+        p.phaser.feedback = float(o.value(QStringLiteral("feedback")).toDouble(p.phaser.feedback));
+        p.phaser.mix = float(o.value(QStringLiteral("mix")).toDouble(p.phaser.mix));
+        p.phaser.stereoPhase = float(o.value(QStringLiteral("stereoPhase")).toDouble(p.phaser.stereoPhase));
+    }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("fdn")).toObject();
+        p.fdn.decaySeconds = float(o.value(QStringLiteral("decaySeconds")).toDouble(p.fdn.decaySeconds));
+        p.fdn.dampingHz = float(o.value(QStringLiteral("dampingHz")).toDouble(p.fdn.dampingHz));
+        p.fdn.preDelayMs = float(o.value(QStringLiteral("preDelayMs")).toDouble(p.fdn.preDelayMs));
+        p.fdn.mix = float(o.value(QStringLiteral("mix")).toDouble(p.fdn.mix));
+        p.fdn.width = float(o.value(QStringLiteral("width")).toDouble(p.fdn.width));
+        p.fdn.outputDb = float(o.value(QStringLiteral("outputDb")).toDouble(p.fdn.outputDb));
+    }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("transient")).toObject();
+        p.transient.attack = float(o.value(QStringLiteral("attack")).toDouble(p.transient.attack));
+        p.transient.sustain = float(o.value(QStringLiteral("sustain")).toDouble(p.transient.sustain));
+        p.transient.attackMs = float(o.value(QStringLiteral("attackMs")).toDouble(p.transient.attackMs));
+        p.transient.releaseMs = float(o.value(QStringLiteral("releaseMs")).toDouble(p.transient.releaseMs));
+        p.transient.thresholdDb = float(o.value(QStringLiteral("thresholdDb")).toDouble(p.transient.thresholdDb));
+    }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("clipper")).toObject();
+        p.clipper.driveDb = float(o.value(QStringLiteral("driveDb")).toDouble(p.clipper.driveDb));
+        p.clipper.ceilingDb = float(o.value(QStringLiteral("ceilingDb")).toDouble(p.clipper.ceilingDb));
+        p.clipper.kneeDb = float(o.value(QStringLiteral("kneeDb")).toDouble(p.clipper.kneeDb));
+        p.clipper.oversample = o.value(QStringLiteral("oversample")).toBool(p.clipper.oversample);
+    }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("autoGain")).toObject();
+        p.autoGain.targetLufs = float(o.value(QStringLiteral("targetLufs")).toDouble(p.autoGain.targetLufs));
+        p.autoGain.maxGainDb = float(o.value(QStringLiteral("maxGainDb")).toDouble(p.autoGain.maxGainDb));
+        p.autoGain.rateDbPerSec = float(o.value(QStringLiteral("rateDbPerSec")).toDouble(p.autoGain.rateDbPerSec));
+        p.autoGain.windowDb = float(o.value(QStringLiteral("windowDb")).toDouble(p.autoGain.windowDb));
+        p.autoGain.gateLufs = float(o.value(QStringLiteral("gateLufs")).toDouble(p.autoGain.gateLufs));
+    }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("nightMode")).toObject();
+        p.nightMode.profile = o.value(QStringLiteral("profile")).toInt(p.nightMode.profile);
+        p.nightMode.boost = float(o.value(QStringLiteral("boost")).toDouble(p.nightMode.boost));
+        p.nightMode.cut = float(o.value(QStringLiteral("cut")).toDouble(p.nightMode.cut));
+        p.nightMode.referenceLufs = float(o.value(QStringLiteral("referenceLufs")).toDouble(p.nightMode.referenceLufs));
+    }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("limiter")).toObject();
+        p.limiter.gainDb = float(o.value(QStringLiteral("gainDb")).toDouble(p.limiter.gainDb));
+        p.limiter.thresholdDb = float(o.value(QStringLiteral("thresholdDb")).toDouble(p.limiter.thresholdDb));
+        p.limiter.releaseMs = float(o.value(QStringLiteral("releaseMs")).toDouble(p.limiter.releaseMs));
+        p.limiter.lookaheadMs = float(o.value(QStringLiteral("lookaheadMs")).toDouble(p.limiter.lookaheadMs));
+        p.limiter.truePeak = o.value(QStringLiteral("truePeak")).toBool(p.limiter.truePeak);
+    }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("dynBass")).toObject();
+        p.dynBass.maxGainDb = float(o.value(QStringLiteral("maxGainDb")).toDouble(p.dynBass.maxGainDb));
+        p.dynBass.cutoffHz = float(o.value(QStringLiteral("cutoffHz")).toDouble(p.dynBass.cutoffHz));
+        p.dynBass.releaseMs = float(o.value(QStringLiteral("releaseMs")).toDouble(p.dynBass.releaseMs));
+    }
+    p.flags = uint32_t(fx.value(QStringLiteral("flags")).toInt(0));
+    p.exciter.thresholdDb = float(fx.value(QStringLiteral("exciterThresholdDb")).toDouble(p.exciter.thresholdDb));
+    p.width.phaseAmount = float(fx.value(QStringLiteral("widthPhaseAmount")).toDouble(p.width.phaseAmount));
+    const QJsonArray order = fx.value(QStringLiteral("order")).toArray();
+    if (order.size() == 16 || order.size() == 20 || order.size() == dsp::kStageCount) {
+        uint8_t ids[dsp::kStageCount]{};
+        for (int i = 0; i < order.size(); ++i) {
+            const int id = order[i].toInt(-1);
+            ids[i] = id >= 0 && id < dsp::kStageCount ? uint8_t(id) : 0xFF;
+        }
+        dsp::upgradeStageOrder(ids, int(order.size()), p.order);
+    }
+    const QJsonArray graphic = fx.value(QStringLiteral("graphicGainDb")).toArray();
+    for (int i = 0; i < graphic.size() && i < dsp::GraphicEq::kBands; ++i)
+        p.graphic.gainDb[i] = float(graphic[i].toDouble());
+    p.graphic.amount = float(fx.value(QStringLiteral("graphicAmount")).toDouble(p.graphic.amount));
 
     const QJsonObject cv = root.value(QStringLiteral("convolution")).toObject();
     out->convolutionFile = cv.value(QStringLiteral("file")).toString();

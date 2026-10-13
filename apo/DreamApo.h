@@ -146,6 +146,8 @@ private:
     // of no consequence.
     std::atomic<unsigned long long> m_framesProcessed{ 0 };
     std::atomic<uint32_t> m_statusFlags{ 0 };
+    std::atomic<uint32_t> m_appliedGeneration{0}, m_appliedMask{0};
+    std::atomic<uint32_t> m_latencySamples{0};
 
     // The last block read from the channel, kept so a callback that catches the
     // publisher mid-write can carry on with what it already had. A member, not

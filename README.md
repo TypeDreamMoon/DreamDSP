@@ -29,9 +29,9 @@ audio -> Windows Audio Engine -> DreamDspApo.dll
                         C:\ProgramData\DreamDSP\status.bin  <- APO writes back
 ```
 
-Parameters travel, not filter coefficients: 820 bytes of clamped scalars,
+Parameters travel, not filter coefficients: a version-9, 1532-byte scalar block,
 published by replacing a file (so the kernel provides the atomicity), read
-through a three-slot seqlock, and sanitised on both sides. A hostile IIR
+through a bounded atomic-word snapshot, and sanitised on both sides. A hostile IIR
 denominator cannot be told apart from a legitimate one by any cheap test, which
 would leave an unbounded-gain path into a system audio process; bounded scalars
 can be checked exactly.
@@ -64,6 +64,10 @@ Everything runs in DreamDSP's own APO.
 | Compressor, with auto knee/attack/release/makeup | done |
 | Three-band multiband compressor | done |
 | Algorithmic reverb | done |
+| Eight-line Householder FDN reverb, damped RT60 / pre-delay | done |
+| Chorus / Flanger / six-stage Phaser | done |
+| Measured KEMAR binaural virtual speakers, azimuth / elevation | stereo headphones; legacy spherical head retained |
+| Synthetic Memory Drive, trained eight-unit recurrent saturator | 48 kHz only; other rates bypass |
 | Tube saturation, exciter | done |
 | Psychoacoustic virtual bass | done |
 | Stereo widener, crossfeed | done |
@@ -98,12 +102,12 @@ formula, reproduced exactly.
 
 **The chain order is the user's.** Stages run in whatever order the chain
 editor puts them in; `kDefaultOrder` is a default, not a constraint. The order
-travels as a permutation of the twenty stage ids, and the sanitiser replaces
+travels as a permutation of the twenty-six stage ids, and the sanitiser replaces
 anything that is not a permutation wholesale rather than patching it -- a
 duplicate would run a stage twice and an omission would silently drop an effect
 whose switch says it is on.
 
-**The four newest stages came out of a measurement exercise**, written up in
+**Four earlier stages came out of a measurement exercise**, written up in
 [`docs/effects-research.md`](docs/effects-research.md). Three of them exist
 because the measurement said something a datasheet would not:
 
@@ -164,6 +168,112 @@ than native code -- but it is a language implementation, not an effect, and a
 runaway script on a real-time thread inside a system audio process is a poor
 place to find that out.
 
+## Spatial and neural expansion
+
+The Effects page includes six new cards, head-fixed top and side views of the
+virtual speakers, and the existing endpoint output meter. Every new stage
+participates in chain ordering, session restore and `.dreamdsp` preset round
+trips. Version 2–8 session blocks are migrated on GUI/APO load; existing stage
+order is preserved and missing stages start disabled. Version-8 binaural
+settings keep the legacy horizontal model and sound. GUI and APO must be deployed
+together: an older APO intentionally rejects the version-9 wire format.
+
+```mermaid
+flowchart LR
+    GUI[Qt GUI: controls and presets] -->|30 ms coalescing| File[Atomic parameter-file replacement]
+    File --> Worker[APO non-audio watcher: validation and IR preparation]
+    Worker --> Snapshot[Single writer / multiple readers: atomic snapshot]
+    Snapshot -->|at most two attempts| DSP[Audio thread: install targets and process]
+    DSP --> Smooth[Sample-rate-aware smoothing and prepared buffers]
+    DSP --> Status[Atomic status fields]
+    Status --> Poll[Non-audio status writer]
+    Poll --> GUI
+```
+
+The snapshot uses atomic payload words as well as an atomic sequence counter;
+a sequence counter around ordinary concurrent `memcpy` would still be a C++
+data race. Failed reads preserve the previous valid parameters. No Qt objects,
+file operations, model loading or allocation occur inside the processing loop.
+Storage and HRTF tables are prepared before processing. Enable transitions
+clear prepared state, so toggle cost still belongs in the callback budget.
+
+- **Binaural** renders all four speaker-to-ear paths with prepared FIR banks,
+  smoothed azimuth/elevation and a 20 ms crossfade between models. Model 1 uses
+  the diffuse-field KEMAR measurements by **Bill Gardner and Keith Martin,
+  MIT Media Laboratory (1994)**; data provenance, attribution permission and
+  the reproducible converter are in [dsp/hrtf/NOTICE.md](dsp/hrtf/NOTICE.md).
+  The UI keeps the listener facing the screen: speaker spread is the full angle,
+  rotation is clockwise, and elevation ranges from -40° below the ears to +90°
+  overhead. Generic pinna spectral cues provide height information, but perceived
+  localisation depends on the listener and headphones. Model 0 preserves the
+  earlier horizontal spherical head. Only stereo layouts are processed; there
+  is no head tracking, SOFA import or Ambisonics decoder. At 48 kHz the measured
+  model has 224 taps and 35 samples of causal resampling padding, plus the native
+  HRIR arrival delays; the legacy model's common offset is 29 samples. Neither
+  adds a block buffer. These acoustic delays are distinct from `latencySamples()`.
+  Use fully wet; mixing direct dry audio changes phase and timbre.
+- **Cinema space** selects measured HRTFs with 64° speaker spread, +8° elevation
+  and -6 dB output, followed by a light FDN room (0.75 s decay, 14 ms pre-delay,
+  12% mix). The button places FDN directly after Binaural and disables legacy
+  reverb, width and crossfeed; other effects and master bypass are preserved.
+  This is stereo virtual-speaker rendering, not Dolby Atmos decoding or a
+  reconstruction of missing surround/object channels. Use ordinary stereo input
+  and headphones; avoid processing material already rendered to binaural audio
+  or stacking another system spatial renderer.
+- **Neural saturation** uses an original eight-unit echo-state network with a
+  trained linear readout, independent state per channel, parameter smoothing
+  and a DC blocker. `scripts/train-neural-saturation.py` reproduces the weights
+  using only Python's standard library. The checked-in JSON records provenance
+  and a held-out synthetic-teacher ESR of -39.06 dB. This is a synthetic effect,
+  not a measured amplifier/tape/tube capture or a quality claim against hardware.
+  It runs only at 48 kHz, bounds model input to +/-2 and has no oversampling;
+  high drive can alias. Other sample rates bypass the stage exactly.
+- **FDN** uses eight unequal delay lines, a Householder feedback matrix,
+  per-line decay gains, damping, pre-delay and stereo width. Chorus/Flanger
+  use interpolated modulated delays; Phaser uses six allpass sections.
+  Recursive feedback is bounded. Silent APO input is fed through active stages
+  as zero samples so delay, reverb and neural tails can finish.
+  The six new stages reset their history when master bypass is released. Older
+  stages retain their existing bypass policy, including frozen convolution
+  history; this change does not introduce seamless bypass for the entire rack.
+
+The expansion adds no runtime library dependency. Personalised HRTFs / SOFA import,
+RTNeural/ONNX model import, neural denoising/dereverberation, automatic room
+calibration and long non-uniform convolution remain future work. The existing
+uniform convolver's length limit is unchanged (64 partitions, approximately
+341 ms at 48 kHz); FDN supplies a longer synthetic reverb tail.
+
+Reported buffering latency includes only active delay/limiter/width/convolution
+stages. Windows may cache this value at stream creation; changing lookahead,
+delay, phase widening or master bypass during playback can invalidate host
+alignment until the stream is recreated. This is not dynamic host compensation.
+
+### Isolated regression tests
+
+With the Qt runtime `bin` directory on the process PATH, run from a configured
+build directory (the test programs do not install an APO or change the registry):
+
+```text
+ctest --output-on-failure
+dspharness --spatial-bench
+dspharness --spatial-demo spatial-demo.wav
+dspharness --bench
+```
+
+CTest covers the existing DSP regression suite, new spatial/neural reference
+and impulse tests, FDN decay, modulation block invariance, bounded parameter
+publication to four readers, parameter migration, allocation-free parameter
+changes/toggles and a separate Qt preset/model round trip. Temporary preset
+files stay in the build directory. `--spatial-bench` reports mean, p99, maximum
+and deadline misses; measurements are offline and do not establish audiodg
+worst-case latency. Installed-APO listening and underrun tests remain separate.
+
+The 20-second demo uses original procedural audio: front (0–3 s), below (3–6 s),
+above (6–9 s), one clockwise orbit (9–15 s), then stereo plucks with the cinema
+room (15–20 s). It is rendered offline and needs no APO installation. Listen on
+headphones with additional spatial processing off; it tests positioning cues,
+not fidelity to a particular cinema.
+
 ## Peace compatibility
 
 DreamDSP began as a Peace Equalizer replacement and keeps interoperability with
@@ -208,6 +318,14 @@ Pass `gallery` to also build HuskarUI's component gallery.
    `addImportPath()` appends. `main.cpp` prepends our prefix via
    `setImportPathList()`, and `build.bat` pins `HuskarUI_DIR` so `find_package`
    cannot resolve the stale one either.
+
+With a Chinese-only MSVC installation, check Ninja's recorded dependencies
+after configuration (`ninja -C <build> -t deps`). If they are empty and
+`msvc_deps_prefix` in `CMakeFiles/rules.ninja` is garbled, configure with
+`-DDREAMDSP_MSVC_INCLUDE_PREFIX="注意: 包含文件: "` using a UTF-8 build console,
+then perform a complete rebuild. This overrides the detected prefix without
+editing generated files. Mixing stale DSP object layouts can cause crashes even
+when linking succeeds; do not trust that build for APO deployment.
 
 ## Layout
 

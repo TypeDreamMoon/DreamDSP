@@ -224,6 +224,7 @@ public:
     Q_INVOKABLE bool stageEnabled(int stageId) const;
     Q_INVOKABLE void moveStage(int fromIndex, int toIndex);
     Q_INVOKABLE void resetChainOrder();
+    Q_INVOKABLE void applyCinemaSpatialPreset();
 
     Q_INVOKABLE void refreshDevices();
     Q_INVOKABLE void resetAll();

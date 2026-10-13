@@ -39,6 +39,11 @@ set(DREAMDSP_CORE_SOURCES
     Saturation.h          Saturation.cpp
     Stereo.h              Stereo.cpp
     MultibandCompressor.h MultibandCompressor.cpp
+    ParameterSmoother.h
+    Binaural.h            Binaural.cpp
+    NeuralSaturation.h    NeuralSaturation.cpp
+    Modulation.h          Modulation.cpp
+    FdnReverb.h           FdnReverb.cpp
     WavFile.h             WavFile.cpp     # offline only, never on a callback
 )
 

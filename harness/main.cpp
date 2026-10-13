@@ -26,6 +26,8 @@
 #include "MultibandCompressor.h"
 #include "ParamBlock.h"
 #include "ParamSlots.h"
+#include "ExpansionTests.h"
+#include "SpatialNeuralTests.h"
 #include "Resampler.h"
 #include "Reverb.h"
 #include "Routing.h"
@@ -3440,7 +3442,7 @@ void testParamBlock()
 {
     std::printf("\n[parameter block]\n");
 
-    check(sizeof(ParamBlock) == 1388, fmt("wire size is %.0f bytes", double(sizeof(ParamBlock))));
+    check(sizeof(ParamBlock) == 1532, fmt("wire size is %.0f bytes", double(sizeof(ParamBlock))));
     check(sizeof(StatusBlock) == 296, "status block is 296 bytes");
 
     // The transparent default must not be the dsp defaults. This is the test
@@ -3723,6 +3725,83 @@ void testDenormals()
     check(DenormalGuard::rawMode() == before, "the previous mode is restored");
 }
 
+void testExpandedChainRealtime()
+{
+    std::printf("\n[expanded chain realtime and latency]\n");
+    const size_t legacySizes[] = {300, 820, 1124, 1300};
+    for (uint32_t version = 2; version <= 5; ++version) {
+        std::vector<unsigned char> raw(legacySizes[version - 2], 0);
+        const uint32_t header[] = {kParamMagic, version, uint32_t(raw.size()), 91, 0xffffffffu, 0xffffffffu};
+        std::memcpy(raw.data(), header, sizeof header);
+        const float tubeDrive = 4.0f;
+        std::memcpy(raw.data() + 84, &tubeDrive, sizeof tubeDrive);
+        if (version == 5) for (int i = 0; i < 16; ++i) raw[1284 + i] = uint8_t(15 - i);
+        ParamBlock restored;
+        const uint32_t masks[] = {0x1ffu, 0x3ffu, 0x1fffu, 0xffffu};
+        bool ok = decodeParamBlock(raw.data(), raw.size(), &restored) && isSane(restored)
+                  && restored.generation == 91 && restored.tube.drive == 4
+                  && restored.flags == 0 && restored.enableMask == masks[version - 2]
+                  && (version >= 4 || restored.matrix.gain[0][0] == 1)
+                  && (version >= 5 || restored.graphic.amount == 1);
+        if (version == 5) {
+            int previous = 16;
+            for (auto id : restored.order) if (id < 16) { ok &= id < previous; previous = id; }
+        }
+        check(ok, "v2-v5 session migration retains available fields and old order, clears unavailable flags");
+    }
+    EffectChain chain;
+    chain.prepare(48000, 2, 64);
+    auto p = transparentBlock();
+    chain.apply(p);
+    check(chain.latencySamples() == 0, "disabled stages do not contribute stale latency");
+    p.enableMask = kEnLimiter;
+    p.limiter.lookaheadMs = 2;
+    chain.apply(sanitise(p));
+    check(chain.latencySamples() == 96, "enabled limiter contributes its actual lookahead");
+    p.flags = kPfBypass;
+    chain.apply(sanitise(p));
+    check(chain.latencySamples() == 0, "master passthrough reports no processing delay");
+    p.flags = 0;
+    p.enableMask = kEnBinaural | kEnNeural | kEnChorus | kEnFlanger | kEnPhaser | kEnFdn;
+    p.binaural = Binaural::Params{};
+    p.neural = NeuralSaturation::Params{};
+    p.chorus = p.flanger = p.phaser = Modulation::Params{};
+    p.flanger.delayMs = 2;
+    p.fdn = FdnReverb::Params{};
+    std::array<float, 64> left{}, right{};
+    float *ptrs[]{left.data(), right.data()};
+    bool finite = true;
+    const auto finiteSample = [](float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof bits);
+        return (bits & 0x7f800000u) != 0x7f800000u;
+    };
+    g_allocations.store(0);
+    g_countAllocations = true;
+    for (int block = 0; block < 1024; ++block) {
+        left.fill(.03f); right.fill(-.02f);
+        p.binaural.yawDeg = float(block % 361 - 180);
+        p.neural.driveDb = float(block % 19);
+        p.fdn.decaySeconds = .1f + float(block % 12);
+        if (block % 32 == 0) p.enableMask ^= kEnFdn | kEnChorus;
+        chain.apply(sanitise(p));
+        chain.process({ptrs, 2, 64});
+        for (int i = 0; i < 64; ++i) finite &= finiteSample(left[i]) && finiteSample(right[i]);
+    }
+    g_countAllocations = false;
+    check(g_allocations.load() == 0 && finite,
+          "six live new stages: parameter flood and toggles allocate nothing, output stays finite");
+    p.flags = kPfBypass;
+    chain.apply(sanitise(p));
+    p.flags = 0;
+    chain.apply(sanitise(p));
+    left.fill(0); right.fill(0);
+    chain.process({ptrs, 2, 64});
+    bool quiet = true;
+    for (int i = 0; i < 64; ++i) quiet &= left[i] == 0 && right[i] == 0;
+    check(quiet, "resuming master bypass clears old tails from all six new stages");
+}
+
 int runTests()
 {
     std::printf("DreamDSP dsp harness\n");
@@ -3765,6 +3844,9 @@ int runTests()
     testNoAllocation();
     testParamSlots();
     testDenormals();
+    testExpandedChainRealtime();
+    dreamdsp::tests::runExpansionTests(check);
+    dreamdsp::tests::runSpatialNeuralTests(check);
     std::printf("\n%s -- %d failure(s)\n", g_failures ? "FAIL" : "PASS", g_failures);
     return g_failures;
 }
@@ -3861,6 +3943,12 @@ int runBench()
         { kEnClipper,     "clipper" },
         { kEnAutoGain,    "auto volume" },
         { kEnNightMode,   "night mode" },
+        { kEnBinaural,    "binaural (stereo only)" },
+        { kEnNeural,      "neural (48 kHz only)" },
+        { kEnChorus,      "chorus" },
+        { kEnFlanger,     "flanger" },
+        { kEnPhaser,      "phaser" },
+        { kEnFdn,         "FDN reverb" },
     };
 
     for (const Case &c : cases) {
@@ -3919,6 +4007,11 @@ int runBench()
         base.nightMode.profile = DynamicRange::kProfileFilmStandard;
         base.delay.ms[0] = 2.0f;
         base.matrix.gain[0][1] = 0.2f;
+        base.binaural = Binaural::Params{};
+        base.neural = NeuralSaturation::Params{};
+        base.chorus = base.flanger = base.phaser = Modulation::Params{};
+        base.flanger.delayMs = 2;
+        base.fdn = FdnReverb::Params{};
 
         const double budgetNs = 1e9 * double(c.frames) / c.rate;
 
@@ -3957,7 +4050,7 @@ int runBench()
         const double idle = measure(0);
         double sum = 0.0;
         for (const Stage &st : stages) {
-            const double ns = measure(st.bit) - idle;
+            const double ns = std::max(0.0, measure(st.bit) - idle);
             sum += ns;
             std::printf("  %-24s %8.1f us   %5.2f %% of one core\n",
                         st.name, ns / 1000.0, 100.0 * ns / budgetNs);
@@ -3974,17 +4067,87 @@ int runBench()
     return 0;
 }
 
+int renderSpatialDemo(const char *path)
+{
+    // Reproducible, original test signal; no media file or installed APO needed.
+    constexpr int rate = 48000, seconds = 20, block = 64;
+    WavData wav;
+    wav.sampleRate = rate;
+    wav.channels.assign(2, std::vector<float>(rate * seconds));
+    Binaural spatial;
+    FdnReverb room;
+    spatial.prepare(rate, 2);
+    room.prepare(rate, 2);
+    Binaural::Params p;
+    p.model = 1; p.speakerAngleDeg = 0; p.outputDb = -6;
+    room.setParams({.75f, 5200, 14, .12f, 1, 0});
+    room.reset();
+    uint32_t seed = 0x137ead;
+    float low = 0, peak = 0;
+    for (int start = 0; start < wav.frames(); start += block) {
+        const double t = double(start) / rate;
+        p.elevationDeg = t < 3 ? 0 : t < 6 ? -35 : t < 9 ? 60 : t < 15 ? 0 : 8;
+        p.yawDeg = t >= 9 && t < 15 ? float((t - 9) * 60) : 0;
+        if (p.yawDeg > 180) p.yawDeg -= 360;
+        p.speakerAngleDeg = t >= 15 ? 32.0f : 0.0f;
+        spatial.setParams(p);
+        const int frames = std::min(block, wav.frames() - start);
+        for (int i = 0; i < frames; ++i) {
+            const double time = double(start + i) / rate;
+            const float white = float(int(xorshift(seed) & 65535u) - 32768) / 32768;
+            low = .96f * low + .04f * white;
+            const double beat = std::fmod(time, 1.0);
+            const float gate = float(std::min(1.0, beat / .02) * std::clamp((.85 - beat) / .05, 0.0, 1.0));
+            const float fade = float(std::clamp((seconds - time) / .2, 0.0, 1.0));
+            if (time < 15) {
+                wav.channels[0][start + i] = .12f * (.65f * white + 2.0f * low) * gate;
+            } else {
+                const float pluck = float(.10 * std::exp(-5 * beat));
+                wav.channels[0][start + i] = (pluck * float(std::sin(2 * 3.141592653589793 * 440 * time)) + .012f * white) * gate * fade;
+                wav.channels[1][start + i] = (pluck * float(std::sin(2 * 3.141592653589793 * 660 * time)) + .02f * low) * gate * fade;
+            }
+        }
+        float *channels[]{wav.channels[0].data() + start, wav.channels[1].data() + start};
+        spatial.process({channels, 2, frames});
+        if (t >= 15) room.process({channels, 2, frames});
+        for (int c = 0; c < 2; ++c) for (int i = 0; i < frames; ++i) {
+            const float sample = channels[c][i];
+            if (!std::isfinite(sample)) return 1;
+            peak = std::max(peak, std::abs(sample));
+        }
+    }
+    std::string error;
+    if (peak > .95f || !writeWav(path, wav, &error)) {
+        std::printf("demo render failed: peak %.4f %s\n", peak, error.c_str());
+        return 1;
+    }
+    std::printf("Wrote %s: 48 kHz stereo, 20 seconds, peak %.4f.\n"
+                "0-3s front; 3-6s below (-35deg); 6-9s above (+60deg);\n"
+                "9-15s clockwise orbit; 15-20s original stereo plucks with cinema room.\n", path, peak);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    // Preserve the last completed check even if a later DSP regression crashes.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc >= 2 && std::strcmp(argv[1], "--test") == 0)
         return runTests();
     if (argc >= 2 && std::strcmp(argv[1], "--bench") == 0)
         return runBench();
+    if (argc >= 2 && std::strcmp(argv[1], "--spatial-bench") == 0) {
+        dreamdsp::tests::reportSpatialNeuralPerformance();
+        return 0;
+    }
+    if (argc >= 3 && std::strcmp(argv[1], "--spatial-demo") == 0)
+        return renderSpatialDemo(argv[2]);
     if (argc >= 3)
         return processFile(argv[1], argv[2]);
 
     std::printf("usage: dspharness --test\n"
                 "       dspharness --bench\n"
+                "       dspharness --spatial-bench\n"
+                "       dspharness --spatial-demo <out.wav>\n"
                 "       dspharness <in.wav> <out.wav>\n");
     return runTests();
 }

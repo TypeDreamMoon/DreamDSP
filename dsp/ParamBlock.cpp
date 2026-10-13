@@ -2,6 +2,113 @@
 
 namespace dreamdsp::dsp {
 
+void upgradeStageOrder(const uint8_t *oldOrder, int count, uint8_t *out) noexcept
+{
+    uint8_t built[kStageCount]{};
+    uint32_t seen = 0;
+    if (!oldOrder || count < 1 || count > kStageCount) {
+        std::memcpy(out, kDefaultOrder, kStageCount);
+        return;
+    }
+    for (int i = 0; i < count; ++i) {
+        if (oldOrder[i] >= count || (seen & (1u << oldOrder[i]))) {
+            std::memcpy(out, kDefaultOrder, kStageCount);
+            return;
+        }
+        seen |= 1u << oldOrder[i];
+        built[i] = oldOrder[i];
+    }
+    int n = count;
+    for (int d = 0; d < kStageCount; ++d) {
+        const uint8_t id = kDefaultOrder[d];
+        if (seen & (1u << id)) continue;
+        int at = n;
+        for (int next = d + 1; next < kStageCount; ++next) {
+            const uint8_t anchor = kDefaultOrder[next];
+            if (!(seen & (1u << anchor))) continue;
+            for (int j = 0; j < n; ++j) if (built[j] == anchor) { at = j; break; }
+            break;
+        }
+        for (int j = n; j > at; --j) built[j] = built[j - 1];
+        built[at] = id;
+        ++n;
+        seen |= 1u << id;
+    }
+    std::memcpy(out, built, kStageCount);
+}
+
+bool decodeParamBlock(const void *bytes, size_t size, ParamBlock *out) noexcept
+{
+    if (!bytes || !out || size < 24) return false;
+    uint32_t header[6];
+    std::memcpy(header, bytes, sizeof header);
+    if (header[0] != kParamMagic || header[2] != size) return false;
+    const uint32_t version = header[1];
+    constexpr size_t oldSizes[] = {0, 0, 300, 820, 1124, 1300, 1388, 1388, 1524};
+    if (version == kParamVersion) {
+        if (size != sizeof(ParamBlock)) return false;
+        ParamBlock current;
+        std::memcpy(&current, bytes, size);
+        *out = sanitise(current);
+        return true;
+    }
+    if (version < 2 || version > 8 || size != oldSizes[version]) return false;
+    ParamBlock b = transparentBlock();
+    const auto *raw = static_cast<const unsigned char *>(bytes);
+    if (version == 8) {
+        // v9 inserted elevation/model after the original four binaural scalars.
+        // Keep old sessions on the analytic renderer so loading cannot change
+        // their sound; the GUI height control explicitly opts into 3D HRTFs.
+        std::memcpy(&b, raw, 1384);
+        std::memcpy(&b.neural, raw + 1384, 1524 - 1384);
+        b.binaural.elevationDeg = 0;
+        b.binaural.model = 0;
+        *out = sanitise(b);
+        return true;
+    }
+    if (version >= 6) {
+        std::memcpy(&b, bytes, 1368);
+        if (version == 6) b.flags = 0;
+        b.enableMask &= 0x000FFFFFu;
+        upgradeStageOrder(raw + 1368, 20, b.order);
+    } else {
+        struct Field { void *dst; size_t offset, length; };
+        const Field fields[] = {
+            {&b.generation, 12, 4}, {&b.enableMask, 16, 4},
+            {&b.comp, 24, 28}, {&b.reverb, 52, 32}, {&b.tube, 84, 16},
+            {&b.exciter, 100, 12}, {&b.bass, 112, 16}, {&b.width, 128, 8},
+            {&b.crossfeed, 136, 12}, {&b.multiband, 148, 108},
+            {&b.convolution, 256, 44}, {&b.eq, 300, 520}, {&b.matrix, 820, 256},
+            {&b.delay, 1076, 32}, {&b.loudness, 1108, 16}, {&b.limiter, 1124, 16},
+            {&b.dynBass, 1140, 16}, {&b.graphic, 1156, 128}
+        };
+        b.exciter.thresholdDb = Exciter::Params{}.thresholdDb;
+        b.limiter = Limiter::Params{};
+        b.dynBass = DynamicBass::Params{};
+        if (version < 5) b.graphic.amount = 1.0f;
+        for (const auto &f : fields)
+            if (f.offset + f.length <= size) std::memcpy(f.dst, raw + f.offset, f.length);
+        if (version == 5) upgradeStageOrder(raw + 1284, 16, b.order);
+        const uint32_t mask = version == 2 ? 0x1FFu : version == 3 ? 0x3FFu : version == 4 ? 0x1FFFu : 0xFFFFu;
+        b.enableMask &= mask;
+        b.transient = TransientShaper::Params{};
+        b.clipper = SoftClipper::Params{};
+        b.autoGain = LoudnessLeveller::Params{};
+        b.nightMode = DynamicRange::Params{};
+    }
+    // New stages arrive disabled but keep useful first-enable control values.
+    b.binaural = Binaural::Params{};
+    b.neural = NeuralSaturation::Params{};
+    b.chorus = Modulation::Params{};
+    b.flanger = Modulation::Params{};
+    b.flanger.delayMs = 2.0f;
+    b.flanger.feedback = 0.5f;
+    b.phaser = Modulation::Params{};
+    b.fdn = FdnReverb::Params{};
+    *out = sanitise(b);
+    return true;
+}
+
 // Correction first, then things that add content, then dynamics, then the
 // output stage. Reproduces the order the chain ran in when it was hard-coded.
 const uint8_t kDefaultOrder[kStageCount] = {
@@ -11,7 +118,7 @@ const uint8_t kDefaultOrder[kStageCount] = {
     // the order Orban's broadcast chain uses for exactly that reason.
     kStageAutoGain,
     kStageEqualizer, kStageGraphic, kStageLoudness,
-    kStageDynBass, kStageBass, kStageExciter, kStageTube,
+    kStageDynBass, kStageBass, kStageExciter, kStageTube, kStageNeural,
     // Envelope shaping ahead of the compressor, so the compressor sees the
     // shape we asked for rather than fighting it.
     kStageTransient,
@@ -20,8 +127,9 @@ const uint8_t kDefaultOrder[kStageCount] = {
     // curve is calibrated against programme loudness, not against whatever the
     // multiband happened to leave behind.
     kStageNightMode,
-    kStageReverb,
-    kStageWidth, kStageCrossfeed,
+    kStageChorus, kStageFlanger, kStagePhaser,
+    kStageReverb, kStageFdn,
+    kStageWidth, kStageCrossfeed, kStageBinaural,
     kStageMatrix, kStageConvolution, kStageDelay,
     // Clipper immediately before the limiter. At one decibel of peak reduction
     // the clipper adds 0.1 dB of modulation to sustained content where the
@@ -276,6 +384,34 @@ ParamBlock sanitise(const ParamBlock &in) noexcept
     o.nightMode.boost         = sanF(in.nightMode.boost, 0.0f, 1.0f, 1.0f);
     o.nightMode.cut           = sanF(in.nightMode.cut, 0.0f, 1.0f, 1.0f);
     o.nightMode.referenceLufs = sanF(in.nightMode.referenceLufs, -40.0f, -10.0f, -24.0f);
+
+    o.binaural.speakerAngleDeg = sanF(in.binaural.speakerAngleDeg, 0.0f, 90.0f, 30.0f);
+    o.binaural.yawDeg = sanF(in.binaural.yawDeg, -180.0f, 180.0f, 0.0f);
+    o.binaural.mix = sanF(in.binaural.mix, 0.0f, 1.0f, 0.0f);
+    o.binaural.outputDb = sanF(in.binaural.outputDb, -24.0f, 6.0f, -6.0f);
+    o.binaural.elevationDeg = sanF(in.binaural.elevationDeg, -40.0f, 90.0f, 0.0f);
+    o.binaural.model = in.binaural.model == 1u ? 1u : 0u;
+    o.neural.driveDb = sanF(in.neural.driveDb, -12.0f, 18.0f, 0.0f);
+    o.neural.mix = sanF(in.neural.mix, 0.0f, 1.0f, 0.0f);
+    o.neural.outputDb = sanF(in.neural.outputDb, -24.0f, 6.0f, 0.0f);
+    o.neural.model = 0;
+    auto modulation = [](Modulation::Params &d, const Modulation::Params &s) {
+        d.rateHz = sanF(s.rateHz, 0.02f, 10.0f, 0.35f);
+        d.depth = sanF(s.depth, 0.0f, 1.0f, 0.5f);
+        d.delayMs = sanF(s.delayMs, 0.1f, 30.0f, 12.0f);
+        d.feedback = sanF(s.feedback, -0.85f, 0.85f, 0.15f);
+        d.mix = sanF(s.mix, 0.0f, 1.0f, 0.0f);
+        d.stereoPhase = sanF(s.stereoPhase, 0.0f, 0.5f, 0.25f);
+    };
+    modulation(o.chorus, in.chorus);
+    modulation(o.flanger, in.flanger);
+    modulation(o.phaser, in.phaser);
+    o.fdn.decaySeconds = sanF(in.fdn.decaySeconds, 0.1f, 12.0f, 1.8f);
+    o.fdn.dampingHz = sanF(in.fdn.dampingHz, 200.0f, 18000.0f, 6000.0f);
+    o.fdn.preDelayMs = sanF(in.fdn.preDelayMs, 0.0f, 200.0f, 15.0f);
+    o.fdn.mix = sanF(in.fdn.mix, 0.0f, 1.0f, 0.0f);
+    o.fdn.width = sanF(in.fdn.width, 0.0f, 1.0f, 1.0f);
+    o.fdn.outputDb = sanF(in.fdn.outputDb, -24.0f, 6.0f, 0.0f);
 
     if (isPermutation(in.order))
         std::memcpy(o.order, in.order, sizeof o.order);

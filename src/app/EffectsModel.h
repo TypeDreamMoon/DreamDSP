@@ -106,6 +106,47 @@ class EffectsModel : public QObject
     Q_PROPERTY(double nightCut READ nightCut WRITE setNightCut NOTIFY changed)
     Q_PROPERTY(double nightReference READ nightReference WRITE setNightReference NOTIFY changed)
 
+    Q_PROPERTY(bool binauralEnabled MEMBER m_binauralEnabled NOTIFY changed)
+    Q_PROPERTY(double binauralAngle READ binauralAngle WRITE setBinauralAngle NOTIFY changed)
+    Q_PROPERTY(double binauralYaw READ binauralYaw WRITE setBinauralYaw NOTIFY changed)
+    Q_PROPERTY(double binauralSpread READ binauralSpread WRITE setBinauralSpread NOTIFY changed)
+    Q_PROPERTY(double binauralRotation READ binauralRotation WRITE setBinauralYaw NOTIFY changed)
+    Q_PROPERTY(double binauralElevation READ binauralElevation WRITE setBinauralElevation NOTIFY changed)
+    Q_PROPERTY(int binauralModel READ binauralModel WRITE setBinauralModel NOTIFY changed)
+    Q_PROPERTY(double binauralMix READ binauralMix WRITE setBinauralMix NOTIFY changed)
+    Q_PROPERTY(double binauralOutput READ binauralOutput WRITE setBinauralOutput NOTIFY changed)
+    Q_PROPERTY(bool neuralEnabled MEMBER m_neuralEnabled NOTIFY changed)
+    Q_PROPERTY(double neuralDrive READ neuralDrive WRITE setNeuralDrive NOTIFY changed)
+    Q_PROPERTY(double neuralMix READ neuralMix WRITE setNeuralMix NOTIFY changed)
+    Q_PROPERTY(double neuralOutput READ neuralOutput WRITE setNeuralOutput NOTIFY changed)
+    Q_PROPERTY(bool chorusEnabled MEMBER m_chorusEnabled NOTIFY changed)
+    Q_PROPERTY(double chorusRate READ chorusRate WRITE setChorusRate NOTIFY changed)
+    Q_PROPERTY(double chorusDepth READ chorusDepth WRITE setChorusDepth NOTIFY changed)
+    Q_PROPERTY(double chorusDelay READ chorusDelay WRITE setChorusDelay NOTIFY changed)
+    Q_PROPERTY(double chorusFeedback READ chorusFeedback WRITE setChorusFeedback NOTIFY changed)
+    Q_PROPERTY(double chorusMix READ chorusMix WRITE setChorusMix NOTIFY changed)
+    Q_PROPERTY(double chorusStereo READ chorusStereo WRITE setChorusStereo NOTIFY changed)
+    Q_PROPERTY(bool flangerEnabled MEMBER m_flangerEnabled NOTIFY changed)
+    Q_PROPERTY(double flangerRate READ flangerRate WRITE setFlangerRate NOTIFY changed)
+    Q_PROPERTY(double flangerDepth READ flangerDepth WRITE setFlangerDepth NOTIFY changed)
+    Q_PROPERTY(double flangerDelay READ flangerDelay WRITE setFlangerDelay NOTIFY changed)
+    Q_PROPERTY(double flangerFeedback READ flangerFeedback WRITE setFlangerFeedback NOTIFY changed)
+    Q_PROPERTY(double flangerMix READ flangerMix WRITE setFlangerMix NOTIFY changed)
+    Q_PROPERTY(double flangerStereo READ flangerStereo WRITE setFlangerStereo NOTIFY changed)
+    Q_PROPERTY(bool phaserEnabled MEMBER m_phaserEnabled NOTIFY changed)
+    Q_PROPERTY(double phaserRate READ phaserRate WRITE setPhaserRate NOTIFY changed)
+    Q_PROPERTY(double phaserDepth READ phaserDepth WRITE setPhaserDepth NOTIFY changed)
+    Q_PROPERTY(double phaserFeedback READ phaserFeedback WRITE setPhaserFeedback NOTIFY changed)
+    Q_PROPERTY(double phaserMix READ phaserMix WRITE setPhaserMix NOTIFY changed)
+    Q_PROPERTY(double phaserStereo READ phaserStereo WRITE setPhaserStereo NOTIFY changed)
+    Q_PROPERTY(bool fdnEnabled MEMBER m_fdnEnabled NOTIFY changed)
+    Q_PROPERTY(double fdnDecay READ fdnDecay WRITE setFdnDecay NOTIFY changed)
+    Q_PROPERTY(double fdnDamping READ fdnDamping WRITE setFdnDamping NOTIFY changed)
+    Q_PROPERTY(double fdnPreDelay READ fdnPreDelay WRITE setFdnPreDelay NOTIFY changed)
+    Q_PROPERTY(double fdnMix READ fdnMix WRITE setFdnMix NOTIFY changed)
+    Q_PROPERTY(double fdnWidth READ fdnWidth WRITE setFdnWidth NOTIFY changed)
+    Q_PROPERTY(double fdnOutput READ fdnOutput WRITE setFdnOutput NOTIFY changed)
+
 public:
     explicit EffectsModel(QObject *parent = nullptr);
 
@@ -204,6 +245,59 @@ public:
     dsp::LoudnessLeveller::Params autoGainParams() const  { return m_autoGain; }
     dsp::DynamicRange::Params nightModeParams() const     { return m_nightMode; }
 
+    bool binauralOn() const { return m_binauralEnabled; }
+    dsp::Binaural::Params binauralParams() const { return m_binaural; }
+    double binauralAngle() const { return m_binaural.speakerAngleDeg; } void setBinauralAngle(double v);
+    double binauralYaw() const { return m_binaural.yawDeg; } void setBinauralYaw(double v);
+    // The DSP uses positive-left azimuth: (+/- halfSpread - yaw). In a
+    // clockwise, head-fixed view the speaker ring therefore rotates by +yaw.
+    double binauralRotation() const { return m_binaural.yawDeg; }
+    double binauralSpread() const { return 2.0 * m_binaural.speakerAngleDeg; }
+    void setBinauralSpread(double v);
+    double binauralElevation() const { return m_binaural.elevationDeg; }
+    void setBinauralElevation(double v);
+    int binauralModel() const { return int(m_binaural.model); }
+    void setBinauralModel(int v);
+    void applyCinemaSpatialPreset();
+    double binauralMix() const { return m_binaural.mix; } void setBinauralMix(double v);
+    double binauralOutput() const { return m_binaural.outputDb; } void setBinauralOutput(double v);
+    bool neuralOn() const { return m_neuralEnabled; }
+    dsp::NeuralSaturation::Params neuralParams() const { return m_neural; }
+    double neuralDrive() const { return m_neural.driveDb; } void setNeuralDrive(double v);
+    double neuralMix() const { return m_neural.mix; } void setNeuralMix(double v);
+    double neuralOutput() const { return m_neural.outputDb; } void setNeuralOutput(double v);
+    bool chorusOn() const { return m_chorusEnabled; }
+    dsp::Modulation::Params chorusParams() const { return m_chorus; }
+    double chorusRate() const { return m_chorus.rateHz; } void setChorusRate(double v);
+    double chorusDepth() const { return m_chorus.depth; } void setChorusDepth(double v);
+    double chorusDelay() const { return m_chorus.delayMs; } void setChorusDelay(double v);
+    double chorusFeedback() const { return m_chorus.feedback; } void setChorusFeedback(double v);
+    double chorusMix() const { return m_chorus.mix; } void setChorusMix(double v);
+    double chorusStereo() const { return m_chorus.stereoPhase; } void setChorusStereo(double v);
+    bool flangerOn() const { return m_flangerEnabled; }
+    dsp::Modulation::Params flangerParams() const { return m_flanger; }
+    double flangerRate() const { return m_flanger.rateHz; } void setFlangerRate(double v);
+    double flangerDepth() const { return m_flanger.depth; } void setFlangerDepth(double v);
+    double flangerDelay() const { return m_flanger.delayMs; } void setFlangerDelay(double v);
+    double flangerFeedback() const { return m_flanger.feedback; } void setFlangerFeedback(double v);
+    double flangerMix() const { return m_flanger.mix; } void setFlangerMix(double v);
+    double flangerStereo() const { return m_flanger.stereoPhase; } void setFlangerStereo(double v);
+    bool phaserOn() const { return m_phaserEnabled; }
+    dsp::Modulation::Params phaserParams() const { return m_phaser; }
+    double phaserRate() const { return m_phaser.rateHz; } void setPhaserRate(double v);
+    double phaserDepth() const { return m_phaser.depth; } void setPhaserDepth(double v);
+    double phaserFeedback() const { return m_phaser.feedback; } void setPhaserFeedback(double v);
+    double phaserMix() const { return m_phaser.mix; } void setPhaserMix(double v);
+    double phaserStereo() const { return m_phaser.stereoPhase; } void setPhaserStereo(double v);
+    bool fdnOn() const { return m_fdnEnabled; }
+    dsp::FdnReverb::Params fdnParams() const { return m_fdn; }
+    double fdnDecay() const { return m_fdn.decaySeconds; } void setFdnDecay(double v);
+    double fdnDamping() const { return m_fdn.dampingHz; } void setFdnDamping(double v);
+    double fdnPreDelay() const { return m_fdn.preDelayMs; } void setFdnPreDelay(double v);
+    double fdnMix() const { return m_fdn.mix; } void setFdnMix(double v);
+    double fdnWidth() const { return m_fdn.width; } void setFdnWidth(double v);
+    double fdnOutput() const { return m_fdn.outputDb; } void setFdnOutput(double v);
+
     // Bulk restore, for reloading a saved session. Takes the whole block
     // because the enable bits live in its mask rather than beside each set of
     // parameters.
@@ -213,6 +307,18 @@ signals:
     void changed();
 
 private:
+    dsp::Binaural::Params m_binaural;
+    bool m_binauralEnabled = false;
+    dsp::NeuralSaturation::Params m_neural;
+    bool m_neuralEnabled = false;
+    dsp::Modulation::Params m_chorus;
+    bool m_chorusEnabled = false;
+    dsp::Modulation::Params m_flanger;
+    bool m_flangerEnabled = false;
+    dsp::Modulation::Params m_phaser;
+    bool m_phaserEnabled = false;
+    dsp::FdnReverb::Params m_fdn;
+    bool m_fdnEnabled = false;
     dsp::TubeStage::Params m_tube;
     dsp::VirtualBass::Params m_bass;
     dsp::DynamicBass::Params m_dynBass;

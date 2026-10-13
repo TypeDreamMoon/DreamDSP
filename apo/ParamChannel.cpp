@@ -227,26 +227,23 @@ void ParamChannel::reloadIfChanged() noexcept
         return;
     }
 
-    dsp::ParamBlock raw;
+    // One extra byte detects oversized files without an unbounded allocation.
+    // Migrate valid old sessions here too, before the GUI has been restarted.
+    unsigned char raw[sizeof(dsp::ParamBlock) + 1];
     DWORD got = 0;
     const BOOL ok = ::ReadFile(file, &raw, DWORD(sizeof raw), &got, nullptr);
     ::CloseHandle(file);
 
-    if (!ok || got != sizeof raw) {
-        m_rejectCount.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    if (raw.magic != dsp::kParamMagic || raw.version != dsp::kParamVersion
-        || raw.sizeBytes != sizeof raw) {
+    dsp::ParamBlock clean;
+    if (!ok || !dsp::decodeParamBlock(raw, got, &clean)) {
         m_rejectCount.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
     // A block that fails validation never replaces a good one. Missing,
-    // truncated, foreign or version-skewed all leave the previous parameters in
+    // truncated, foreign or unknown future versions leave previous parameters in
     // place -- reverting to silence or to defaults on a bad read would be a far
     // more startling failure than simply not changing.
-    const dsp::ParamBlock clean = dsp::sanitise(raw);
     m_slots.publish(clean);
 
     // Building a convolution kernel means reading a file, resampling it, and
@@ -259,7 +256,7 @@ void ParamChannel::reloadIfChanged() noexcept
     // audiodg. Neither arrangement touches the audio thread.
     rebuildImpulseResponses(clean);
 
-    m_loadedGeneration.store(raw.generation, std::memory_order_relaxed);
+    m_loadedGeneration.store(clean.generation, std::memory_order_relaxed);
     m_loadCount.fetch_add(1, std::memory_order_relaxed);
     m_lastError.store(0, std::memory_order_relaxed);
 
@@ -267,7 +264,7 @@ void ParamChannel::reloadIfChanged() noexcept
     m_stampHigh = info.ftLastWriteTime.dwHighDateTime;
     m_stampSize = info.nFileSizeLow;
 
-    trace(L"params loaded gen/mask/count", raw.generation, raw.enableMask,
+    trace(L"params loaded gen/mask/count", clean.generation, clean.enableMask,
           m_loadCount.load(std::memory_order_relaxed));
 }
 

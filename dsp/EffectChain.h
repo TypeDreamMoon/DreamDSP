@@ -50,8 +50,11 @@ public:
     // back; the APO reports the sum to Windows once, when the stream is built.
     int latencySamples() const noexcept
     {
-        return int(m_conv.latencySamples()) + m_delay.latencySamples()
-               + m_limiter.latencySamples() + m_width.latencySamples();
+        const uint32_t mask = activeMask();
+        return ((mask & kEnConvolution) ? int(m_conv.latencySamples()) : 0)
+               + ((mask & kEnDelay) ? m_delay.latencySamples() : 0)
+               + ((mask & kEnLimiter) ? m_limiter.latencySamples() : 0)
+               + ((mask & kEnWidth) ? m_width.latencySamples() : 0);
     }
 
     const Limiter &limiter() const noexcept { return m_limiter; }
@@ -68,9 +71,9 @@ public:
 
     // Installs a parameter block. Real-time safe.
     //
-    // Cost on an unchanged block is eight memcmps totalling 232 bytes. Filter
-    // design only runs for effects that are enabled *and* whose parameters
-    // actually differ, so dragging one slider never redesigns the other seven.
+    // Only changed or newly enabled stages receive new parameters. Reset on
+    // enable clears prepared delay storage; its worst-case cost is bounded by
+    // prepare(), and must be included in callback performance measurements.
     void apply(ParamBlock p) noexcept;
 
     // Runs the enabled effects in chain order. Real-time safe.
@@ -129,10 +132,16 @@ private:
     TransientShaper m_transient;
     LoudnessLeveller m_autoGain;
     DynamicRange m_nightMode;
+    Binaural m_binaural;
+    NeuralSaturation m_neural;
+    Modulation m_chorus{Modulation::Kind::Chorus};
+    Modulation m_flanger{Modulation::Kind::Flanger};
+    Modulation m_phaser{Modulation::Kind::Phaser};
+    FdnReverb m_fdn;
 
     // The order the stages run in, copied out of the last block installed.
     // Held separately from m_applied so process() reads one contiguous array
-    // rather than reaching into a 1300-byte struct on every buffer.
+    // rather than reaching into the full parameter struct on every buffer.
     uint8_t m_order[kStageCount];
 };
 

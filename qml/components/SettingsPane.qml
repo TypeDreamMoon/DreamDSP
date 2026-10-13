@@ -248,6 +248,15 @@ Item {
             SectionTitle { text: '关于与更新' }
 
             SettingRow {
+                label: '双耳 HRTF 数据'
+                hint: 'KEMAR · Bill Gardner / Keith Martin\nMIT Media Laboratory, 1994'
+                HusButton {
+                    text: '来源与使用许可'
+                    onClicked: Qt.openUrlExternally('https://sound.media.mit.edu/resources/KEMAR.html')
+                }
+            }
+
+            SettingRow {
                 label: '当前版本'
                 hint: AppController.updates.status !== ''
                       ? AppController.updates.status

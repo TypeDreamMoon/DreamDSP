@@ -20,6 +20,10 @@
 #include "Saturation.h"
 #include "Stereo.h"
 #include "Transient.h"
+#include "Binaural.h"
+#include "NeuralSaturation.h"
+#include "Modulation.h"
+#include "FdnReverb.h"
 
 // The complete parameter payload that travels from the GUI to the copy of the
 // DSP running inside audiodg.exe.
@@ -36,7 +40,7 @@ namespace dreamdsp::dsp {
 
 enum : uint32_t {
     kParamMagic = 0x42505244u,   // reads as DRPB in a hex dump
-    kParamVersion = 7u
+    kParamVersion = 9u
 };
 
 // Header flags, which are about the block rather than about any one effect.
@@ -95,7 +99,13 @@ enum : uint32_t {
     kEnClipper   = 1u << 17,
     kEnAutoGain  = 1u << 18,
     kEnNightMode = 1u << 19,
-    kEnKnown     = 0x000FFFFFu
+    kEnBinaural  = 1u << 20,
+    kEnNeural    = 1u << 21,
+    kEnChorus    = 1u << 22,
+    kEnFlanger   = 1u << 23,
+    kEnPhaser    = 1u << 24,
+    kEnFdn       = 1u << 25,
+    kEnKnown     = 0x03FFFFFFu
 };
 
 // One id per stage, and the entire vocabulary of the order array below. These
@@ -121,15 +131,23 @@ enum : uint8_t {
     kStageClipper,
     kStageAutoGain,
     kStageNightMode,
+    kStageBinaural,
+    kStageNeural,
+    kStageChorus,
+    kStageFlanger,
+    kStagePhaser,
+    kStageFdn,
     kStageCount
 };
-static_assert(kStageCount == 20, "kDefaultOrder and ParamBlock::order are sized for 20");
+static_assert(kStageCount == 26, "update the stage registry and migrations");
 static_assert(kStageCount <= 32, "isPermutation() tracks stages in a uint32_t bitmask");
 
 // The order the stages run in when nobody has said otherwise. Reproduces what
 // the chain did when it was hard-coded, and is what the sanitiser falls back to
 // for any order array that is not a permutation.
 extern const uint8_t kDefaultOrder[kStageCount];
+// Keeps the relative order of legacy stages and inserts newly added stages.
+void upgradeStageOrder(const uint8_t *oldOrder, int count, uint8_t *out) noexcept;
 
 // Byte-for-byte what is on disk. There is no serialisation step: every member is
 // trivially copyable, alignment 4, and every member size is a multiple of 4, so
@@ -171,14 +189,22 @@ struct ParamBlock {
     LoudnessLeveller::Params    autoGain;     // +1332    20
     DynamicRange::Params        nightMode;     // +1352    16
 
+    Binaural::Params            binaural;      // +1368    24
+    NeuralSaturation::Params    neural;        // +1392    16
+    Modulation::Params          chorus;        // +1408    24
+    Modulation::Params          flanger;       // +1432    24
+    Modulation::Params          phaser;        // +1456    24
+    FdnReverb::Params           fdn;           // +1480    24
+
     // Which stage runs when. A permutation of 0..kStageCount-1; anything else
     // is replaced wholesale by kDefaultOrder, because a duplicate would run a
     // stage twice and an omission would silently drop an effect whose switch
     // says it is on.
-    uint8_t order[kStageCount];              // +1368    20
-};                                           // = 1376
+    uint8_t order[kStageCount];                // +1504    26
+    uint8_t reserved[2];                       // deterministic wire padding
+};
 
-static_assert(sizeof(ParamBlock) == 1388, "wire layout changed; bump kParamVersion");
+static_assert(sizeof(ParamBlock) == 1532, "wire layout changed; bump kParamVersion");
 static_assert(alignof(ParamBlock) == 4, "wire layout changed; bump kParamVersion");
 static_assert(std::is_trivially_copyable<ParamBlock>::value, "must be memcpy-able");
 static_assert(offsetof(ParamBlock, enableMask) == 16, "wire layout changed");
@@ -202,7 +228,15 @@ static_assert(offsetof(ParamBlock, transient) == 1296, "wire layout changed");
 static_assert(offsetof(ParamBlock, clipper) == 1316, "wire layout changed");
 static_assert(offsetof(ParamBlock, autoGain) == 1332, "wire layout changed");
 static_assert(offsetof(ParamBlock, nightMode) == 1352, "wire layout changed");
-static_assert(offsetof(ParamBlock, order) == 1368, "wire layout changed");
+static_assert(offsetof(ParamBlock, binaural) == 1368, "wire layout changed");
+static_assert(offsetof(ParamBlock, neural) == 1392, "wire layout changed");
+static_assert(offsetof(ParamBlock, chorus) == 1408, "wire layout changed");
+static_assert(offsetof(ParamBlock, fdn) == 1480, "wire layout changed");
+static_assert(offsetof(ParamBlock, order) == 1504, "wire layout changed");
+
+// Non-allocating session decoder shared by the GUI, APO and migration tests. Unknown
+// versions/sizes leave out unchanged; accepted data is always sanitised.
+bool decodeParamBlock(const void *bytes, size_t size, ParamBlock *out) noexcept;
 
 // --------------------------------------------------------------- sanitising
 

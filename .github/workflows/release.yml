@@ -98,6 +98,7 @@ jobs:
           Copy-Item build/dreamdsp/DreamDspApo.dll     $stage
           Copy-Item build/dreamdsp/HuskarUIBasic.dll   $stage
           Copy-Item build/dreamdsp/HuskarUIImpl.dll    $stage
+          Copy-Item build/dreamdsp/KEMAR-NOTICE.md    $stage
           # windeployqt brings the Qt runtime and the QML plugins the app
           # actually imports; --qmldir is what makes it see HuskarUI's.
           & "$env:QT_ROOT_DIR/bin/windeployqt.exe" `

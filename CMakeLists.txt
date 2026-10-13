@@ -28,6 +28,7 @@ find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui Quick Network Concurrent)
 find_package(HuskarUI REQUIRED)
 
 qt_standard_project_setup(REQUIRES 6.7)
+enable_testing()
 
 # The DSP layer and its offline exerciser are independent of Qt entirely.
 add_subdirectory(dsp)
@@ -86,6 +87,7 @@ qt_add_qml_module(DreamDSP
         qml/components/Fader.qml
         qml/components/EqualizerPane.qml
         qml/components/EffectsPane.qml
+        qml/components/BinauralScene.qml
         qml/components/OutputPane.qml
         qml/components/ChainPane.qml
     SOURCES
@@ -161,6 +163,9 @@ target_link_libraries(DreamDSP PRIVATE
 )
 
 set_target_properties(DreamDSP PROPERTIES WIN32_EXECUTABLE TRUE)
+
+# Keep the measured HRIR authors' attribution alongside local binary builds.
+configure_file(dsp/hrtf/NOTICE.md "${CMAKE_BINARY_DIR}/KEMAR-NOTICE.md" COPYONLY)
 
 # HuskarUI ships as shared libs; drop them beside the executable so the app
 # runs straight out of the build tree without touching PATH.

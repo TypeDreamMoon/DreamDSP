@@ -191,6 +191,334 @@ Item {
                 }
             }
 
+            GroupHeader { title: '空间与动态建模' }
+            Masonry {
+                Layout.fillWidth: true
+                SectionCard {
+                    collapsible: true
+                    active: fx.binauralEnabled
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
+                    title: '双耳虚拟音箱'
+                    hint: '头部固定 · 音箱环绕与升降 · 双声道耳机'
+                    headerRight: HusSwitch {
+                        checked: fx.binauralEnabled
+                        onToggled: fx.binauralEnabled = checked
+                    }
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+                        RowLayout {
+                            Layout.fillWidth: true
+                            HusSelect {
+                                Layout.fillWidth: true
+                                model: [
+                                    { label: '球头水平 · 旧预设', value: 0 },
+                                    { label: 'KEMAR 实测 · 三维', value: 1 }
+                                ]
+                                currentIndex: fx.binauralModel
+                                onActivated: (i) => fx.binauralModel = i
+                            }
+                            HusButton {
+                                text: '影院空间'
+                                onClicked: AppController.applyCinemaSpatialPreset()
+                            }
+                        }
+                        BinauralScene {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: implicitHeight
+                            spread: fx.binauralSpread
+                            azimuth: fx.binauralRotation
+                            elevation: fx.binauralModel === 1 ? fx.binauralElevation : 0
+                            accent: HusTheme.Primary.colorPrimary
+                            foreground: HusTheme.Primary.colorTextBase
+                            guide: HusTheme.isDark ? '#50545c' : '#b5bcc8'
+                        }
+                        ParamRow {
+                            label: '音箱夹角'; unit: '°'; from: 0; to: 180; step: 1; decimals: 0
+                            owner: fx; prop: 'binauralSpread'
+                            value: fx.binauralSpread
+                            onEdited: (v) => fx.binauralSpread = v
+                        }
+                        ParamRow {
+                            label: '环绕方位'; unit: '°'; from: -180; to: 180; step: 1; decimals: 0
+                            owner: fx; prop: 'binauralRotation'
+                            value: fx.binauralRotation
+                            onEdited: (v) => fx.binauralRotation = v
+                        }
+                        ParamRow {
+                            label: '音箱高度'; unit: '°'; from: -40; to: 90; step: 1; decimals: 0
+                            owner: fx; prop: 'binauralElevation'
+                            value: fx.binauralModel === 1 ? fx.binauralElevation : 0
+                            onEdited: (v) => fx.binauralElevation = v
+                        }
+                        ParamRow {
+                            label: '空间混合'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                            owner: fx; prop: 'binauralMix'
+                            value: fx.binauralMix
+                            onEdited: (v) => fx.binauralMix = v
+                        }
+                        ParamRow {
+                            label: '输出'; unit: 'dB'; from: -24; to: 6; step: 0.1; decimals: 2
+                            owner: fx; prop: 'binauralOutput'
+                            value: fx.binauralOutput
+                            onEdited: (v) => fx.binauralOutput = v
+                        }
+                        Note { text: fx.binauralModel === 1
+                            ? '0° 朝向屏幕，正角度顺时针转动。高度为相对耳朵的仰角；KEMAR 耳廓线索的上下定位感因人而异。请避免叠加系统空间音效。'
+                            : '旧预设保留原听感。调节音箱高度将启用三维实测 HRTF。' }
+                        Note { text: '影院空间：前方虚拟音箱配合轻度 FDN 房间混响。适合普通立体声；已做双耳渲染的素材建议直接播放。' }
+                    }
+                }
+                SectionCard {
+                    collapsible: true
+                    active: fx.neuralEnabled
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
+                    title: '神经饱和'
+                    hint: 'Synthetic Memory Drive · 合成教师训练 · 仅 48 kHz，其他采样率旁路'
+                    headerRight: HusSwitch {
+                        checked: fx.neuralEnabled
+                        onToggled: fx.neuralEnabled = checked
+                    }
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+                        ParamRow {
+                            label: '驱动'; unit: 'dB'; from: -12; to: 18; step: 0.1; decimals: 2
+                            owner: fx; prop: 'neuralDrive'
+                            value: fx.neuralDrive
+                            onEdited: (v) => fx.neuralDrive = v
+                        }
+                        ParamRow {
+                            label: '混合'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                            owner: fx; prop: 'neuralMix'
+                            value: fx.neuralMix
+                            onEdited: (v) => fx.neuralMix = v
+                        }
+                        ParamRow {
+                            label: '输出'; unit: 'dB'; from: -24; to: 6; step: 0.1; decimals: 2
+                            owner: fx; prop: 'neuralOutput'
+                            value: fx.neuralOutput
+                            onEdited: (v) => fx.neuralOutput = v
+                        }
+                        Note { text: '这是由合成动态失真教师训练的小型循环网络，不是实测电子管或磁带捕获。输入超出训练范围时会限幅。' }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            visible: AppController.metering
+                            HusText { text: '设备输出峰值'; font.pixelSize: 12 }
+                            MeterBar { Layout.fillWidth: true; Layout.preferredHeight: 6 }
+                        }
+                    }
+                }
+                SectionCard {
+                    collapsible: true
+                    active: fx.chorusEnabled
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
+                    title: '合唱 Chorus'
+                    hint: '连续调制 · 参数平滑 · 反馈限幅'
+                    headerRight: HusSwitch {
+                        checked: fx.chorusEnabled
+                        onToggled: fx.chorusEnabled = checked
+                    }
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+                        ParamRow {
+                            label: '速度'; unit: 'Hz'; from: 0.02; to: 10; step: 0.01; decimals: 2
+                            owner: fx; prop: 'chorusRate'
+                            value: fx.chorusRate
+                            onEdited: (v) => fx.chorusRate = v
+                        }
+                        ParamRow {
+                            label: '深度'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                            owner: fx; prop: 'chorusDepth'
+                            value: fx.chorusDepth
+                            onEdited: (v) => fx.chorusDepth = v
+                        }
+                        ParamRow {
+                            label: '基础延迟'; unit: 'ms'; from: 0.1; to: 30; step: 0.1; decimals: 2
+                            owner: fx; prop: 'chorusDelay'
+                            value: fx.chorusDelay
+                            onEdited: (v) => fx.chorusDelay = v
+                        }
+                        ParamRow {
+                            label: '反馈'; unit: ''; from: -0.85; to: 0.85; step: 0.01; decimals: 2
+                            owner: fx; prop: 'chorusFeedback'
+                            value: fx.chorusFeedback
+                            onEdited: (v) => fx.chorusFeedback = v
+                        }
+                        ParamRow {
+                            label: '混合'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                            owner: fx; prop: 'chorusMix'
+                            value: fx.chorusMix
+                            onEdited: (v) => fx.chorusMix = v
+                        }
+                        ParamRow {
+                            label: '立体声相位'; unit: '周'; from: 0; to: 0.5; step: 0.01; decimals: 2
+                            owner: fx; prop: 'chorusStereo'
+                            value: fx.chorusStereo
+                            onEdited: (v) => fx.chorusStereo = v
+                        }
+
+                    }
+                }
+                SectionCard {
+                    collapsible: true
+                    active: fx.flangerEnabled
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
+                    title: '镶边 Flanger'
+                    hint: '连续调制 · 参数平滑 · 反馈限幅'
+                    headerRight: HusSwitch {
+                        checked: fx.flangerEnabled
+                        onToggled: fx.flangerEnabled = checked
+                    }
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+                        ParamRow {
+                            label: '速度'; unit: 'Hz'; from: 0.02; to: 10; step: 0.01; decimals: 2
+                            owner: fx; prop: 'flangerRate'
+                            value: fx.flangerRate
+                            onEdited: (v) => fx.flangerRate = v
+                        }
+                        ParamRow {
+                            label: '深度'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                            owner: fx; prop: 'flangerDepth'
+                            value: fx.flangerDepth
+                            onEdited: (v) => fx.flangerDepth = v
+                        }
+                        ParamRow {
+                            label: '基础延迟'; unit: 'ms'; from: 0.1; to: 5; step: 0.1; decimals: 2
+                            owner: fx; prop: 'flangerDelay'
+                            value: fx.flangerDelay
+                            onEdited: (v) => fx.flangerDelay = v
+                        }
+                        ParamRow {
+                            label: '反馈'; unit: ''; from: -0.85; to: 0.85; step: 0.01; decimals: 2
+                            owner: fx; prop: 'flangerFeedback'
+                            value: fx.flangerFeedback
+                            onEdited: (v) => fx.flangerFeedback = v
+                        }
+                        ParamRow {
+                            label: '混合'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                            owner: fx; prop: 'flangerMix'
+                            value: fx.flangerMix
+                            onEdited: (v) => fx.flangerMix = v
+                        }
+                        ParamRow {
+                            label: '立体声相位'; unit: '周'; from: 0; to: 0.5; step: 0.01; decimals: 2
+                            owner: fx; prop: 'flangerStereo'
+                            value: fx.flangerStereo
+                            onEdited: (v) => fx.flangerStereo = v
+                        }
+
+                    }
+                }
+                SectionCard {
+                    collapsible: true
+                    active: fx.phaserEnabled
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
+                    title: '移相 Phaser'
+                    hint: '连续调制 · 参数平滑 · 反馈限幅'
+                    headerRight: HusSwitch {
+                        checked: fx.phaserEnabled
+                        onToggled: fx.phaserEnabled = checked
+                    }
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+                        ParamRow {
+                            label: '速度'; unit: 'Hz'; from: 0.02; to: 10; step: 0.01; decimals: 2
+                            owner: fx; prop: 'phaserRate'
+                            value: fx.phaserRate
+                            onEdited: (v) => fx.phaserRate = v
+                        }
+                        ParamRow {
+                            label: '深度'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                            owner: fx; prop: 'phaserDepth'
+                            value: fx.phaserDepth
+                            onEdited: (v) => fx.phaserDepth = v
+                        }
+                        ParamRow {
+                            label: '反馈'; unit: ''; from: -0.85; to: 0.85; step: 0.01; decimals: 2
+                            owner: fx; prop: 'phaserFeedback'
+                            value: fx.phaserFeedback
+                            onEdited: (v) => fx.phaserFeedback = v
+                        }
+                        ParamRow {
+                            label: '混合'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                            owner: fx; prop: 'phaserMix'
+                            value: fx.phaserMix
+                            onEdited: (v) => fx.phaserMix = v
+                        }
+                        ParamRow {
+                            label: '立体声相位'; unit: '周'; from: 0; to: 0.5; step: 0.01; decimals: 2
+                            owner: fx; prop: 'phaserStereo'
+                            value: fx.phaserStereo
+                            onEdited: (v) => fx.phaserStereo = v
+                        }
+
+                    }
+                }
+                SectionCard {
+                    collapsible: true
+                    active: fx.fdnEnabled
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
+                    title: 'FDN 空间混响'
+                    hint: '八路反馈延迟网络 · 独立晚混响，可与短早反射卷积组合'
+                    headerRight: HusSwitch {
+                        checked: fx.fdnEnabled
+                        onToggled: fx.fdnEnabled = checked
+                    }
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+                        ParamRow {
+                            label: '衰减时间'; unit: 's'; from: 0.1; to: 12; step: 0.1; decimals: 2
+                            owner: fx; prop: 'fdnDecay'
+                            value: fx.fdnDecay
+                            onEdited: (v) => fx.fdnDecay = v
+                        }
+                        ParamRow {
+                            label: '高频阻尼'; unit: 'Hz'; from: 200; to: 18000; step: 100; decimals: 0
+                            owner: fx; prop: 'fdnDamping'
+                            value: fx.fdnDamping
+                            onEdited: (v) => fx.fdnDamping = v
+                        }
+                        ParamRow {
+                            label: '预延迟'; unit: 'ms'; from: 0; to: 200; step: 1; decimals: 0
+                            owner: fx; prop: 'fdnPreDelay'
+                            value: fx.fdnPreDelay
+                            onEdited: (v) => fx.fdnPreDelay = v
+                        }
+                        ParamRow {
+                            label: '混合'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                            owner: fx; prop: 'fdnMix'
+                            value: fx.fdnMix
+                            onEdited: (v) => fx.fdnMix = v
+                        }
+                        ParamRow {
+                            label: '宽度'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                            owner: fx; prop: 'fdnWidth'
+                            value: fx.fdnWidth
+                            onEdited: (v) => fx.fdnWidth = v
+                        }
+                        ParamRow {
+                            label: '输出'; unit: 'dB'; from: -24; to: 6; step: 0.1; decimals: 2
+                            owner: fx; prop: 'fdnOutput'
+                            value: fx.fdnOutput
+                            onEdited: (v) => fx.fdnOutput = v
+                        }
+
+                    }
+                }
+            }
+
             GroupHeader {
                 title: '动态'
                 detail: '控制音量的起伏 · 已开启 ' + [comp.enabled, fx.multibandEnabled, fx.transientEnabled].filter(v => v).length + ' / 3'

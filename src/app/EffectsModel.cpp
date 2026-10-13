@@ -1,6 +1,7 @@
 #include "app/EffectsModel.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace dreamdsp {
 
@@ -9,6 +10,7 @@ namespace {
 // below stays a single line.
 bool put(float &field, double v, double lo, double hi)
 {
+    if (!std::isfinite(v)) return false;
     const float nv = float(std::clamp(v, lo, hi));
     if (qFuzzyCompare(field + 1.0f, nv + 1.0f))
         return false;
@@ -21,6 +23,8 @@ EffectsModel::EffectsModel(QObject *parent)
     : QObject(parent)
 {
     m_width.monoBelowHz = 120.0f;
+    m_flanger.delayMs = 2.0f;
+    m_flanger.feedback = 0.5f;
     // Every band starts at 1:1 so switching the multiband on changes nothing
     // until a band is actually dialled in.
     for (int b = 0; b < dsp::MultibandCompressor::kBands; ++b) {
@@ -37,7 +41,8 @@ bool EffectsModel::anyEnabled() const
     return m_tubeEnabled || m_bassEnabled || m_exciterEnabled
            || m_widthEnabled || m_crossfeedEnabled || m_multibandEnabled
            || m_transientEnabled || m_clipperEnabled || m_autoGainEnabled
-           || m_nightModeEnabled;
+           || m_nightModeEnabled || m_dynBassEnabled
+           || m_binauralEnabled || m_neuralEnabled || m_chorusEnabled || m_flangerEnabled || m_phaserEnabled || m_fdnEnabled;
 }
 
 void EffectsModel::setTubeDrive(double v) { if (put(m_tube.drive, v, 1.0, 20.0)) emit changed(); }
@@ -111,8 +116,77 @@ void EffectsModel::setNightBoost(double v)     { if (put(m_nightMode.boost, v, 0
 void EffectsModel::setNightCut(double v)       { if (put(m_nightMode.cut, v, 0.0, 1.0))              emit changed(); }
 void EffectsModel::setNightReference(double v) { if (put(m_nightMode.referenceLufs, v, -40.0, -10.0)) emit changed(); }
 
+void EffectsModel::setBinauralAngle(double v) { if (put(m_binaural.speakerAngleDeg, v, 0.0, 90.0)) emit changed(); }
+void EffectsModel::setBinauralYaw(double v) { if (put(m_binaural.yawDeg, v, -180.0, 180.0)) emit changed(); }
+void EffectsModel::setBinauralSpread(double v) { setBinauralAngle(v * 0.5); }
+void EffectsModel::setBinauralElevation(double v)
+{
+    if (!std::isfinite(v)) return;
+    const bool moved = put(m_binaural.elevationDeg, v, -40.0, 90.0);
+    const bool switched = m_binaural.model != 1u;
+    m_binaural.model = 1u; // Height needs the measured pinna cues.
+    if (moved || switched) emit changed();
+}
+void EffectsModel::setBinauralModel(int v)
+{
+    const uint32_t model = v == 1 ? 1u : 0u;
+    if (m_binaural.model == model) return;
+    m_binaural.model = model;
+    if (model == 0u) m_binaural.elevationDeg = 0.0f;
+    emit changed();
+}
+void EffectsModel::applyCinemaSpatialPreset()
+{
+    // Mild room tail behind the direct speakers keeps dialogue intelligible.
+    m_binaural = {32.0f, 0.0f, 1.0f, -6.0f, 8.0f, 1u};
+    m_fdn = {0.75f, 5200.0f, 14.0f, 0.12f, 1.0f, 0.0f};
+    m_binauralEnabled = m_fdnEnabled = true;
+    m_widthEnabled = m_crossfeedEnabled = false;
+    emit changed();
+}
+void EffectsModel::setBinauralMix(double v) { if (put(m_binaural.mix, v, 0.0, 1.0)) emit changed(); }
+void EffectsModel::setBinauralOutput(double v) { if (put(m_binaural.outputDb, v, -24.0, 6.0)) emit changed(); }
+void EffectsModel::setNeuralDrive(double v) { if (put(m_neural.driveDb, v, -12.0, 18.0)) emit changed(); }
+void EffectsModel::setNeuralMix(double v) { if (put(m_neural.mix, v, 0.0, 1.0)) emit changed(); }
+void EffectsModel::setNeuralOutput(double v) { if (put(m_neural.outputDb, v, -24.0, 6.0)) emit changed(); }
+void EffectsModel::setChorusRate(double v) { if (put(m_chorus.rateHz, v, 0.02, 10.0)) emit changed(); }
+void EffectsModel::setChorusDepth(double v) { if (put(m_chorus.depth, v, 0.0, 1.0)) emit changed(); }
+void EffectsModel::setChorusDelay(double v) { if (put(m_chorus.delayMs, v, 0.1, 30.0)) emit changed(); }
+void EffectsModel::setChorusFeedback(double v) { if (put(m_chorus.feedback, v, -0.85, 0.85)) emit changed(); }
+void EffectsModel::setChorusMix(double v) { if (put(m_chorus.mix, v, 0.0, 1.0)) emit changed(); }
+void EffectsModel::setChorusStereo(double v) { if (put(m_chorus.stereoPhase, v, 0.0, 0.5)) emit changed(); }
+void EffectsModel::setFlangerRate(double v) { if (put(m_flanger.rateHz, v, 0.02, 10.0)) emit changed(); }
+void EffectsModel::setFlangerDepth(double v) { if (put(m_flanger.depth, v, 0.0, 1.0)) emit changed(); }
+void EffectsModel::setFlangerDelay(double v) { if (put(m_flanger.delayMs, v, 0.1, 5.0)) emit changed(); }
+void EffectsModel::setFlangerFeedback(double v) { if (put(m_flanger.feedback, v, -0.85, 0.85)) emit changed(); }
+void EffectsModel::setFlangerMix(double v) { if (put(m_flanger.mix, v, 0.0, 1.0)) emit changed(); }
+void EffectsModel::setFlangerStereo(double v) { if (put(m_flanger.stereoPhase, v, 0.0, 0.5)) emit changed(); }
+void EffectsModel::setPhaserRate(double v) { if (put(m_phaser.rateHz, v, 0.02, 10.0)) emit changed(); }
+void EffectsModel::setPhaserDepth(double v) { if (put(m_phaser.depth, v, 0.0, 1.0)) emit changed(); }
+void EffectsModel::setPhaserFeedback(double v) { if (put(m_phaser.feedback, v, -0.85, 0.85)) emit changed(); }
+void EffectsModel::setPhaserMix(double v) { if (put(m_phaser.mix, v, 0.0, 1.0)) emit changed(); }
+void EffectsModel::setPhaserStereo(double v) { if (put(m_phaser.stereoPhase, v, 0.0, 0.5)) emit changed(); }
+void EffectsModel::setFdnDecay(double v) { if (put(m_fdn.decaySeconds, v, 0.1, 12.0)) emit changed(); }
+void EffectsModel::setFdnDamping(double v) { if (put(m_fdn.dampingHz, v, 200.0, 18000.0)) emit changed(); }
+void EffectsModel::setFdnPreDelay(double v) { if (put(m_fdn.preDelayMs, v, 0.0, 200.0)) emit changed(); }
+void EffectsModel::setFdnMix(double v) { if (put(m_fdn.mix, v, 0.0, 1.0)) emit changed(); }
+void EffectsModel::setFdnWidth(double v) { if (put(m_fdn.width, v, 0.0, 1.0)) emit changed(); }
+void EffectsModel::setFdnOutput(double v) { if (put(m_fdn.outputDb, v, -24.0, 6.0)) emit changed(); }
+
 void EffectsModel::restore(const dsp::ParamBlock &b)
 {
+    m_binaural = b.binaural;
+    m_binauralEnabled = (b.enableMask & dsp::kEnBinaural) != 0;
+    m_neural = b.neural;
+    m_neuralEnabled = (b.enableMask & dsp::kEnNeural) != 0;
+    m_chorus = b.chorus;
+    m_chorusEnabled = (b.enableMask & dsp::kEnChorus) != 0;
+    m_flanger = b.flanger;
+    m_flangerEnabled = (b.enableMask & dsp::kEnFlanger) != 0;
+    m_phaser = b.phaser;
+    m_phaserEnabled = (b.enableMask & dsp::kEnPhaser) != 0;
+    m_fdn = b.fdn;
+    m_fdnEnabled = (b.enableMask & dsp::kEnFdn) != 0;
     m_tube = b.tube;
     m_bass = b.bass;
     m_dynBass = b.dynBass;

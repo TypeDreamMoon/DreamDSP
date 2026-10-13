@@ -558,6 +558,8 @@ bool AppController::saveFullPreset(const QString &name)
     p.params = blockFromModels(&m_compressor, &m_reverb, &m_effects,
                                m_publisher.convolution(), m_convolutionEnabled,
                                nullptr, 0.0, false, &m_output);
+    std::memcpy(p.params.order, m_order, sizeof m_order);
+    p.params.flags = m_masterEnabled ? 0u : dsp::kPfBypass;
     p.convolutionFile = m_convolution.path;
     p.convolutionName = m_convolution.name;
     p.autoEqSource = m_autoEqSource;
@@ -594,6 +596,9 @@ bool AppController::loadFullPreset(const QString &path)
     m_reverb.restore(p.params.reverb, (p.params.enableMask & dsp::kEnReverb) != 0);
     m_effects.restore(p.params);
     m_output.restore(p.params);
+    std::memcpy(m_order, p.params.order, sizeof m_order);
+    setMasterEnabled((p.params.flags & dsp::kPfBypass) == 0u);
+    emit chainChanged();
     m_autoEqSource = p.autoEqSource;
 
     m_publisher.setConvolutionMix(p.params.convolution.mix);
@@ -1737,6 +1742,12 @@ const StageInfo kStages[] = {
     { dsp::kStageClipper,     "削波器",     "软拐点 · 限制器之前",    3 },
     { dsp::kStageAutoGain,    "自动音量",   "按 BS.1770 响度找平",    3 },
     { dsp::kStageNightMode,   "夜间模式",   "杜比 DRC 曲线",          3 },
+    { dsp::kStageBinaural, "双耳虚拟音箱", "三维实测 HRTF · 固定头部 · 音箱环绕与升降", 1 },
+    { dsp::kStageNeural, "神经饱和", "Synthetic Memory Drive · 合成教师训练 · 仅 48 kHz，其他采样率旁路", 1 },
+    { dsp::kStageChorus, "合唱 Chorus", "连续调制 · 参数平滑 · 反馈限幅", 1 },
+    { dsp::kStageFlanger, "镶边 Flanger", "连续调制 · 参数平滑 · 反馈限幅", 1 },
+    { dsp::kStagePhaser, "移相 Phaser", "连续调制 · 参数平滑 · 反馈限幅", 1 },
+    { dsp::kStageFdn, "FDN 空间混响", "八路反馈延迟网络 · 独立晚混响，可与短早反射卷积组合", 1 },
 };
 // Page indices follow the navigation rail: 0 equalizer, 1 effects,
 // 2 convolution, 3 output, 4 chain, 5 AutoEQ, 6 system audio, 7 settings.
@@ -1800,7 +1811,7 @@ bool AppController::chainIsDefault() const
 // switched on, which is exactly the drift the chain page was built to avoid.
 // This is the tripwire: adding a stage bumps kStageCount, which breaks the
 // build here rather than in a bug report.
-static_assert(dsp::kStageCount == 20,
+static_assert(dsp::kStageCount == 26,
               "a new stage needs a case in stageEnabled() and setStageEnabled()");
 
 bool AppController::stageEnabled(int stageId) const
@@ -1826,6 +1837,12 @@ bool AppController::stageEnabled(int stageId) const
     case dsp::kStageClipper:     return m_effects.clipperOn();
     case dsp::kStageAutoGain:    return m_effects.autoGainOn();
     case dsp::kStageNightMode:   return m_effects.nightModeOn();
+    case dsp::kStageBinaural: return m_effects.binauralOn();
+    case dsp::kStageNeural: return m_effects.neuralOn();
+    case dsp::kStageChorus: return m_effects.chorusOn();
+    case dsp::kStageFlanger: return m_effects.flangerOn();
+    case dsp::kStagePhaser: return m_effects.phaserOn();
+    case dsp::kStageFdn: return m_effects.fdnOn();
     default:                     return false;
     }
 }
@@ -1857,6 +1874,12 @@ void AppController::setStageEnabled(int stageId, bool on)
     case dsp::kStageClipper:     m_effects.setProperty("clipperEnabled", on); break;
     case dsp::kStageAutoGain:    m_effects.setProperty("autoGainEnabled", on); break;
     case dsp::kStageNightMode:   m_effects.setProperty("nightModeEnabled", on); break;
+    case dsp::kStageBinaural: m_effects.setProperty("binauralEnabled", on); break;
+    case dsp::kStageNeural: m_effects.setProperty("neuralEnabled", on); break;
+    case dsp::kStageChorus: m_effects.setProperty("chorusEnabled", on); break;
+    case dsp::kStageFlanger: m_effects.setProperty("flangerEnabled", on); break;
+    case dsp::kStagePhaser: m_effects.setProperty("phaserEnabled", on); break;
+    case dsp::kStageFdn: m_effects.setProperty("fdnEnabled", on); break;
     default: return;
     }
     emit chainChanged();
@@ -1891,6 +1914,23 @@ void AppController::resetChainOrder()
     markDirty(true);
     scheduleWrite();
     setMessage(QStringLiteral("已恢复默认处理顺序"));
+}
+
+void AppController::applyCinemaSpatialPreset()
+{
+    m_effects.applyCinemaSpatialPreset();
+    m_reverb.setEnabled(false);
+    int spatial = 0, room = 0;
+    for (int i = 0; i < dsp::kStageCount; ++i) {
+        if (m_order[i] == dsp::kStageBinaural) spatial = i;
+        if (m_order[i] == dsp::kStageFdn) room = i;
+    }
+    // Diffuse stereo late energy follows the direct virtual-speaker render.
+    // Preserve the relative order of every other user-arranged stage.
+    moveStage(room, spatial + (room > spatial ? 1 : 0));
+    markDirty(true);
+    scheduleWrite();
+    setMessage(QStringLiteral("已应用影院空间：三维双耳定位 + 轻度房间混响"));
 }
 
 // ------------------------------------------------------------------ private

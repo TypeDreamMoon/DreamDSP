@@ -196,7 +196,7 @@ HRESULT DreamApo::GetLatency(HNSTIME *pTime)
     // is rebuilt. Time alignment is a few milliseconds, which is below what
     // video synchronisation resolves; there is no way to have both a live
     // control and a fixed reported latency.
-    const uint32_t samples = m_locked ? uint32_t(m_chain.latencySamples()) : 0u;
+    const uint32_t samples = m_locked ? m_latencySamples.load(std::memory_order_relaxed) : 0u;
     *pTime = (samples > 0 && m_sampleRate > 0.0)
                  ? HNSTIME(std::llround(double(samples) * 10000000.0 / m_sampleRate))
                  : 0;
@@ -338,9 +338,12 @@ HRESULT DreamApo::LockForProcess(UINT32 u32NumInputConnections,
 
     m_chain.prepare(m_sampleRate, int(m_channels), int(m_maxFrames));
 
-    // Zeroed, not value-initialised: enableMask == 0 is what makes a stream
-    // that never receives parameters bit-transparent.
-    std::memset(&m_pending, 0, sizeof m_pending);
+    // A valid, transparent fallback when the parameter channel is unavailable.
+    m_pending = dsp::transparentBlock();
+    m_chain.apply(m_pending);
+    m_appliedGeneration.store(0, std::memory_order_relaxed);
+    m_appliedMask.store(0, std::memory_order_relaxed);
+    m_latencySamples.store(0, std::memory_order_relaxed);
 
     m_framesProcessed.store(0, std::memory_order_relaxed);
     m_peakIn = 0.0f;
@@ -358,8 +361,7 @@ HRESULT DreamApo::LockForProcess(UINT32 u32NumInputConnections,
     // time therefore engages on the next stream rather than mid-playback --
     // deferred rather than lied about.
     if (m_channelHeld) {
-        dsp::ParamBlock initial;
-        std::memset(&initial, 0, sizeof initial);
+        dsp::ParamBlock initial = dsp::transparentBlock();
         m_channel->slots().read(&initial);
         m_chain.convolution().setArmed(initial.convolution.irGeneration != 0u);
 
@@ -372,6 +374,9 @@ HRESULT DreamApo::LockForProcess(UINT32 u32NumInputConnections,
         // nothing to change.
         m_pending = initial;
         m_chain.apply(m_pending);
+        m_appliedGeneration.store(m_chain.appliedGeneration(), std::memory_order_relaxed);
+        m_appliedMask.store(m_chain.appliedMask(), std::memory_order_relaxed);
+        m_latencySamples.store(uint32_t(m_chain.latencySamples()), std::memory_order_relaxed);
 
         trace(L"initial params applied, latency samples", m_chain.latencySamples());
     }
@@ -389,8 +394,8 @@ void DreamApo::fillStatus(dsp::StatusInstance &out) const noexcept
     out.sampleRate = uint32_t(m_sampleRate);
     out.channels = m_channels;
     out.maxFrames = m_maxFrames;
-    out.appliedGeneration = m_chain.appliedGeneration();
-    out.appliedMask = m_chain.appliedMask();
+    out.appliedGeneration = m_appliedGeneration.load(std::memory_order_relaxed);
+    out.appliedMask = m_appliedMask.load(std::memory_order_relaxed);
     out.flags = m_statusFlags.load(std::memory_order_relaxed);
     out.framesProcessed = m_framesProcessed.load(std::memory_order_relaxed);
 }
@@ -451,34 +456,32 @@ void DreamApo::APOProcess(UINT32 u32NumInputConnections,
     out->u32ValidFrameCount = frames;
     out->u32BufferFlags = in->u32BufferFlags;
 
-    // Silence and invalid buffers pass straight through: the engine is allowed
-    // to hand us a buffer marked silent with undefined contents.
-    if (!m_locked || !src || !dst || frames == 0
+    // Silent input has undefined sample contents. Feed zeros through the DSP
+    // to drain delay lines, reverb and recurrent states instead of freezing them.
+    const bool silent = in->u32BufferFlags == BUFFER_SILENT;
+    if (!m_locked || (!src && !silent) || !dst || frames == 0
         || frames > m_maxFrames || m_channels == 0
-        || in->u32BufferFlags != BUFFER_VALID) {
-        // dst may *be* src: APO_FLAG_INPLACE is set, and memcpy over identical
-        // pointers is undefined. When they are the same the data is already
-        // where it needs to be.
-        if (src && dst && dst != src && frames > 0 && m_channels > 0)
-            ::memcpy(dst, src, size_t(frames) * size_t(m_channels) * sizeof(float));
+        || (!silent && in->u32BufferFlags != BUFFER_VALID)) {
+        out->u32ValidFrameCount = 0;
+        out->u32BufferFlags = BUFFER_INVALID;
         return;
     }
 
     const UINT32 ch = m_channels;
 
     // --- ingest --------------------------------------------------------
-    // Two atomic loads and at most two 256-byte copies. read() makes exactly
-    // two attempts and never spins; if both catch the publisher mid-write,
-    // m_pending keeps what it already had -- always a sanitised block, zeroed
-    // by LockForProcess.
+    // At most two atomic-word snapshot attempts, with no spinning. A failed
+    // read leaves m_pending untouched, preserving the last sanitised block.
     if (m_channelHeld && m_channel)
         (void)m_channel->slots().read(&m_pending);
 
     // --- install -------------------------------------------------------
-    // Eight memcmps on an unchanged block. Filter design only runs for effects
-    // that are enabled and whose parameters actually differ, so this costs
-    // nothing on the overwhelming majority of callbacks.
+    // Comparisons on an unchanged block; parameter installation only for
+    // changed or newly enabled stages. No allocations or file access here.
     m_chain.apply(m_pending);
+    m_appliedGeneration.store(m_chain.appliedGeneration(), std::memory_order_relaxed);
+    m_appliedMask.store(m_chain.appliedMask(), std::memory_order_relaxed);
+    m_latencySamples.store(uint32_t(m_chain.latencySamples()), std::memory_order_relaxed);
 
     uint32_t flags = dsp::kSfStreaming;
     if (dst == src)
@@ -487,9 +490,11 @@ void DreamApo::APOProcess(UINT32 u32NumInputConnections,
     // --- transparent fast path -----------------------------------------
     // Not one float is loaded, no arithmetic happens, the floating-point mode
     // is not touched, and dst comes out byte-identical to src. This is also the
-    // master bypass: the GUI writes enableMask = 0 and gets exactly this.
+    // master bypass: the GUI sets kPfBypass and gets exactly this.
     if (m_chain.appliedMask() == 0u) {
-        if (dst != src)
+        if (silent)
+            ::memset(dst, 0, size_t(frames) * size_t(ch) * sizeof(float));
+        else if (dst != src)
             ::memcpy(dst, src, size_t(frames) * size_t(ch) * sizeof(float));
         m_framesProcessed.fetch_add(frames, std::memory_order_relaxed);
         m_statusFlags.store(flags | dsp::kSfPassthrough, std::memory_order_relaxed);
@@ -509,7 +514,7 @@ void DreamApo::APOProcess(UINT32 u32NumInputConnections,
     // buffers, which is also what makes it testable offline.
     for (UINT32 i = 0; i < frames; ++i) {
         for (UINT32 c = 0; c < ch; ++c) {
-            const float v = src[size_t(i) * ch + c];
+            const float v = silent ? 0.0f : src[size_t(i) * ch + c];
             m_channelPtrs[c][i] = v;
             const float a = v < 0.0f ? -v : v;
             if (a > m_peakIn)
@@ -519,6 +524,9 @@ void DreamApo::APOProcess(UINT32 u32NumInputConnections,
 
     dsp::AudioBuffer buf{ m_channelPtrs.data(), int(ch), int(frames) };
     m_chain.process(buf);
+    // A silent input can produce a non-silent tail. The processed buffer is
+    // authoritative; never propagate BUFFER_SILENT over generated output.
+    out->u32BufferFlags = BUFFER_VALID;
 
     for (UINT32 i = 0; i < frames; ++i) {
         for (UINT32 c = 0; c < ch; ++c) {

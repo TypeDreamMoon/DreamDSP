@@ -33,6 +33,12 @@ void EffectChain::prepare(double sampleRate, int channels, int maxFrames)
     m_transient.prepare(sampleRate, channels);
     m_autoGain.prepare(sampleRate, channels, maxFrames);
     m_nightMode.prepare(sampleRate, channels);
+    m_binaural.prepare(sampleRate, channels);
+    m_neural.prepare(sampleRate, channels);
+    m_chorus.prepare(sampleRate, channels);
+    m_flanger.prepare(sampleRate, channels);
+    m_phaser.prepare(sampleRate, channels);
+    m_fdn.prepare(sampleRate, channels);
 
     // Zeroed rather than value-initialised: the Params members carry default
     // member initialisers, and `m_applied = {}` would seed an always-on reverb.
@@ -66,6 +72,12 @@ void EffectChain::reset()
     m_transient.reset();
     m_autoGain.reset();
     m_nightMode.reset();
+    m_binaural.reset();
+    m_neural.reset();
+    m_chorus.reset();
+    m_flanger.reset();
+    m_phaser.reset();
+    m_fdn.reset();
 }
 
 void EffectChain::apply(ParamBlock p) noexcept
@@ -80,17 +92,24 @@ void EffectChain::apply(ParamBlock p) noexcept
     // mask alone.
     const uint32_t live = p.enableMask | m_applied.enableMask;
     const uint32_t turnedOn = p.enableMask & ~m_applied.enableMask;
+    // The new stateful stages must not replay old tails after a long master
+    // bypass. Convolution has a separate history/latency policy below.
+    const bool resumed = (m_applied.flags & kPfBypass) && !(p.flags & kPfBypass);
+    constexpr uint32_t expanded = kEnBinaural | kEnNeural | kEnChorus
+                                  | kEnFlanger | kEnPhaser | kEnFdn;
+    const uint32_t resetStages = turnedOn | (resumed ? p.enableMask & expanded : 0u);
 
     // m_applied.<field> is updated only when setParams actually ran, so an
     // effect enabled later still sees a memcmp difference and gets its
     // parameters installed rather than silently running stale ones.
 #define DREAMDSP_STAGE(bit, field, obj)                                        \
     if ((live & (bit))                                                         \
-        && std::memcmp(&p.field, &m_applied.field, sizeof p.field) != 0) {     \
+        && ((turnedOn & (bit))                                                 \
+            || std::memcmp(&p.field, &m_applied.field, sizeof p.field) != 0)) { \
         obj.setParams(p.field);                                                \
         m_applied.field = p.field;                                             \
     }                                                                          \
-    if (turnedOn & (bit))                                                      \
+    if (resetStages & (bit))                                                   \
         obj.reset();
 
     DREAMDSP_STAGE(kEnEqualizer, eq, m_eq)
@@ -112,6 +131,12 @@ void EffectChain::apply(ParamBlock p) noexcept
     DREAMDSP_STAGE(kEnClipper, clipper, m_clipper)
     DREAMDSP_STAGE(kEnAutoGain, autoGain, m_autoGain)
     DREAMDSP_STAGE(kEnNightMode, nightMode, m_nightMode)
+    DREAMDSP_STAGE(kEnBinaural, binaural, m_binaural)
+    DREAMDSP_STAGE(kEnNeural, neural, m_neural)
+    DREAMDSP_STAGE(kEnChorus, chorus, m_chorus)
+    DREAMDSP_STAGE(kEnFlanger, flanger, m_flanger)
+    DREAMDSP_STAGE(kEnPhaser, phaser, m_phaser)
+    DREAMDSP_STAGE(kEnFdn, fdn, m_fdn)
 
 #undef DREAMDSP_STAGE
 
@@ -187,6 +212,12 @@ void EffectChain::process(const AudioBuffer &buf)
         case kStageClipper:     if (mask & kEnClipper)     m_clipper.process(buf);   break;
         case kStageAutoGain:    if (mask & kEnAutoGain)    m_autoGain.process(buf);  break;
         case kStageNightMode:   if (mask & kEnNightMode)   m_nightMode.process(buf); break;
+        case kStageBinaural:    if (mask & kEnBinaural)    m_binaural.process(buf); break;
+        case kStageNeural:      if (mask & kEnNeural)      m_neural.process(buf); break;
+        case kStageChorus:      if (mask & kEnChorus)      m_chorus.process(buf); break;
+        case kStageFlanger:     if (mask & kEnFlanger)     m_flanger.process(buf); break;
+        case kStagePhaser:      if (mask & kEnPhaser)      m_phaser.process(buf); break;
+        case kStageFdn:         if (mask & kEnFdn)         m_fdn.process(buf); break;
         default: break;
         }
     }
