@@ -112,6 +112,8 @@ bool saveDreamPreset(const QString &path, const DreamPreset &preset, QString *er
             { dsp::kEnBinaural, "binaural" }, { dsp::kEnNeural, "neural" },
             { dsp::kEnChorus, "chorus" }, { dsp::kEnFlanger, "flanger" },
             { dsp::kEnPhaser, "phaser" }, { dsp::kEnFdn, "fdn" },
+            { dsp::kEnTape, "tape" }, { dsp::kEnDeEsser, "deEsser" },
+            { dsp::kEnGate, "gate" }, { dsp::kEnDynamicEq, "dynamicEq" },
         };
         for (const auto &n : kNames) {
             if (p.enableMask & n.bit)
@@ -219,6 +221,44 @@ bool saveDreamPreset(const QString &path, const DreamPreset &preset, QString *er
             {QStringLiteral("mix"), p.fdn.mix},
             {QStringLiteral("width"), p.fdn.width},
             {QStringLiteral("outputDb"), p.fdn.outputDb}
+        };
+        fx[QStringLiteral("gate")] = QJsonObject{
+            {QStringLiteral("thresholdDb"), p.gate.thresholdDb},
+            {QStringLiteral("hysteresisDb"), p.gate.hysteresisDb},
+            {QStringLiteral("rangeDb"), p.gate.rangeDb},
+            {QStringLiteral("attackMs"), p.gate.attackMs},
+            {QStringLiteral("holdMs"), p.gate.holdMs},
+            {QStringLiteral("releaseMs"), p.gate.releaseMs}
+        };
+        QJsonArray dynamicBands;
+        for (const auto &band : p.dynamicEq.band) {
+            dynamicBands.append(QJsonObject{
+                {QStringLiteral("frequencyHz"), band.frequencyHz},
+                {QStringLiteral("q"), band.q},
+                {QStringLiteral("thresholdDb"), band.thresholdDb},
+                {QStringLiteral("ratio"), band.ratio},
+                {QStringLiteral("maxReductionDb"), band.maxReductionDb},
+                {QStringLiteral("attackMs"), band.attackMs},
+                {QStringLiteral("releaseMs"), band.releaseMs},
+                {QStringLiteral("enabled"), band.enabled != 0}
+            });
+        }
+        fx[QStringLiteral("dynamicEq")] = dynamicBands;
+        fx[QStringLiteral("tape")] = QJsonObject{
+            {QStringLiteral("driveDb"), p.tape.driveDb},
+            {QStringLiteral("toneHz"), p.tape.toneHz},
+            {QStringLiteral("bumpDb"), p.tape.bumpDb},
+            {QStringLiteral("memory"), p.tape.memory},
+            {QStringLiteral("mix"), p.tape.mix},
+            {QStringLiteral("outputDb"), p.tape.outputDb}
+        };
+        fx[QStringLiteral("deEsser")] = QJsonObject{
+            {QStringLiteral("frequencyHz"), p.deEsser.frequencyHz},
+            {QStringLiteral("thresholdDb"), p.deEsser.thresholdDb},
+            {QStringLiteral("ratio"), p.deEsser.ratio},
+            {QStringLiteral("maxReductionDb"), p.deEsser.maxReductionDb},
+            {QStringLiteral("attackMs"), p.deEsser.attackMs},
+            {QStringLiteral("releaseMs"), p.deEsser.releaseMs}
         };
         fx[QStringLiteral("transient")] = QJsonObject{
             {QStringLiteral("attack"), p.transient.attack},
@@ -374,6 +414,10 @@ bool loadDreamPreset(const QString &path, DreamPreset *out, QString *error)
 
     dsp::ParamBlock &p = out->params;
     const QJsonObject fx = root.value(QStringLiteral("effects")).toObject();
+    p.gate = dsp::NoiseGate::Params{};
+    p.dynamicEq = dsp::DynamicEq::Params{};
+    p.tape = dsp::TapeSaturation::Params{};
+    p.deEsser = dsp::DeEsser::Params{};
     p.binaural = dsp::Binaural::Params{};
     p.neural = dsp::NeuralSaturation::Params{};
     p.chorus = dsp::Modulation::Params{};
@@ -561,11 +605,51 @@ bool loadDreamPreset(const QString &path, DreamPreset *out, QString *error)
         p.dynBass.cutoffHz = float(o.value(QStringLiteral("cutoffHz")).toDouble(p.dynBass.cutoffHz));
         p.dynBass.releaseMs = float(o.value(QStringLiteral("releaseMs")).toDouble(p.dynBass.releaseMs));
     }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("tape")).toObject();
+        p.tape.driveDb = float(o.value(QStringLiteral("driveDb")).toDouble(p.tape.driveDb));
+        p.tape.toneHz = float(o.value(QStringLiteral("toneHz")).toDouble(p.tape.toneHz));
+        p.tape.bumpDb = float(o.value(QStringLiteral("bumpDb")).toDouble(p.tape.bumpDb));
+        p.tape.memory = float(o.value(QStringLiteral("memory")).toDouble(p.tape.memory));
+        p.tape.mix = float(o.value(QStringLiteral("mix")).toDouble(p.tape.mix));
+        p.tape.outputDb = float(o.value(QStringLiteral("outputDb")).toDouble(p.tape.outputDb));
+    }
+    {
+        const QJsonObject o = fx.value(QStringLiteral("deEsser")).toObject();
+        p.deEsser.frequencyHz = float(o.value(QStringLiteral("frequencyHz")).toDouble(p.deEsser.frequencyHz));
+        p.deEsser.thresholdDb = float(o.value(QStringLiteral("thresholdDb")).toDouble(p.deEsser.thresholdDb));
+        p.deEsser.ratio = float(o.value(QStringLiteral("ratio")).toDouble(p.deEsser.ratio));
+        p.deEsser.maxReductionDb = float(o.value(QStringLiteral("maxReductionDb")).toDouble(p.deEsser.maxReductionDb));
+        p.deEsser.attackMs = float(o.value(QStringLiteral("attackMs")).toDouble(p.deEsser.attackMs));
+        p.deEsser.releaseMs = float(o.value(QStringLiteral("releaseMs")).toDouble(p.deEsser.releaseMs));
+    }
+    {
+        const auto o = fx.value(QStringLiteral("gate")).toObject();
+        p.gate.thresholdDb = float(o.value(QStringLiteral("thresholdDb")).toDouble(p.gate.thresholdDb));
+        p.gate.hysteresisDb = float(o.value(QStringLiteral("hysteresisDb")).toDouble(p.gate.hysteresisDb));
+        p.gate.rangeDb = float(o.value(QStringLiteral("rangeDb")).toDouble(p.gate.rangeDb));
+        p.gate.attackMs = float(o.value(QStringLiteral("attackMs")).toDouble(p.gate.attackMs));
+        p.gate.holdMs = float(o.value(QStringLiteral("holdMs")).toDouble(p.gate.holdMs));
+        p.gate.releaseMs = float(o.value(QStringLiteral("releaseMs")).toDouble(p.gate.releaseMs));
+    }
+    const auto dynamicBands = fx.value(QStringLiteral("dynamicEq")).toArray();
+    for (int i = 0; i < dsp::DynamicEq::kBands && i < dynamicBands.size(); ++i) {
+        const auto o = dynamicBands[i].toObject();
+        auto &b = p.dynamicEq.band[i];
+        b.frequencyHz = float(o.value(QStringLiteral("frequencyHz")).toDouble(b.frequencyHz));
+        b.q = float(o.value(QStringLiteral("q")).toDouble(b.q));
+        b.thresholdDb = float(o.value(QStringLiteral("thresholdDb")).toDouble(b.thresholdDb));
+        b.ratio = float(o.value(QStringLiteral("ratio")).toDouble(b.ratio));
+        b.maxReductionDb = float(o.value(QStringLiteral("maxReductionDb")).toDouble(b.maxReductionDb));
+        b.attackMs = float(o.value(QStringLiteral("attackMs")).toDouble(b.attackMs));
+        b.releaseMs = float(o.value(QStringLiteral("releaseMs")).toDouble(b.releaseMs));
+        b.enabled = o.value(QStringLiteral("enabled")).toBool(b.enabled != 0) ? 1u : 0u;
+    }
     p.flags = uint32_t(fx.value(QStringLiteral("flags")).toInt(0));
     p.exciter.thresholdDb = float(fx.value(QStringLiteral("exciterThresholdDb")).toDouble(p.exciter.thresholdDb));
     p.width.phaseAmount = float(fx.value(QStringLiteral("widthPhaseAmount")).toDouble(p.width.phaseAmount));
     const QJsonArray order = fx.value(QStringLiteral("order")).toArray();
-    if (order.size() == 16 || order.size() == 20 || order.size() == dsp::kStageCount) {
+    if (order.size() == 16 || order.size() == 20 || order.size() == 26 || order.size() == 28 || order.size() == dsp::kStageCount) {
         uint8_t ids[dsp::kStageCount]{};
         for (int i = 0; i < order.size(); ++i) {
             const int id = order[i].toInt(-1);

@@ -18,11 +18,29 @@ float safeParameter(float value, float fallback, float lo, float hi) noexcept
 
 void NeuralSaturation::prepare(double sampleRate, int channels)
 {
-    // Running this discrete-time recurrent model at another rate changes its
-    // learned memory. There is intentionally no pretend "2x" neural mode.
-    m_supported = sampleRate == kModelSampleRate && channels >= 1 && channels <= kMaxChannels;
+    // Keep the recurrent dynamics at their training rate. Only this stage's
+    // wet path is converted, with the dry path delayed to the same integer
+    // host-sample latency. The native 48 kHz reference path remains unchanged.
+    uint64_t bits;
+    std::memcpy(&bits, &sampleRate, sizeof bits);
+    m_supported = (bits & 0x7ff0000000000000ull) != 0x7ff0000000000000ull
+        && sampleRate >= 8000 && sampleRate <= 192000 && channels >= 1 && channels <= kMaxChannels;
     m_channels = clampTo(channels, 0, kMaxChannels);
+    m_converted = m_supported && sampleRate != kModelSampleRate;
+    m_latency = 0;
     m_rate = 1.0f - timeConstant(10.0f, kModelSampleRate);
+    m_hostRate = m_supported ? 1.0f - timeConstant(10.0f, sampleRate) : m_rate;
+    if (m_converted) {
+        m_hostPerModel = sampleRate / kModelSampleRate;
+        m_modelPerHost = kModelSampleRate / sampleRate;
+        m_toModel.prepare(sampleRate, kModelSampleRate);
+        m_fromModel.prepare(kModelSampleRate, sampleRate);
+        const double delay = m_toModel.delay() + m_fromModel.delay() * m_hostPerModel;
+        m_latency = int(std::ceil(delay));
+        m_extraModelDelay = (m_latency - m_toModel.delay()) * m_modelPerHost - m_fromModel.delay();
+        m_input.assign(size_t(m_channels * 2 * StreamingSinc::kRing), 0);
+        m_modelOutput.assign(m_input.size(), 0);
+    }
     for (auto &channel : m_state) channel.dc.prepare(kModelSampleRate);
     setParams(m_p);
     reset();
@@ -45,6 +63,9 @@ void NeuralSaturation::setParams(const Params &p) noexcept
 
 void NeuralSaturation::reset() noexcept
 {
+    std::fill(m_input.begin(), m_input.end(), 0.0f);
+    std::fill(m_modelOutput.begin(), m_modelOutput.end(), 0.0f);
+    m_hostIndex = m_modelIndex = 0;
     for (auto &channel : m_state) {
         channel.hidden.fill(0.0f);
         channel.dc.reset();
@@ -88,6 +109,8 @@ void NeuralSaturation::process(const AudioBuffer &buf) noexcept
     if (!m_supported || !buf.valid()) return; // Unsupported rates pass bit-exactly.
     m_hasProcessed = true;
     const int channels = std::min(buf.channelCount, m_channels);
+    for (int c = 0; c < channels; ++c) if (!buf.channels[c]) return;
+    if (m_converted) { processConverted(buf, channels); return; }
     for (int i = 0; i < buf.frames; ++i) {
         // Shared automation advances ONCE per stereo/multichannel sample.
         m_drive += m_rate * (m_targetDrive - m_drive);
@@ -110,6 +133,48 @@ void NeuralSaturation::process(const AudioBuffer &buf) noexcept
                 fault(channel);
                 buf.channels[c][i] = dry;
             }
+        }
+    }
+}
+
+void NeuralSaturation::processConverted(const AudioBuffer &buf, int channels) noexcept
+{
+    constexpr int ring = StreamingSinc::kRing;
+    for (int i = 0; i < buf.frames; ++i, ++m_hostIndex) {
+        m_mix += m_hostRate * (m_p.mix - m_mix);
+        m_gain += m_hostRate * (m_targetGain - m_gain);
+        for (int c = 0; c < channels; ++c) {
+            bool bad = false;
+            const float dry = railed(buf.channels[c][i], &bad);
+            if (bad) {
+                fault(m_state[size_t(c)]);
+                std::fill_n(inputHistory(c), 2 * ring, 0.0f);
+                std::fill_n(modelHistory(c), 2 * ring, 0.0f);
+            }
+            StreamingSinc::write(inputHistory(c), m_hostIndex, dry);
+        }
+        // At the lowest supported rate there are at most seven model ticks
+        // per input frame; neither queue growth nor block-sized buffering.
+        while (double(m_modelIndex) * m_hostPerModel <= double(m_hostIndex) + 1e-9) {
+            m_drive += m_rate * (m_targetDrive - m_drive);
+            for (int c = 0; c < channels; ++c) {
+                auto &channel = m_state[size_t(c)];
+                const float x = m_toModel.read(inputHistory(c), double(m_modelIndex) * m_hostPerModel);
+                bool bad = false;
+                float wet = railed(channel.dc.process(forward(clampTo(x * m_drive, -2.0f, 2.0f), channel)), &bad);
+                if (bad) { fault(channel); wet = 0; }
+                StreamingSinc::write(modelHistory(c), m_modelIndex, wet);
+            }
+            ++m_modelIndex;
+        }
+        const double wetTime = double(m_hostIndex) * m_modelPerHost - m_extraModelDelay;
+        const auto dryAt = size_t(uint64_t(m_hostIndex - m_latency) & (ring - 1));
+        for (int c = 0; c < channels; ++c) {
+            const float dry = inputHistory(c)[dryAt];
+            const float wet = m_fromModel.read(modelHistory(c), wetTime);
+            bool bad = false;
+            buf.channels[c][i] = railed(m_gain * (dry + m_mix * (wet - dry)), &bad);
+            if (bad) { fault(m_state[size_t(c)]); buf.channels[c][i] = dry; }
         }
     }
 }

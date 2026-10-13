@@ -42,7 +42,9 @@ void runExpansionTests(Check check)
         oldSettings.fdn = {2.5f, 4300, 27, .3f, .8f, -2};
         std::array<unsigned char, 1524> raw{};
         std::memcpy(raw.data(), &oldSettings, 1384);
-        std::memcpy(raw.data() + 1384, &oldSettings.neural, 1524 - 1384);
+        std::memcpy(raw.data() + 1384, &oldSettings.neural, 112);
+        int next = 1496;
+        for (auto id : oldSettings.order) if (id < 26) raw[size_t(next++)] = id;
         const uint32_t version = 8, size = 1524;
         std::memcpy(raw.data() + 4, &version, 4);
         std::memcpy(raw.data() + 8, &size, 4);
@@ -50,8 +52,47 @@ void runExpansionTests(Check check)
         check(decodeParamBlock(raw.data(), raw.size(), &got) && isSane(got)
               && std::memcmp(&got.binaural, &oldSettings.binaural, 16) == 0
               && got.binaural.model == 0 && got.binaural.elevationDeg == 0
-              && std::memcmp(&got.neural, &oldSettings.neural, 1524 - 1384) == 0,
+              && std::memcmp(&got.neural, &oldSettings.neural, 112) == 0
+              && !(got.enableMask & (kEnTape | kEnDeEsser)),
               "v8 migration retains old horizontal sound and moves the remaining fields without loss");
+    }
+    {
+        std::array<unsigned char, 1532> raw{};
+        std::memcpy(raw.data(), &seed, 1504);
+        int next = 1504;
+        for (int id = 25; id >= 0; --id) raw[size_t(next++)] = uint8_t(id);
+        const uint32_t version = 9, size = 1532;
+        std::memcpy(raw.data() + 4, &version, 4);
+        std::memcpy(raw.data() + 8, &size, 4);
+        ParamBlock got;
+        bool ok = decodeParamBlock(raw.data(), raw.size(), &got) && isSane(got);
+        int previous = 26;
+        for (auto id : got.order) if (id < 26) { ok &= id < previous; previous = id; }
+        check(ok && got.enableMask == seed.enableMask && got.flags == seed.flags
+              && got.tape.driveDb == 6 && got.deEsser.ratio == 4,
+              "v9 migration preserves custom order/bypass and gives the two disabled stages useful defaults");
+    }
+    {
+        auto old = seed;
+        old.enableMask |= kEnTape | kEnDeEsser | kEnGate | kEnDynamicEq;
+        old.tape = {11, 7300, 2, .4f, .65f, -2};
+        old.deEsser = {6300, -28, 3, 8, 2, 90};
+        std::array<unsigned char, 1580> raw{};
+        std::memcpy(raw.data(), &old, 1552);
+        for (int i = 0; i < 28; ++i) raw[1552 + i] = uint8_t(27 - i);
+        const uint32_t version = 10, size = 1580;
+        std::memcpy(raw.data() + 4, &version, 4);
+        std::memcpy(raw.data() + 8, &size, 4);
+        ParamBlock got;
+        bool ok = decodeParamBlock(raw.data(), raw.size(), &got) && isSane(got);
+        int previous = 28;
+        for (auto id : got.order) if (id < 28) { ok &= id < previous; previous = id; }
+        check(ok && got.enableMask == (old.enableMask & 0x0FFFFFFFu) && got.flags == old.flags
+              && std::memcmp(&got.tape, &old.tape, sizeof old.tape) == 0
+              && std::memcmp(&got.deEsser, &old.deEsser, sizeof old.deEsser) == 0
+              && got.gate.thresholdDb == -50 && got.dynamicEq.band[2].frequencyHz == 6000
+              && got.reserved[0] == 0 && got.reserved[1] == 0,
+              "v10 migration keeps tape/de-esser and custom order, disables gate/dynamic EQ with useful defaults");
     }
     ParamBlock unchanged = seed;
     std::array<unsigned char, 25> junk{};
@@ -66,6 +107,8 @@ void runExpansionTests(Check check)
         auto p = transparentBlock(); p.generation = g;
         p.binaural.yawDeg = float(int(g % 361) - 180);
         p.neural.driveDb = float(int(g % 31) - 12);
+        p.gate.thresholdDb = -float(g % 81);
+        p.dynamicEq.band[2].frequencyHz = 40.0f + float(g % 15961);
         return sanitise(p);
     };
     std::array<std::thread, 4> readers;

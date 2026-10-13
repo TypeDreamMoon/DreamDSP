@@ -54,7 +54,8 @@ public:
         return ((mask & kEnConvolution) ? int(m_conv.latencySamples()) : 0)
                + ((mask & kEnDelay) ? m_delay.latencySamples() : 0)
                + ((mask & kEnLimiter) ? m_limiter.latencySamples() : 0)
-               + ((mask & kEnWidth) ? m_width.latencySamples() : 0);
+               + ((mask & kEnWidth) ? m_width.latencySamples() : 0)
+               + ((mask & kEnNeural) ? m_neural.latencySamples() : 0);
     }
 
     const Limiter &limiter() const noexcept { return m_limiter; }
@@ -138,6 +139,10 @@ private:
     Modulation m_flanger{Modulation::Kind::Flanger};
     Modulation m_phaser{Modulation::Kind::Phaser};
     FdnReverb m_fdn;
+    TapeSaturation m_tape;
+    DeEsser m_deEsser;
+    NoiseGate m_gate;
+    DynamicEq m_dynamicEq;
 
     // The order the stages run in, copied out of the last block installed.
     // Held separately from m_applied so process() reads one contiguous array

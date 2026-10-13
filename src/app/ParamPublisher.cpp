@@ -94,6 +94,14 @@ dsp::ParamBlock blockFromModels(const CompressorModel *comp,
             b.enableMask |= dsp::kEnReverb;
     }
     if (effects) {
+        b.gate = effects->gateParams();
+        if (effects->gateOn()) b.enableMask |= dsp::kEnGate;
+        b.dynamicEq = effects->dynamicEqParams();
+        if (effects->dynamicEqOn()) b.enableMask |= dsp::kEnDynamicEq;
+        b.tape = effects->tapeParams();
+        if (effects->tapeOn()) b.enableMask |= dsp::kEnTape;
+        b.deEsser = effects->deEsserParams();
+        if (effects->deEsserOn()) b.enableMask |= dsp::kEnDeEsser;
         b.binaural = effects->binauralParams();
         if (effects->binauralOn()) b.enableMask |= dsp::kEnBinaural;
         b.neural = effects->neuralParams();

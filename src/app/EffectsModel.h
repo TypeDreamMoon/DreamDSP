@@ -147,6 +147,40 @@ class EffectsModel : public QObject
     Q_PROPERTY(double fdnWidth READ fdnWidth WRITE setFdnWidth NOTIFY changed)
     Q_PROPERTY(double fdnOutput READ fdnOutput WRITE setFdnOutput NOTIFY changed)
 
+    Q_PROPERTY(bool tapeEnabled MEMBER m_tapeEnabled NOTIFY changed)
+    Q_PROPERTY(double tapeDrive READ tapeDrive WRITE setTapeDrive NOTIFY changed)
+    Q_PROPERTY(double tapeTone READ tapeTone WRITE setTapeTone NOTIFY changed)
+    Q_PROPERTY(double tapeBump READ tapeBump WRITE setTapeBump NOTIFY changed)
+    Q_PROPERTY(double tapeMemory READ tapeMemory WRITE setTapeMemory NOTIFY changed)
+    Q_PROPERTY(double tapeMix READ tapeMix WRITE setTapeMix NOTIFY changed)
+    Q_PROPERTY(double tapeOutput READ tapeOutput WRITE setTapeOutput NOTIFY changed)
+    Q_PROPERTY(bool deEsserEnabled MEMBER m_deEsserEnabled NOTIFY changed)
+    Q_PROPERTY(double deEsserFrequency READ deEsserFrequency WRITE setDeEsserFrequency NOTIFY changed)
+    Q_PROPERTY(double deEsserThreshold READ deEsserThreshold WRITE setDeEsserThreshold NOTIFY changed)
+    Q_PROPERTY(double deEsserRatio READ deEsserRatio WRITE setDeEsserRatio NOTIFY changed)
+    Q_PROPERTY(double deEsserRange READ deEsserRange WRITE setDeEsserRange NOTIFY changed)
+    Q_PROPERTY(double deEsserAttack READ deEsserAttack WRITE setDeEsserAttack NOTIFY changed)
+    Q_PROPERTY(double deEsserRelease READ deEsserRelease WRITE setDeEsserRelease NOTIFY changed)
+
+    Q_PROPERTY(bool gateEnabled MEMBER m_gateEnabled NOTIFY changed)
+    Q_PROPERTY(double gateThreshold READ gateThreshold WRITE setGateThreshold NOTIFY changed)
+    Q_PROPERTY(double gateHysteresis READ gateHysteresis WRITE setGateHysteresis NOTIFY changed)
+    Q_PROPERTY(double gateRange READ gateRange WRITE setGateRange NOTIFY changed)
+    Q_PROPERTY(double gateAttack READ gateAttack WRITE setGateAttack NOTIFY changed)
+    Q_PROPERTY(double gateHold READ gateHold WRITE setGateHold NOTIFY changed)
+    Q_PROPERTY(double gateRelease READ gateRelease WRITE setGateRelease NOTIFY changed)
+    Q_PROPERTY(bool dynamicEqEnabled MEMBER m_dynamicEqEnabled NOTIFY changed)
+    Q_PROPERTY(int dynamicEqBand READ dynamicEqBand WRITE setDynamicEqBand NOTIFY changed)
+    Q_PROPERTY(bool dynamicEqBandEnabled READ dynamicEqBandEnabled WRITE setDynamicEqBandEnabled NOTIFY changed)
+    Q_PROPERTY(double dynamicEqFrequency READ dynamicEqFrequency WRITE setDynamicEqFrequency NOTIFY changed)
+    Q_PROPERTY(double dynamicEqDefaultFrequency READ dynamicEqDefaultFrequency NOTIFY changed)
+    Q_PROPERTY(double dynamicEqQ READ dynamicEqQ WRITE setDynamicEqQ NOTIFY changed)
+    Q_PROPERTY(double dynamicEqThreshold READ dynamicEqThreshold WRITE setDynamicEqThreshold NOTIFY changed)
+    Q_PROPERTY(double dynamicEqRatio READ dynamicEqRatio WRITE setDynamicEqRatio NOTIFY changed)
+    Q_PROPERTY(double dynamicEqRange READ dynamicEqRange WRITE setDynamicEqRange NOTIFY changed)
+    Q_PROPERTY(double dynamicEqAttack READ dynamicEqAttack WRITE setDynamicEqAttack NOTIFY changed)
+    Q_PROPERTY(double dynamicEqRelease READ dynamicEqRelease WRITE setDynamicEqRelease NOTIFY changed)
+
 public:
     explicit EffectsModel(QObject *parent = nullptr);
 
@@ -154,6 +188,7 @@ public:
     // button beside it. Empty for a name that is not a property of this model.
     Q_INVOKABLE QVariant defaultOf(const QString &name) const
     {
+        if (name == QStringLiteral("dynamicEqFrequency")) return dynamicEqDefaultFrequency();
         return defaultPropertyOf<EffectsModel>(name);
     }
 
@@ -298,6 +333,45 @@ public:
     double fdnWidth() const { return m_fdn.width; } void setFdnWidth(double v);
     double fdnOutput() const { return m_fdn.outputDb; } void setFdnOutput(double v);
 
+    bool tapeOn() const { return m_tapeEnabled; }
+    dsp::TapeSaturation::Params tapeParams() const { return m_tape; }
+    double tapeDrive() const { return m_tape.driveDb; } void setTapeDrive(double v);
+    double tapeTone() const { return m_tape.toneHz; } void setTapeTone(double v);
+    double tapeBump() const { return m_tape.bumpDb; } void setTapeBump(double v);
+    double tapeMemory() const { return m_tape.memory; } void setTapeMemory(double v);
+    double tapeMix() const { return m_tape.mix; } void setTapeMix(double v);
+    double tapeOutput() const { return m_tape.outputDb; } void setTapeOutput(double v);
+    bool deEsserOn() const { return m_deEsserEnabled; }
+    dsp::DeEsser::Params deEsserParams() const { return m_deEsser; }
+    double deEsserFrequency() const { return m_deEsser.frequencyHz; } void setDeEsserFrequency(double v);
+    double deEsserThreshold() const { return m_deEsser.thresholdDb; } void setDeEsserThreshold(double v);
+    double deEsserRatio() const { return m_deEsser.ratio; } void setDeEsserRatio(double v);
+    double deEsserRange() const { return m_deEsser.maxReductionDb; } void setDeEsserRange(double v);
+    double deEsserAttack() const { return m_deEsser.attackMs; } void setDeEsserAttack(double v);
+    double deEsserRelease() const { return m_deEsser.releaseMs; } void setDeEsserRelease(double v);
+
+    bool gateOn() const { return m_gateEnabled; }
+    dsp::NoiseGate::Params gateParams() const { return m_gate; }
+    double gateThreshold() const { return m_gate.thresholdDb; } void setGateThreshold(double v);
+    double gateHysteresis() const { return m_gate.hysteresisDb; } void setGateHysteresis(double v);
+    double gateRange() const { return m_gate.rangeDb; } void setGateRange(double v);
+    double gateAttack() const { return m_gate.attackMs; } void setGateAttack(double v);
+    double gateHold() const { return m_gate.holdMs; } void setGateHold(double v);
+    double gateRelease() const { return m_gate.releaseMs; } void setGateRelease(double v);
+    bool dynamicEqOn() const { return m_dynamicEqEnabled; }
+    dsp::DynamicEq::Params dynamicEqParams() const { return m_dynamicEq; }
+    int dynamicEqBand() const { return m_dynamicEqBand; } void setDynamicEqBand(int v);
+    bool dynamicEqBandEnabled() const { return selectedDynamicBand().enabled != 0; }
+    void setDynamicEqBandEnabled(bool v);
+    double dynamicEqFrequency() const { return selectedDynamicBand().frequencyHz; } void setDynamicEqFrequency(double v);
+    double dynamicEqDefaultFrequency() const { return dsp::DynamicEq::Params{}.band[m_dynamicEqBand].frequencyHz; }
+    double dynamicEqQ() const { return selectedDynamicBand().q; } void setDynamicEqQ(double v);
+    double dynamicEqThreshold() const { return selectedDynamicBand().thresholdDb; } void setDynamicEqThreshold(double v);
+    double dynamicEqRatio() const { return selectedDynamicBand().ratio; } void setDynamicEqRatio(double v);
+    double dynamicEqRange() const { return selectedDynamicBand().maxReductionDb; } void setDynamicEqRange(double v);
+    double dynamicEqAttack() const { return selectedDynamicBand().attackMs; } void setDynamicEqAttack(double v);
+    double dynamicEqRelease() const { return selectedDynamicBand().releaseMs; } void setDynamicEqRelease(double v);
+
     // Bulk restore, for reloading a saved session. Takes the whole block
     // because the enable bits live in its mask rather than beside each set of
     // parameters.
@@ -307,6 +381,16 @@ signals:
     void changed();
 
 private:
+    const dsp::DynamicEq::Band &selectedDynamicBand() const { return m_dynamicEq.band[m_dynamicEqBand]; }
+    dsp::NoiseGate::Params m_gate;
+    bool m_gateEnabled = false;
+    dsp::DynamicEq::Params m_dynamicEq;
+    bool m_dynamicEqEnabled = false;
+    int m_dynamicEqBand = 0; // GUI selection only; all three bands remain in the snapshot.
+    dsp::TapeSaturation::Params m_tape;
+    bool m_tapeEnabled = false;
+    dsp::DeEsser::Params m_deEsser;
+    bool m_deEsserEnabled = false;
     dsp::Binaural::Params m_binaural;
     bool m_binauralEnabled = false;
     dsp::NeuralSaturation::Params m_neural;

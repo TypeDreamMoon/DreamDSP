@@ -1743,11 +1743,15 @@ const StageInfo kStages[] = {
     { dsp::kStageAutoGain,    "自动音量",   "按 BS.1770 响度找平",    3 },
     { dsp::kStageNightMode,   "夜间模式",   "杜比 DRC 曲线",          3 },
     { dsp::kStageBinaural, "双耳虚拟音箱", "三维实测 HRTF · 固定头部 · 音箱环绕与升降", 1 },
-    { dsp::kStageNeural, "神经饱和", "Synthetic Memory Drive · 合成教师训练 · 仅 48 kHz，其他采样率旁路", 1 },
+    { dsp::kStageNeural, "神经饱和", "Synthetic Memory Drive · 支持 8–192 kHz 采样率", 1 },
     { dsp::kStageChorus, "合唱 Chorus", "连续调制 · 参数平滑 · 反馈限幅", 1 },
     { dsp::kStageFlanger, "镶边 Flanger", "连续调制 · 参数平滑 · 反馈限幅", 1 },
     { dsp::kStagePhaser, "移相 Phaser", "连续调制 · 参数平滑 · 反馈限幅", 1 },
     { dsp::kStageFdn, "FDN 空间混响", "八路反馈延迟网络 · 独立晚混响，可与短早反射卷积组合", 1 },
+    { dsp::kStageTape, "磁带饱和", "磁带风格 · 柔化高频与瞬态 · 4 倍过采样", 1 },
+    { dsp::kStageDeEsser, "去齿音", "仅压低过强高频 · 声道联动，保持声像", 1 },
+    { dsp::kStageGate, "噪声门", "压低停顿底噪 · 滞回与保持 · 声道联动", 1 },
+    { dsp::kStageDynamicEq, "动态均衡", "三段动态衰减 · 针对轰鸣、共振与刺耳", 1 },
 };
 // Page indices follow the navigation rail: 0 equalizer, 1 effects,
 // 2 convolution, 3 output, 4 chain, 5 AutoEQ, 6 system audio, 7 settings.
@@ -1811,7 +1815,7 @@ bool AppController::chainIsDefault() const
 // switched on, which is exactly the drift the chain page was built to avoid.
 // This is the tripwire: adding a stage bumps kStageCount, which breaks the
 // build here rather than in a bug report.
-static_assert(dsp::kStageCount == 26,
+static_assert(dsp::kStageCount == 30,
               "a new stage needs a case in stageEnabled() and setStageEnabled()");
 
 bool AppController::stageEnabled(int stageId) const
@@ -1842,6 +1846,10 @@ bool AppController::stageEnabled(int stageId) const
     case dsp::kStageChorus: return m_effects.chorusOn();
     case dsp::kStageFlanger: return m_effects.flangerOn();
     case dsp::kStagePhaser: return m_effects.phaserOn();
+    case dsp::kStageTape: return m_effects.tapeOn();
+    case dsp::kStageDeEsser: return m_effects.deEsserOn();
+    case dsp::kStageGate: return m_effects.gateOn();
+    case dsp::kStageDynamicEq: return m_effects.dynamicEqOn();
     case dsp::kStageFdn: return m_effects.fdnOn();
     default:                     return false;
     }
@@ -1879,6 +1887,10 @@ void AppController::setStageEnabled(int stageId, bool on)
     case dsp::kStageChorus: m_effects.setProperty("chorusEnabled", on); break;
     case dsp::kStageFlanger: m_effects.setProperty("flangerEnabled", on); break;
     case dsp::kStagePhaser: m_effects.setProperty("phaserEnabled", on); break;
+    case dsp::kStageTape: m_effects.setProperty("tapeEnabled", on); break;
+    case dsp::kStageDeEsser: m_effects.setProperty("deEsserEnabled", on); break;
+    case dsp::kStageGate: m_effects.setProperty("gateEnabled", on); break;
+    case dsp::kStageDynamicEq: m_effects.setProperty("dynamicEqEnabled", on); break;
     case dsp::kStageFdn: m_effects.setProperty("fdnEnabled", on); break;
     default: return;
     }

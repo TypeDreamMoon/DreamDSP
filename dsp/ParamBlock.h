@@ -24,6 +24,10 @@
 #include "NeuralSaturation.h"
 #include "Modulation.h"
 #include "FdnReverb.h"
+#include "TapeSaturation.h"
+#include "DeEsser.h"
+#include "NoiseGate.h"
+#include "DynamicEq.h"
 
 // The complete parameter payload that travels from the GUI to the copy of the
 // DSP running inside audiodg.exe.
@@ -40,7 +44,7 @@ namespace dreamdsp::dsp {
 
 enum : uint32_t {
     kParamMagic = 0x42505244u,   // reads as DRPB in a hex dump
-    kParamVersion = 9u
+    kParamVersion = 11u
 };
 
 // Header flags, which are about the block rather than about any one effect.
@@ -105,7 +109,11 @@ enum : uint32_t {
     kEnFlanger   = 1u << 23,
     kEnPhaser    = 1u << 24,
     kEnFdn       = 1u << 25,
-    kEnKnown     = 0x03FFFFFFu
+    kEnTape      = 1u << 26,
+    kEnDeEsser   = 1u << 27,
+    kEnGate      = 1u << 28,
+    kEnDynamicEq = 1u << 29,
+    kEnKnown     = 0x3FFFFFFFu
 };
 
 // One id per stage, and the entire vocabulary of the order array below. These
@@ -137,9 +145,13 @@ enum : uint8_t {
     kStageFlanger,
     kStagePhaser,
     kStageFdn,
+    kStageTape,
+    kStageDeEsser,
+    kStageGate,
+    kStageDynamicEq,
     kStageCount
 };
-static_assert(kStageCount == 26, "update the stage registry and migrations");
+static_assert(kStageCount == 30, "update the stage registry and migrations");
 static_assert(kStageCount <= 32, "isPermutation() tracks stages in a uint32_t bitmask");
 
 // The order the stages run in when nobody has said otherwise. Reproduces what
@@ -196,15 +208,20 @@ struct ParamBlock {
     Modulation::Params          phaser;        // +1456    24
     FdnReverb::Params           fdn;           // +1480    24
 
+    TapeSaturation::Params     tape;          // +1504    24
+    DeEsser::Params            deEsser;       // +1528    24
+    NoiseGate::Params          gate;          // +1552    24
+    DynamicEq::Params          dynamicEq;     // +1576    96
+
     // Which stage runs when. A permutation of 0..kStageCount-1; anything else
     // is replaced wholesale by kDefaultOrder, because a duplicate would run a
     // stage twice and an omission would silently drop an effect whose switch
     // says it is on.
-    uint8_t order[kStageCount];                // +1504    26
-    uint8_t reserved[2];                       // deterministic wire padding
+    uint8_t order[kStageCount];                // +1672    30
+    uint8_t reserved[2];                       // explicit deterministic padding
 };
 
-static_assert(sizeof(ParamBlock) == 1532, "wire layout changed; bump kParamVersion");
+static_assert(sizeof(ParamBlock) == 1704, "wire layout changed; bump kParamVersion");
 static_assert(alignof(ParamBlock) == 4, "wire layout changed; bump kParamVersion");
 static_assert(std::is_trivially_copyable<ParamBlock>::value, "must be memcpy-able");
 static_assert(offsetof(ParamBlock, enableMask) == 16, "wire layout changed");
@@ -232,7 +249,11 @@ static_assert(offsetof(ParamBlock, binaural) == 1368, "wire layout changed");
 static_assert(offsetof(ParamBlock, neural) == 1392, "wire layout changed");
 static_assert(offsetof(ParamBlock, chorus) == 1408, "wire layout changed");
 static_assert(offsetof(ParamBlock, fdn) == 1480, "wire layout changed");
-static_assert(offsetof(ParamBlock, order) == 1504, "wire layout changed");
+static_assert(offsetof(ParamBlock, tape) == 1504, "wire layout changed");
+static_assert(offsetof(ParamBlock, deEsser) == 1528, "wire layout changed");
+static_assert(offsetof(ParamBlock, gate) == 1552, "wire layout changed");
+static_assert(offsetof(ParamBlock, dynamicEq) == 1576, "wire layout changed");
+static_assert(offsetof(ParamBlock, order) == 1672, "wire layout changed");
 
 // Non-allocating session decoder shared by the GUI, APO and migration tests. Unknown
 // versions/sizes leave out unchanged; accepted data is always sanitised.

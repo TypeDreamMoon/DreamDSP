@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BiquadFilter.h"
+#include "StreamingSinc.h"
 
 #include <array>
 
@@ -29,7 +30,7 @@ public:
     void setParams(const Params &p) noexcept;
     void process(const AudioBuffer &buf) noexcept;
     bool supported() const noexcept { return m_supported; }
-    int latencySamples() const noexcept { return 0; } // causal, no lookahead/SRC
+    int latencySamples() const noexcept { return m_supported ? m_latency : 0; }
     uint32_t faultCount() const noexcept { return m_faultCount; }
 
 private:
@@ -41,6 +42,9 @@ private:
     };
     float forward(float x, Channel &channel) noexcept;
     void fault(Channel &channel) noexcept;
+    void processConverted(const AudioBuffer &buf, int channels) noexcept;
+    float *inputHistory(int c) noexcept { return m_input.data() + c * 2 * StreamingSinc::kRing; }
+    float *modelHistory(int c) noexcept { return m_modelOutput.data() + c * 2 * StreamingSinc::kRing; }
     Params m_p;
     std::array<Channel, kMaxChannels> m_state{};
     int m_channels = 0;
@@ -50,6 +54,13 @@ private:
     float m_rate = 0.0f;
     float m_drive = 1.0f, m_mix = 1.0f, m_gain = 1.0f;
     float m_targetDrive = 1.0f, m_targetGain = 1.0f;
+    StreamingSinc m_toModel, m_fromModel;
+    std::vector<float> m_input, m_modelOutput;
+    int64_t m_hostIndex = 0, m_modelIndex = 0;
+    int m_latency = 0;
+    bool m_converted = false;
+    double m_hostPerModel = 1.0, m_modelPerHost = 1.0, m_extraModelDelay = 0.0;
+    float m_hostRate = 0.0f;
 };
 
 static_assert(sizeof(NeuralSaturation::Params) == 16, "Neural parameters are wire scalars");

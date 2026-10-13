@@ -38,6 +38,7 @@ Item {
         property real to: 1
         property real step: 0.1
         property int decimals: 1
+        property bool logarithmic: false
         property bool autoMode: false
         property bool hasAuto: false
         property real autoValue: 0
@@ -51,8 +52,10 @@ Item {
         // itself.
         property QtObject owner: null
         property string prop: ''
+        property var defaultOverride: undefined
         readonly property var defaultValue: (prow.owner && prow.prop !== '')
-                                            ? prow.owner.defaultOf(prow.prop)
+                                            ? (prow.defaultOverride !== undefined ? prow.defaultOverride
+                                               : prow.owner.defaultOf(prow.prop))
                                             : undefined
         readonly property bool atDefault:
             prow.defaultValue === undefined
@@ -60,6 +63,14 @@ Item {
 
         signal edited(real v)
         signal autoToggled(bool on)
+
+        function sliderValue(v) {
+            return logarithmic ? Math.log(Math.max(from, v) / from) / Math.log(to / from) : v;
+        }
+        function parameterValue(v) {
+            if (!logarithmic) return v;
+            return Math.max(from, Math.min(to, Math.round(from * Math.pow(to / from, v) / step) * step));
+        }
 
         Layout.fillWidth: true
         spacing: 10
@@ -72,14 +83,14 @@ Item {
 
         Fader {
             Layout.fillWidth: true
-            min: prow.from
-            max: prow.to
-            stepSize: prow.step
-            value: prow.value
+            min: prow.logarithmic ? 0 : prow.from
+            max: prow.logarithmic ? 1 : prow.to
+            stepSize: prow.logarithmic ? 0.001 : prow.step
+            value: prow.sliderValue(prow.value)
             enabled: !prow.autoMode
             opacity: enabled ? 1 : 0.4
-            onFirstMoved: prow.edited(currentValue)
-            onFirstReleased: prow.edited(currentValue)
+            onFirstMoved: prow.edited(prow.parameterValue(currentValue))
+            onFirstReleased: prow.edited(prow.parameterValue(currentValue))
         }
 
         HusText {
@@ -191,6 +202,244 @@ Item {
                 }
             }
 
+            GroupHeader { title: '噪声与共振控制' }
+            Masonry {
+                Layout.fillWidth: true
+                SectionCard {
+                    objectName: "gateCard"
+                    collapsible: true
+                    active: fx.gateEnabled
+                    title: '噪声门'
+                    hint: '压低停顿底噪 · 平滑开关 · 声道联动'
+                    headerRight: HusSwitch {
+                        checked: fx.gateEnabled
+                        onToggled: fx.gateEnabled = checked
+                    }
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+                        ParamRow {
+                            label: '开门阈值'; unit: 'dB'; from: -80; to: 0; step: 0.5
+                            owner: fx; prop: 'gateThreshold'; value: fx.gateThreshold
+                            onEdited: (v) => fx.gateThreshold = v
+                        }
+                        ParamRow {
+                            label: '滞回'; unit: 'dB'; from: 0; to: 18; step: 0.5
+                            owner: fx; prop: 'gateHysteresis'; value: fx.gateHysteresis
+                            onEdited: (v) => fx.gateHysteresis = v
+                        }
+                        ParamRow {
+                            label: '关门衰减'; unit: 'dB'; from: 0; to: 80; step: 1; decimals: 0
+                            owner: fx; prop: 'gateRange'; value: fx.gateRange
+                            onEdited: (v) => fx.gateRange = v
+                        }
+                        ParamRow {
+                            label: '开门时间'; unit: 'ms'; from: 0.1; to: 50; step: 0.1
+                            owner: fx; prop: 'gateAttack'; value: fx.gateAttack
+                            onEdited: (v) => fx.gateAttack = v
+                        }
+                        ParamRow {
+                            label: '保持'; unit: 'ms'; from: 0; to: 500; step: 1; decimals: 0
+                            owner: fx; prop: 'gateHold'; value: fx.gateHold
+                            onEdited: (v) => fx.gateHold = v
+                        }
+                        ParamRow {
+                            label: '关门时间'; unit: 'ms'; from: 10; to: 1000; step: 1; decimals: 0
+                            owner: fx; prop: 'gateRelease'; value: fx.gateRelease
+                            onEdited: (v) => fx.gateRelease = v
+                        }
+                        Note { text: '把阈值放在底噪之上、有效声音之下。关门阈值比开门阈值低一个「滞回」值；保持和关门时间能保留句尾与余音。用于播放音频中的停顿底噪，声音播放期间的底噪仍会保留。' }
+                    }
+                }
+                SectionCard {
+                    objectName: "dynamicEqCard"
+                    collapsible: true
+                    active: fx.dynamicEqEnabled
+                    title: '动态均衡'
+                    hint: '三段动态衰减 · 压低轰鸣、共振与刺耳'
+                    headerRight: HusSwitch {
+                        checked: fx.dynamicEqEnabled
+                        onToggled: fx.dynamicEqEnabled = checked
+                    }
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+                        RowLayout {
+                            Layout.fillWidth: true
+                            HusSelect {
+                                id: dynamicEqBandSelect
+                                Layout.fillWidth: true
+                                clearEnabled: false
+                                model: [ { label: '频段 1', value: 0 }, { label: '频段 2', value: 1 }, { label: '频段 3', value: 2 } ]
+                                function syncSelection() { currentIndex = fx.dynamicEqBand }
+                                Component.onCompleted: Qt.callLater(syncSelection)
+                                onModelChanged: Qt.callLater(syncSelection)
+                                onActivated: (i) => fx.dynamicEqBand = i
+                                Connections {
+                                    target: fx
+                                    function onChanged() { dynamicEqBandSelect.syncSelection() }
+                                }
+                            }
+                            HusText { text: '启用此段'; font.pixelSize: 12 }
+                            HusSwitch {
+                                checked: fx.dynamicEqBandEnabled
+                                onToggled: fx.dynamicEqBandEnabled = checked
+                            }
+                        }
+                        ParamRow {
+                            label: '中心频率'; unit: 'Hz'; from: 40; to: 16000; step: 1; decimals: 0; logarithmic: true
+                            owner: fx; prop: 'dynamicEqFrequency'; value: fx.dynamicEqFrequency
+                            defaultOverride: fx.dynamicEqDefaultFrequency
+                            onEdited: (v) => fx.dynamicEqFrequency = v
+                        }
+                        ParamRow {
+                            label: '带宽 Q'; unit: ''; from: 0.3; to: 8; step: 0.1
+                            owner: fx; prop: 'dynamicEqQ'; value: fx.dynamicEqQ
+                            onEdited: (v) => fx.dynamicEqQ = v
+                        }
+                        ParamRow {
+                            label: '阈值'; unit: 'dB'; from: -60; to: 0; step: 0.5
+                            owner: fx; prop: 'dynamicEqThreshold'; value: fx.dynamicEqThreshold
+                            onEdited: (v) => fx.dynamicEqThreshold = v
+                        }
+                        ParamRow {
+                            label: '比例'; unit: ':1'; from: 1; to: 12; step: 0.1
+                            owner: fx; prop: 'dynamicEqRatio'; value: fx.dynamicEqRatio
+                            onEdited: (v) => fx.dynamicEqRatio = v
+                        }
+                        ParamRow {
+                            label: '最大衰减'; unit: 'dB'; from: 0; to: 18; step: 0.5
+                            owner: fx; prop: 'dynamicEqRange'; value: fx.dynamicEqRange
+                            onEdited: (v) => fx.dynamicEqRange = v
+                        }
+                        ParamRow {
+                            label: '起音'; unit: 'ms'; from: 0.1; to: 100; step: 0.1
+                            owner: fx; prop: 'dynamicEqAttack'; value: fx.dynamicEqAttack
+                            onEdited: (v) => fx.dynamicEqAttack = v
+                        }
+                        ParamRow {
+                            label: '释放'; unit: 'ms'; from: 10; to: 1000; step: 1; decimals: 0
+                            owner: fx; prop: 'dynamicEqRelease'; value: fx.dynamicEqRelease
+                            onEdited: (v) => fx.dynamicEqRelease = v
+                        }
+                        Note { text: '三段各自保存设置并同时工作，选择频段只切换编辑对象。Q 越大，处理范围越窄；只有该段过强时才衰减，最大衰减设为 0 可试听原声。低采样率下频率会限制在可处理范围内。' }
+                    }
+                }
+            }
+
+            GroupHeader { title: '磁带与人声' }
+            Masonry {
+                Layout.fillWidth: true
+                SectionCard {
+                    objectName: "tapeCard"
+                    collapsible: true
+                    active: fx.tapeEnabled
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
+                    title: '磁带饱和'
+                    hint: '磁带风格 · 柔化高频与瞬态 · 4 倍过采样'
+                    headerRight: HusSwitch {
+                        checked: fx.tapeEnabled
+                        onToggled: fx.tapeEnabled = checked
+                    }
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+                        ParamRow {
+                            label: '驱动'; unit: 'dB'; from: 0; to: 24; step: 0.1; decimals: 1
+                            owner: fx; prop: 'tapeDrive'
+                            value: fx.tapeDrive
+                            onEdited: (v) => fx.tapeDrive = v
+                        }
+                        ParamRow {
+                            label: '高频柔化'; unit: 'Hz'; from: 2000; to: 20000; step: 100; decimals: 0
+                            owner: fx; prop: 'tapeTone'
+                            value: fx.tapeTone
+                            onEdited: (v) => fx.tapeTone = v
+                        }
+                        ParamRow {
+                            label: '低频隆起'; unit: 'dB'; from: 0; to: 6; step: 0.1; decimals: 1
+                            owner: fx; prop: 'tapeBump'
+                            value: fx.tapeBump
+                            onEdited: (v) => fx.tapeBump = v
+                        }
+                        ParamRow {
+                            label: '磁化记忆'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                            owner: fx; prop: 'tapeMemory'
+                            value: fx.tapeMemory
+                            onEdited: (v) => fx.tapeMemory = v
+                        }
+                        ParamRow {
+                            label: '混合'; unit: ''; from: 0; to: 1; step: 0.01; decimals: 2
+                            owner: fx; prop: 'tapeMix'
+                            value: fx.tapeMix
+                            onEdited: (v) => fx.tapeMix = v
+                        }
+                        ParamRow {
+                            label: '输出'; unit: 'dB'; from: -24; to: 6; step: 0.1; decimals: 1
+                            owner: fx; prop: 'tapeOutput'
+                            value: fx.tapeOutput
+                            onEdited: (v) => fx.tapeOutput = v
+                        }
+                        Note { text: '算法近似磁带的染色与记忆，不对应某台硬件。混合为 0 时仍经过对齐滤波，关闭模块才是完全直通。' }
+                    }
+                }
+                SectionCard {
+                    objectName: "deEsserCard"
+                    collapsible: true
+                    active: fx.deEsserEnabled
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
+                    title: '去齿音'
+                    hint: '仅压低过强高频 · 声道联动，保持声像'
+                    headerRight: HusSwitch {
+                        checked: fx.deEsserEnabled
+                        onToggled: fx.deEsserEnabled = checked
+                    }
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+                        ParamRow {
+                            label: '齿音分界'; unit: 'Hz'; from: 2000; to: 12000; step: 100; decimals: 0
+                            owner: fx; prop: 'deEsserFrequency'
+                            value: fx.deEsserFrequency
+                            onEdited: (v) => fx.deEsserFrequency = v
+                        }
+                        ParamRow {
+                            label: '阈值'; unit: 'dB'; from: -60; to: 0; step: 0.5; decimals: 1
+                            owner: fx; prop: 'deEsserThreshold'
+                            value: fx.deEsserThreshold
+                            onEdited: (v) => fx.deEsserThreshold = v
+                        }
+                        ParamRow {
+                            label: '比例'; unit: ':1'; from: 1; to: 12; step: 0.1; decimals: 1
+                            owner: fx; prop: 'deEsserRatio'
+                            value: fx.deEsserRatio
+                            onEdited: (v) => fx.deEsserRatio = v
+                        }
+                        ParamRow {
+                            label: '最大衰减'; unit: 'dB'; from: 0; to: 18; step: 0.5; decimals: 1
+                            owner: fx; prop: 'deEsserRange'
+                            value: fx.deEsserRange
+                            onEdited: (v) => fx.deEsserRange = v
+                        }
+                        ParamRow {
+                            label: '起音'; unit: 'ms'; from: 0.1; to: 20; step: 0.1; decimals: 1
+                            owner: fx; prop: 'deEsserAttack'
+                            value: fx.deEsserAttack
+                            onEdited: (v) => fx.deEsserAttack = v
+                        }
+                        ParamRow {
+                            label: '释放'; unit: 'ms'; from: 10; to: 500; step: 1; decimals: 0
+                            owner: fx; prop: 'deEsserRelease'
+                            value: fx.deEsserRelease
+                            onEdited: (v) => fx.deEsserRelease = v
+                        }
+                        Note { text: '先把齿音分界设在 5–8 kHz，再降低阈值至齿音柔和。最大衰减限制削减量；这是高频动态处理，不是语音分离。' }
+                    }
+                }
+            }
+
             GroupHeader { title: '空间与动态建模' }
             Masonry {
                 Layout.fillWidth: true
@@ -276,7 +525,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignTop
                     title: '神经饱和'
-                    hint: 'Synthetic Memory Drive · 合成教师训练 · 仅 48 kHz，其他采样率旁路'
+                    hint: 'Synthetic Memory Drive · 支持 8–192 kHz 采样率'
                     headerRight: HusSwitch {
                         checked: fx.neuralEnabled
                         onToggled: fx.neuralEnabled = checked
@@ -302,7 +551,7 @@ Item {
                             value: fx.neuralOutput
                             onEdited: (v) => fx.neuralOutput = v
                         }
-                        Note { text: '这是由合成动态失真教师训练的小型循环网络，不是实测电子管或磁带捕获。输入超出训练范围时会限幅。' }
+                        Note { text: '合成动态失真模型，非实测硬件捕获。支持 44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz 等采样率；非 48 kHz 使用内部转换并对齐干湿声，常用采样率约增加 1.3–1.5 ms 延迟。模型的高频带宽仍受 48 kHz 训练采样率限制。' }
                         RowLayout {
                             Layout.fillWidth: true
                             visible: AppController.metering

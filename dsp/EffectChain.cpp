@@ -38,6 +38,10 @@ void EffectChain::prepare(double sampleRate, int channels, int maxFrames)
     m_chorus.prepare(sampleRate, channels);
     m_flanger.prepare(sampleRate, channels);
     m_phaser.prepare(sampleRate, channels);
+    m_tape.prepare(sampleRate, channels);
+    m_deEsser.prepare(sampleRate, channels);
+    m_gate.prepare(sampleRate, channels);
+    m_dynamicEq.prepare(sampleRate, channels);
     m_fdn.prepare(sampleRate, channels);
 
     // Zeroed rather than value-initialised: the Params members carry default
@@ -77,6 +81,10 @@ void EffectChain::reset()
     m_chorus.reset();
     m_flanger.reset();
     m_phaser.reset();
+    m_tape.reset();
+    m_deEsser.reset();
+    m_gate.reset();
+    m_dynamicEq.reset();
     m_fdn.reset();
 }
 
@@ -96,7 +104,8 @@ void EffectChain::apply(ParamBlock p) noexcept
     // bypass. Convolution has a separate history/latency policy below.
     const bool resumed = (m_applied.flags & kPfBypass) && !(p.flags & kPfBypass);
     constexpr uint32_t expanded = kEnBinaural | kEnNeural | kEnChorus
-                                  | kEnFlanger | kEnPhaser | kEnFdn;
+                                  | kEnFlanger | kEnPhaser | kEnFdn | kEnTape | kEnDeEsser
+                                  | kEnGate | kEnDynamicEq;
     const uint32_t resetStages = turnedOn | (resumed ? p.enableMask & expanded : 0u);
 
     // m_applied.<field> is updated only when setParams actually ran, so an
@@ -136,6 +145,10 @@ void EffectChain::apply(ParamBlock p) noexcept
     DREAMDSP_STAGE(kEnChorus, chorus, m_chorus)
     DREAMDSP_STAGE(kEnFlanger, flanger, m_flanger)
     DREAMDSP_STAGE(kEnPhaser, phaser, m_phaser)
+    DREAMDSP_STAGE(kEnTape, tape, m_tape)
+    DREAMDSP_STAGE(kEnDeEsser, deEsser, m_deEsser)
+    DREAMDSP_STAGE(kEnGate, gate, m_gate)
+    DREAMDSP_STAGE(kEnDynamicEq, dynamicEq, m_dynamicEq)
     DREAMDSP_STAGE(kEnFdn, fdn, m_fdn)
 
 #undef DREAMDSP_STAGE
@@ -217,6 +230,10 @@ void EffectChain::process(const AudioBuffer &buf)
         case kStageChorus:      if (mask & kEnChorus)      m_chorus.process(buf); break;
         case kStageFlanger:     if (mask & kEnFlanger)     m_flanger.process(buf); break;
         case kStagePhaser:      if (mask & kEnPhaser)      m_phaser.process(buf); break;
+        case kStageTape: if (mask & kEnTape) m_tape.process(buf); break;
+        case kStageDeEsser: if (mask & kEnDeEsser) m_deEsser.process(buf); break;
+        case kStageGate:        if (mask & kEnGate)      m_gate.process(buf); break;
+        case kStageDynamicEq:   if (mask & kEnDynamicEq) m_dynamicEq.process(buf); break;
         case kStageFdn:         if (mask & kEnFdn)         m_fdn.process(buf); break;
         default: break;
         }

@@ -41,8 +41,8 @@ bool EffectsModel::anyEnabled() const
     return m_tubeEnabled || m_bassEnabled || m_exciterEnabled
            || m_widthEnabled || m_crossfeedEnabled || m_multibandEnabled
            || m_transientEnabled || m_clipperEnabled || m_autoGainEnabled
-           || m_nightModeEnabled || m_dynBassEnabled
-           || m_binauralEnabled || m_neuralEnabled || m_chorusEnabled || m_flangerEnabled || m_phaserEnabled || m_fdnEnabled;
+           || m_nightModeEnabled || m_dynBassEnabled || m_gateEnabled || m_dynamicEqEnabled
+           || m_binauralEnabled || m_neuralEnabled || m_chorusEnabled || m_flangerEnabled || m_phaserEnabled || m_fdnEnabled || m_tapeEnabled || m_deEsserEnabled;
 }
 
 void EffectsModel::setTubeDrive(double v) { if (put(m_tube.drive, v, 1.0, 20.0)) emit changed(); }
@@ -116,6 +116,47 @@ void EffectsModel::setNightBoost(double v)     { if (put(m_nightMode.boost, v, 0
 void EffectsModel::setNightCut(double v)       { if (put(m_nightMode.cut, v, 0.0, 1.0))              emit changed(); }
 void EffectsModel::setNightReference(double v) { if (put(m_nightMode.referenceLufs, v, -40.0, -10.0)) emit changed(); }
 
+void EffectsModel::setGateThreshold(double v) { if (put(m_gate.thresholdDb, v, -80.0, 0.0)) emit changed(); }
+void EffectsModel::setGateHysteresis(double v) { if (put(m_gate.hysteresisDb, v, 0.0, 18.0)) emit changed(); }
+void EffectsModel::setGateRange(double v) { if (put(m_gate.rangeDb, v, 0.0, 80.0)) emit changed(); }
+void EffectsModel::setGateAttack(double v) { if (put(m_gate.attackMs, v, 0.1, 50.0)) emit changed(); }
+void EffectsModel::setGateHold(double v) { if (put(m_gate.holdMs, v, 0.0, 500.0)) emit changed(); }
+void EffectsModel::setGateRelease(double v) { if (put(m_gate.releaseMs, v, 10.0, 1000.0)) emit changed(); }
+void EffectsModel::setDynamicEqBand(int v)
+{
+    const int band = std::clamp(v, 0, dsp::DynamicEq::kBands - 1);
+    if (band == m_dynamicEqBand) return;
+    m_dynamicEqBand = band;
+    emit changed();
+}
+void EffectsModel::setDynamicEqBandEnabled(bool v)
+{
+    auto &band = m_dynamicEq.band[m_dynamicEqBand];
+    if (bool(band.enabled) == v) return;
+    band.enabled = v ? 1u : 0u;
+    emit changed();
+}
+void EffectsModel::setDynamicEqFrequency(double v) { if (put(m_dynamicEq.band[m_dynamicEqBand].frequencyHz, v, 40.0, 16000.0)) emit changed(); }
+void EffectsModel::setDynamicEqQ(double v) { if (put(m_dynamicEq.band[m_dynamicEqBand].q, v, 0.3, 8.0)) emit changed(); }
+void EffectsModel::setDynamicEqThreshold(double v) { if (put(m_dynamicEq.band[m_dynamicEqBand].thresholdDb, v, -60.0, 0.0)) emit changed(); }
+void EffectsModel::setDynamicEqRatio(double v) { if (put(m_dynamicEq.band[m_dynamicEqBand].ratio, v, 1.0, 12.0)) emit changed(); }
+void EffectsModel::setDynamicEqRange(double v) { if (put(m_dynamicEq.band[m_dynamicEqBand].maxReductionDb, v, 0.0, 18.0)) emit changed(); }
+void EffectsModel::setDynamicEqAttack(double v) { if (put(m_dynamicEq.band[m_dynamicEqBand].attackMs, v, 0.1, 100.0)) emit changed(); }
+void EffectsModel::setDynamicEqRelease(double v) { if (put(m_dynamicEq.band[m_dynamicEqBand].releaseMs, v, 10.0, 1000.0)) emit changed(); }
+
+void EffectsModel::setTapeDrive(double v) { if (put(m_tape.driveDb, v, 0.0, 24.0)) emit changed(); }
+void EffectsModel::setTapeTone(double v) { if (put(m_tape.toneHz, v, 2000.0, 20000.0)) emit changed(); }
+void EffectsModel::setTapeBump(double v) { if (put(m_tape.bumpDb, v, 0.0, 6.0)) emit changed(); }
+void EffectsModel::setTapeMemory(double v) { if (put(m_tape.memory, v, 0.0, 1.0)) emit changed(); }
+void EffectsModel::setTapeMix(double v) { if (put(m_tape.mix, v, 0.0, 1.0)) emit changed(); }
+void EffectsModel::setTapeOutput(double v) { if (put(m_tape.outputDb, v, -24.0, 6.0)) emit changed(); }
+void EffectsModel::setDeEsserFrequency(double v) { if (put(m_deEsser.frequencyHz, v, 2000.0, 12000.0)) emit changed(); }
+void EffectsModel::setDeEsserThreshold(double v) { if (put(m_deEsser.thresholdDb, v, -60.0, 0.0)) emit changed(); }
+void EffectsModel::setDeEsserRatio(double v) { if (put(m_deEsser.ratio, v, 1.0, 12.0)) emit changed(); }
+void EffectsModel::setDeEsserRange(double v) { if (put(m_deEsser.maxReductionDb, v, 0.0, 18.0)) emit changed(); }
+void EffectsModel::setDeEsserAttack(double v) { if (put(m_deEsser.attackMs, v, 0.1, 20.0)) emit changed(); }
+void EffectsModel::setDeEsserRelease(double v) { if (put(m_deEsser.releaseMs, v, 10.0, 500.0)) emit changed(); }
+
 void EffectsModel::setBinauralAngle(double v) { if (put(m_binaural.speakerAngleDeg, v, 0.0, 90.0)) emit changed(); }
 void EffectsModel::setBinauralYaw(double v) { if (put(m_binaural.yawDeg, v, -180.0, 180.0)) emit changed(); }
 void EffectsModel::setBinauralSpread(double v) { setBinauralAngle(v * 0.5); }
@@ -175,6 +216,14 @@ void EffectsModel::setFdnOutput(double v) { if (put(m_fdn.outputDb, v, -24.0, 6.
 
 void EffectsModel::restore(const dsp::ParamBlock &b)
 {
+    m_gate = b.gate;
+    m_gateEnabled = (b.enableMask & dsp::kEnGate) != 0;
+    m_dynamicEq = b.dynamicEq;
+    m_dynamicEqEnabled = (b.enableMask & dsp::kEnDynamicEq) != 0;
+    m_tape = b.tape;
+    m_tapeEnabled = (b.enableMask & dsp::kEnTape) != 0;
+    m_deEsser = b.deEsser;
+    m_deEsserEnabled = (b.enableMask & dsp::kEnDeEsser) != 0;
     m_binaural = b.binaural;
     m_binauralEnabled = (b.enableMask & dsp::kEnBinaural) != 0;
     m_neural = b.neural;

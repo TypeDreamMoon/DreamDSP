@@ -40,6 +40,11 @@ set(DREAMDSP_CORE_SOURCES
     Stereo.h              Stereo.cpp
     MultibandCompressor.h MultibandCompressor.cpp
     ParameterSmoother.h
+    StreamingSinc.h        StreamingSinc.cpp
+    TapeSaturation.h       TapeSaturation.cpp
+    DeEsser.h              DeEsser.cpp
+    NoiseGate.h            NoiseGate.cpp
+    DynamicEq.h            DynamicEq.cpp
     Binaural.h            Binaural.cpp
     NeuralSaturation.h    NeuralSaturation.cpp
     Modulation.h          Modulation.cpp

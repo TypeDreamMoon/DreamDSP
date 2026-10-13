@@ -44,7 +44,7 @@ bool decodeParamBlock(const void *bytes, size_t size, ParamBlock *out) noexcept
     std::memcpy(header, bytes, sizeof header);
     if (header[0] != kParamMagic || header[2] != size) return false;
     const uint32_t version = header[1];
-    constexpr size_t oldSizes[] = {0, 0, 300, 820, 1124, 1300, 1388, 1388, 1524};
+    constexpr size_t oldSizes[] = {0, 0, 300, 820, 1124, 1300, 1388, 1388, 1524, 1532, 1580};
     if (version == kParamVersion) {
         if (size != sizeof(ParamBlock)) return false;
         ParamBlock current;
@@ -52,15 +52,35 @@ bool decodeParamBlock(const void *bytes, size_t size, ParamBlock *out) noexcept
         *out = sanitise(current);
         return true;
     }
-    if (version < 2 || version > 8 || size != oldSizes[version]) return false;
+    if (version < 2 || version > 10 || size != oldSizes[version]) return false;
     ParamBlock b = transparentBlock();
     const auto *raw = static_cast<const unsigned char *>(bytes);
+    b.tape = TapeSaturation::Params{};
+    b.deEsser = DeEsser::Params{};
+    b.gate = NoiseGate::Params{};
+    b.dynamicEq = DynamicEq::Params{};
+    if (version == 10) {
+        std::memcpy(&b, raw, 1552);
+        b.enableMask &= 0x0FFFFFFFu;
+        upgradeStageOrder(raw + 1552, 28, b.order);
+        *out = sanitise(b);
+        return true;
+    }
+    if (version == 9) {
+        std::memcpy(&b, raw, 1504);
+        b.enableMask &= 0x03FFFFFFu;
+        upgradeStageOrder(raw + 1504, 26, b.order);
+        *out = sanitise(b);
+        return true;
+    }
     if (version == 8) {
         // v9 inserted elevation/model after the original four binaural scalars.
         // Keep old sessions on the analytic renderer so loading cannot change
         // their sound; the GUI height control explicitly opts into 3D HRTFs.
         std::memcpy(&b, raw, 1384);
-        std::memcpy(&b.neural, raw + 1384, 1524 - 1384);
+        std::memcpy(&b.neural, raw + 1384, 112);
+        b.enableMask &= 0x03FFFFFFu;
+        upgradeStageOrder(raw + 1496, 26, b.order);
         b.binaural.elevationDeg = 0;
         b.binaural.model = 0;
         *out = sanitise(b);
@@ -116,13 +136,13 @@ const uint8_t kDefaultOrder[kStageCount] = {
     // level. This matters most for the ones whose behaviour is a function of
     // absolute level -- the compressor and the night-mode curve -- and it is
     // the order Orban's broadcast chain uses for exactly that reason.
-    kStageAutoGain,
+    kStageGate, kStageAutoGain,
     kStageEqualizer, kStageGraphic, kStageLoudness,
-    kStageDynBass, kStageBass, kStageExciter, kStageTube, kStageNeural,
+    kStageDynBass, kStageBass, kStageExciter, kStageTube, kStageTape, kStageNeural,
     // Envelope shaping ahead of the compressor, so the compressor sees the
     // shape we asked for rather than fighting it.
     kStageTransient,
-    kStageComp, kStageMultiband,
+    kStageDynamicEq, kStageComp, kStageMultiband, kStageDeEsser,
     // Night mode after the compressors: it is a *decoder* function, and its
     // curve is calibrated against programme loudness, not against whatever the
     // multiband happened to leave behind.
@@ -412,6 +432,40 @@ ParamBlock sanitise(const ParamBlock &in) noexcept
     o.fdn.mix = sanF(in.fdn.mix, 0.0f, 1.0f, 0.0f);
     o.fdn.width = sanF(in.fdn.width, 0.0f, 1.0f, 1.0f);
     o.fdn.outputDb = sanF(in.fdn.outputDb, -24.0f, 6.0f, 0.0f);
+
+    o.tape.driveDb = sanF(in.tape.driveDb, 0.0f, 24.0f, 6.0f);
+    o.tape.toneHz = sanF(in.tape.toneHz, 2000.0f, 20000.0f, 12000.0f);
+    o.tape.bumpDb = sanF(in.tape.bumpDb, 0.0f, 6.0f, 1.5f);
+    o.tape.memory = sanF(in.tape.memory, 0.0f, 1.0f, 0.35f);
+    o.tape.mix = sanF(in.tape.mix, 0.0f, 1.0f, 1.0f);
+    o.tape.outputDb = sanF(in.tape.outputDb, -24.0f, 6.0f, 0.0f);
+    o.deEsser.frequencyHz = sanF(in.deEsser.frequencyHz, 2000.0f, 12000.0f, 6000.0f);
+    o.deEsser.thresholdDb = sanF(in.deEsser.thresholdDb, -60.0f, 0.0f, -24.0f);
+    o.deEsser.ratio = sanF(in.deEsser.ratio, 1.0f, 12.0f, 4.0f);
+    o.deEsser.maxReductionDb = sanF(in.deEsser.maxReductionDb, 0.0f, 18.0f, 9.0f);
+    o.deEsser.attackMs = sanF(in.deEsser.attackMs, 0.1f, 20.0f, 1.0f);
+    o.deEsser.releaseMs = sanF(in.deEsser.releaseMs, 10.0f, 500.0f, 80.0f);
+
+    o.gate.thresholdDb = sanF(in.gate.thresholdDb, -80.0f, 0.0f, -50.0f);
+    o.gate.hysteresisDb = sanF(in.gate.hysteresisDb, 0.0f, 18.0f, 6.0f);
+    o.gate.rangeDb = sanF(in.gate.rangeDb, 0.0f, 80.0f, 60.0f);
+    o.gate.attackMs = sanF(in.gate.attackMs, 0.1f, 50.0f, 5.0f);
+    o.gate.holdMs = sanF(in.gate.holdMs, 0.0f, 500.0f, 80.0f);
+    o.gate.releaseMs = sanF(in.gate.releaseMs, 10.0f, 1000.0f, 150.0f);
+    const DynamicEq::Params dynamicDefaults;
+    for (int i = 0; i < DynamicEq::kBands; ++i) {
+        const auto &s = in.dynamicEq.band[i];
+        auto &d = o.dynamicEq.band[i];
+        d.frequencyHz = sanF(s.frequencyHz, 40.0f, 16000.0f, dynamicDefaults.band[i].frequencyHz);
+        d.q = sanF(s.q, 0.3f, 8.0f, 1.0f);
+        d.thresholdDb = sanF(s.thresholdDb, -60.0f, 0.0f, -24.0f);
+        d.ratio = sanF(s.ratio, 1.0f, 12.0f, 2.0f);
+        d.maxReductionDb = sanF(s.maxReductionDb, 0.0f, 18.0f, 6.0f);
+        d.attackMs = sanF(s.attackMs, 0.1f, 100.0f, 10.0f);
+        d.releaseMs = sanF(s.releaseMs, 10.0f, 1000.0f, 120.0f);
+        d.enabled = s.enabled == 1u ? 1u : 0u;
+    }
+    o.reserved[0] = o.reserved[1] = 0;
 
     if (isPermutation(in.order))
         std::memcpy(o.order, in.order, sizeof o.order);

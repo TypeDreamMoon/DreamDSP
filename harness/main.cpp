@@ -28,6 +28,9 @@
 #include "ParamSlots.h"
 #include "ExpansionTests.h"
 #include "SpatialNeuralTests.h"
+#include "NeuralRateTests.h"
+#include "TapeDeEsserTests.h"
+#include "GateDynamicEqTests.h"
 #include "Resampler.h"
 #include "Reverb.h"
 #include "Routing.h"
@@ -3442,7 +3445,7 @@ void testParamBlock()
 {
     std::printf("\n[parameter block]\n");
 
-    check(sizeof(ParamBlock) == 1532, fmt("wire size is %.0f bytes", double(sizeof(ParamBlock))));
+    check(sizeof(ParamBlock) == 1704, fmt("wire size is %.0f bytes", double(sizeof(ParamBlock))));
     check(sizeof(StatusBlock) == 296, "status block is 296 bytes");
 
     // The transparent default must not be the dsp defaults. This is the test
@@ -3762,12 +3765,16 @@ void testExpandedChainRealtime()
     chain.apply(sanitise(p));
     check(chain.latencySamples() == 0, "master passthrough reports no processing delay");
     p.flags = 0;
-    p.enableMask = kEnBinaural | kEnNeural | kEnChorus | kEnFlanger | kEnPhaser | kEnFdn;
+    p.enableMask = kEnBinaural | kEnNeural | kEnChorus | kEnFlanger | kEnPhaser | kEnFdn | kEnTape | kEnDeEsser | kEnGate | kEnDynamicEq;
     p.binaural = Binaural::Params{};
     p.neural = NeuralSaturation::Params{};
     p.chorus = p.flanger = p.phaser = Modulation::Params{};
     p.flanger.delayMs = 2;
     p.fdn = FdnReverb::Params{};
+    p.tape = TapeSaturation::Params{};
+    p.deEsser = DeEsser::Params{};
+    p.gate = NoiseGate::Params{};
+    p.dynamicEq = DynamicEq::Params{};
     std::array<float, 64> left{}, right{};
     float *ptrs[]{left.data(), right.data()};
     bool finite = true;
@@ -3783,14 +3790,18 @@ void testExpandedChainRealtime()
         p.binaural.yawDeg = float(block % 361 - 180);
         p.neural.driveDb = float(block % 19);
         p.fdn.decaySeconds = .1f + float(block % 12);
-        if (block % 32 == 0) p.enableMask ^= kEnFdn | kEnChorus;
+        p.tape.driveDb = float(block % 25);
+        p.deEsser.thresholdDb = -float(block % 61);
+        p.gate.thresholdDb = -float(block % 81);
+        p.dynamicEq.band[block % 3].frequencyHz = 40.0f + float(block % 160) * 100;
+        if (block % 32 == 0) p.enableMask ^= kEnFdn | kEnChorus | kEnTape | kEnDeEsser | kEnGate | kEnDynamicEq;
         chain.apply(sanitise(p));
         chain.process({ptrs, 2, 64});
         for (int i = 0; i < 64; ++i) finite &= finiteSample(left[i]) && finiteSample(right[i]);
     }
     g_countAllocations = false;
     check(g_allocations.load() == 0 && finite,
-          "six live new stages: parameter flood and toggles allocate nothing, output stays finite");
+          "ten live new stages: parameter flood and toggles allocate nothing, output stays finite");
     p.flags = kPfBypass;
     chain.apply(sanitise(p));
     p.flags = 0;
@@ -3799,7 +3810,54 @@ void testExpandedChainRealtime()
     chain.process({ptrs, 2, 64});
     bool quiet = true;
     for (int i = 0; i < 64; ++i) quiet &= left[i] == 0 && right[i] == 0;
-    check(quiet, "resuming master bypass clears old tails from all six new stages");
+    check(quiet, "resuming master bypass clears old tails from all ten new stages");
+
+    TapeSaturation tape;
+    DeEsser deEsser;
+    tape.prepare(48000, 8); deEsser.prepare(48000, 8);
+    g_allocations.store(0);
+    g_countAllocations = true;
+    dreamdsp::tests::exerciseTapeDeEsserRealtime(tape, deEsser);
+    g_countAllocations = false;
+    check(g_allocations.load() == 0, "tape/de-esser: eight-channel automation and processing allocate nothing");
+
+    NoiseGate gate;
+    DynamicEq dynamicEq;
+    gate.prepare(48000, 8); dynamicEq.prepare(48000, 8);
+    g_allocations.store(0);
+    g_countAllocations = true;
+    dreamdsp::tests::exerciseGateDynamicEqRealtime(gate, dynamicEq);
+    g_countAllocations = false;
+    check(g_allocations.load() == 0, "gate/dynamic EQ: eight-channel processing and parameter edits allocate nothing");
+    p.enableMask = kEnGate | kEnDynamicEq;
+    chain.apply(sanitise(p));
+    check(chain.latencySamples() == 0, "noise gate and dynamic EQ add no buffering latency");
+
+    for (double rate : {8000., 44100., 96000., 192000.}) {
+        chain.prepare(rate, 2, 64);
+        p = transparentBlock(); p.enableMask = kEnNeural;
+        p.neural = NeuralSaturation::Params{};
+        chain.apply(sanitise(p));
+        NeuralSaturation neural;
+        neural.prepare(rate, 2);
+        const int latency = neural.latencySamples();
+        check(latency > 0 && chain.latencySamples() == latency,
+              "converted neural stage contributes its actual latency to the chain");
+        g_allocations.store(0);
+        g_countAllocations = true;
+        for (int block = 0; block < 128; ++block) {
+            left.fill(.1f); right.fill(-.2f);
+            p.neural.driveDb = float(block % 19);
+            chain.apply(sanitise(p));
+            chain.process({ptrs, 2, 64});
+        }
+        g_countAllocations = false;
+        check(g_allocations.load() == 0, "neural SRC: prepared conversion and automation allocate nothing");
+        p.enableMask = 0; chain.apply(sanitise(p));
+        check(chain.latencySamples() == 0, "neural SRC: disabling removes conversion latency");
+        p.enableMask = kEnNeural; p.flags = kPfBypass; chain.apply(sanitise(p));
+        check(chain.latencySamples() == 0, "neural SRC: master bypass removes conversion latency");
+    }
 }
 
 int runTests()
@@ -3847,6 +3905,9 @@ int runTests()
     testExpandedChainRealtime();
     dreamdsp::tests::runExpansionTests(check);
     dreamdsp::tests::runSpatialNeuralTests(check);
+    dreamdsp::tests::runNeuralRateTests(check);
+    dreamdsp::tests::runTapeDeEsserTests(check);
+    dreamdsp::tests::runGateDynamicEqTests(check);
     std::printf("\n%s -- %d failure(s)\n", g_failures ? "FAIL" : "PASS", g_failures);
     return g_failures;
 }
@@ -3917,9 +3978,11 @@ int runBench()
 
     struct Case { const char *name; double rate; int channels; int frames; };
     const Case cases[] = {
+        { "44.1 kHz stereo", 44100.0, 2, 64 },
         { "48 kHz stereo",   48000.0, 2, 480 },
         { "96 kHz stereo",   96000.0, 2, 960 },
         { "96 kHz 7.1",      96000.0, 8, 960 },
+        { "192 kHz stereo", 192000.0, 2, 64 },
     };
 
     struct Stage { uint32_t bit; const char *name; };
@@ -3944,7 +4007,11 @@ int runBench()
         { kEnAutoGain,    "auto volume" },
         { kEnNightMode,   "night mode" },
         { kEnBinaural,    "binaural (stereo only)" },
-        { kEnNeural,      "neural (48 kHz only)" },
+        { kEnNeural,      "neural (adapted rate)" },
+        { kEnTape,        "tape (4x)" },
+        { kEnDeEsser,     "de-esser" },
+        { kEnGate,        "noise gate" },
+        { kEnDynamicEq,   "dynamic EQ (3 bands)" },
         { kEnChorus,      "chorus" },
         { kEnFlanger,     "flanger" },
         { kEnPhaser,      "phaser" },
@@ -4009,6 +4076,10 @@ int runBench()
         base.matrix.gain[0][1] = 0.2f;
         base.binaural = Binaural::Params{};
         base.neural = NeuralSaturation::Params{};
+        base.tape = TapeSaturation::Params{};
+        base.deEsser = DeEsser::Params{};
+        base.gate = NoiseGate::Params{};
+        base.dynamicEq = DynamicEq::Params{};
         base.chorus = base.flanger = base.phaser = Modulation::Params{};
         base.flanger.delayMs = 2;
         base.fdn = FdnReverb::Params{};

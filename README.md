@@ -29,7 +29,7 @@ audio -> Windows Audio Engine -> DreamDspApo.dll
                         C:\ProgramData\DreamDSP\status.bin  <- APO writes back
 ```
 
-Parameters travel, not filter coefficients: a version-9, 1532-byte scalar block,
+Parameters travel, not filter coefficients: a version-11, 1704-byte scalar block,
 published by replacing a file (so the kernel provides the atomicity), read
 through a bounded atomic-word snapshot, and sanitised on both sides. A hostile IIR
 denominator cannot be told apart from a legitimate one by any cheap test, which
@@ -67,7 +67,11 @@ Everything runs in DreamDSP's own APO.
 | Eight-line Householder FDN reverb, damped RT60 / pre-delay | done |
 | Chorus / Flanger / six-stage Phaser | done |
 | Measured KEMAR binaural virtual speakers, azimuth / elevation | stereo headphones; legacy spherical head retained |
-| Synthetic Memory Drive, trained eight-unit recurrent saturator | 48 kHz only; other rates bypass |
+| Synthetic Memory Drive, trained eight-unit recurrent saturator | 8–192 kHz host rates, fixed 48 kHz model |
+| Tape-style saturation, 4x oversampling / head bump / memory | done; algorithmic approximation |
+| Split-band de-esser, linked multichannel detector | done |
+| Noise gate, linked peak detector / hysteresis / hold | done; playback noise in pauses |
+| Three-band dynamic EQ, independent frequency / Q / downward compression | done |
 | Tube saturation, exciter | done |
 | Psychoacoustic virtual bass | done |
 | Stereo widener, crossfeed | done |
@@ -102,7 +106,7 @@ formula, reproduced exactly.
 
 **The chain order is the user's.** Stages run in whatever order the chain
 editor puts them in; `kDefaultOrder` is a default, not a constraint. The order
-travels as a permutation of the twenty-six stage ids, and the sanitiser replaces
+travels as a permutation of the thirty stage ids, and the sanitiser replaces
 anything that is not a permutation wholesale rather than patching it -- a
 duplicate would run a stage twice and an omission would silently drop an effect
 whose switch says it is on.
@@ -168,15 +172,15 @@ than native code -- but it is a language implementation, not an effect, and a
 runaway script on a real-time thread inside a system audio process is a poor
 place to find that out.
 
-## Spatial and neural expansion
+## DSP expansion
 
-The Effects page includes six new cards, head-fixed top and side views of the
+The Effects page includes ten new cards, head-fixed top and side views of the
 virtual speakers, and the existing endpoint output meter. Every new stage
 participates in chain ordering, session restore and `.dreamdsp` preset round
-trips. Version 2–8 session blocks are migrated on GUI/APO load; existing stage
+trips. Version 2–10 session blocks are migrated on GUI/APO load; existing stage
 order is preserved and missing stages start disabled. Version-8 binaural
 settings keep the legacy horizontal model and sound. GUI and APO must be deployed
-together: an older APO intentionally rejects the version-9 wire format.
+together: an older APO intentionally rejects the version-11 wire format.
 
 ```mermaid
 flowchart LR
@@ -226,14 +230,51 @@ clear prepared state, so toggle cost still belongs in the callback budget.
   using only Python's standard library. The checked-in JSON records provenance
   and a held-out synthetic-teacher ESR of -39.06 dB. This is a synthetic effect,
   not a measured amplifier/tape/tube capture or a quality claim against hardware.
-  It runs only at 48 kHz, bounds model input to +/-2 and has no oversampling;
-  high drive can alias. Other sample rates bypass the stage exactly.
+  It accepts host rates from 8 to 192 kHz and 1–8 channels. The recurrent model
+  always runs at its training rate, 48 kHz; other rates use prepared causal
+  windowed-sinc converters with anti-alias filtering. The dry path is delayed
+  to the wet path's integer-sample latency, independent of callback block size.
+  Native 48 kHz retains the original path and zero buffering latency. Common
+  44.1/88.2/96/176.4/192 kHz rates add approximately 1.3–1.5 ms; 8 kHz adds 8 ms.
+  Model input is bounded to +/-2. This is rate adaptation, not an oversampled
+  or retrained model: high drive can still alias inside the 48 kHz model, and
+  higher host rates do not extend its bandwidth. Unsupported rates bypass.
+- **Tape saturation** adds a broad 65 Hz head bump, bounded magnetic-memory
+  approximation, envelope-dependent compression, soft saturation and a wet
+  tone low-pass inside a 4x oversampling path. Drive is input gain without
+  automatic loudness compensation; use Output for level matching. At Mix=0,
+  the aligned dry path still passes through the oversampling filters and DC
+  blocker; disabling the stage is the exact bypass. This is not a physical
+  tape hysteresis model or a measured machine capture.
+- **De-esser** splits complementary low/high branches, detects high-frequency
+  peaks across channels and applies a shared attack/release gain only to the
+  high branch. Frequency selects the high-band start, not a bell-filter centre.
+  Maximum reduction limits that branch; whole-signal attenuation is smaller.
+  Both new stages support 8–192 kHz and 1–8 channels, with smoothed parameters
+  and no block buffering. They start disabled in migrated sessions and presets.
+- **Noise gate** reduces the full signal during pauses. A linked peak detector
+  uses separate opening and closing thresholds, continuous below-threshold hold,
+  and smoothed opening/closing gain. All channels share the same gain so the
+  image is preserved. It starts closed and has no lookahead: very short attacks
+  may be softened. The default chain puts it before loudness levelling and tone
+  effects. This handles noise in playback material, not microphone capture or
+  noise overlapping useful audio. Range=0 becomes exact passthrough.
+- **Dynamic EQ** provides three serial, independently configured attenuation
+  bands with centre frequency, Q, threshold, ratio, range, attack and release.
+  Each uses a normalised TPT state-variable bandpass, linked detection across
+  channels, and subtraction of that band's excess level. Maximum reduction is
+  the centre-frequency limit of one band; overlapping cuts can accumulate.
+  A frequency/Q change is smoothed; enabling/disabling a band fades its effect.
+  Band selection in the GUI only changes the editor: all enabled bands process
+  simultaneously. Frequency uses a logarithmic slider, and reset restores the
+  selected band's own default (200/1000/6000 Hz). Gate and dynamic EQ support
+  8–192 kHz, 1–8 channels, no block buffering, and start disabled on migration.
 - **FDN** uses eight unequal delay lines, a Householder feedback matrix,
   per-line decay gains, damping, pre-delay and stereo width. Chorus/Flanger
   use interpolated modulated delays; Phaser uses six allpass sections.
   Recursive feedback is bounded. Silent APO input is fed through active stages
   as zero samples so delay, reverb and neural tails can finish.
-  The six new stages reset their history when master bypass is released. Older
+  The ten new stages reset their history when master bypass is released. Older
   stages retain their existing bypass policy, including frozen convolution
   history; this change does not introduce seamless bypass for the entire rack.
 
@@ -243,9 +284,9 @@ calibration and long non-uniform convolution remain future work. The existing
 uniform convolver's length limit is unchanged (64 partitions, approximately
 341 ms at 48 kHz); FDN supplies a longer synthetic reverb tail.
 
-Reported buffering latency includes only active delay/limiter/width/convolution
-stages. Windows may cache this value at stream creation; changing lookahead,
-delay, phase widening or master bypass during playback can invalidate host
+Reported buffering latency includes active delay/limiter/width/convolution and
+neural sample-rate conversion. Windows may cache this value at stream creation;
+changing lookahead, delay, phase widening, neural enable or master bypass can invalidate host
 alignment until the stream is recreated. This is not dynamic host compensation.
 
 ### Isolated regression tests
@@ -261,7 +302,9 @@ dspharness --bench
 ```
 
 CTest covers the existing DSP regression suite, new spatial/neural reference
-and impulse tests, FDN decay, modulation block invariance, bounded parameter
+and impulse tests, neural cross-rate references and ultrasonic rejection,
+tape alias suppression, selective de-essing, gate timing/hysteresis,
+frequency-selective dynamic EQ, FDN decay, block invariance, bounded parameter
 publication to four readers, parameter migration, allocation-free parameter
 changes/toggles and a separate Qt preset/model round trip. Temporary preset
 files stay in the build directory. `--spatial-bench` reports mean, p99, maximum

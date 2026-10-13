@@ -39,6 +39,12 @@ int main(int argc, char **argv)
     p.flanger = {.9f, .7f, 3, .7f, .8f, .4f};
     p.phaser = {1.5f, .8f, 5, .2f, .9f, .6f};
     p.fdn = {3.2f, 4500, 45, .38f, 1.4f, -2};
+    p.tape = {12, 7500, 3, .6f, .8f, -4};
+    p.deEsser = {7200, -32, 5, 12, 2, 120};
+    p.gate = {-43, 8, 55, 3, 120, 240};
+    p.dynamicEq.band[0] = {175, 2, -30, 3, 9, 12, 180, 1};
+    p.dynamicEq.band[1] = {850, .7f, -18, 4, 3, 5, 95, 0};
+    p.dynamicEq.band[2] = {7300, 4, -25, 2.5f, 12, 2, 140, 1};
     p.transient.attack = .6f;
     p.clipper.driveDb = 8;
     p.autoGain.targetLufs = -20;
@@ -76,6 +82,38 @@ int main(int argc, char **argv)
           && std::memcmp(&fdn, &p.fdn, sizeof fdn) == 0
           && model.chorusOn() && model.flangerOn() && model.phaserOn() && model.fdnOn(),
           "Qt model restores all modulation and FDN parameters and switches");
+    const auto tape = model.tapeParams();
+    const auto deEsser = model.deEsserParams();
+    check(std::memcmp(&tape, &p.tape, sizeof tape) == 0
+          && std::memcmp(&deEsser, &p.deEsser, sizeof deEsser) == 0
+          && model.tapeOn() && model.deEsserOn(),
+          "Qt model restores tape and de-esser parameters and switches");
+    model.setTapeDrive(1000);
+    const auto gate = model.gateParams();
+    const auto dynamicEq = model.dynamicEqParams();
+    check(std::memcmp(&gate, &p.gate, sizeof gate) == 0
+          && std::memcmp(&dynamicEq, &p.dynamicEq, sizeof dynamicEq) == 0
+          && model.gateOn() && model.dynamicEqOn(),
+          "Qt model restores gate, all three dynamic EQ bands and stage switches");
+    model.setDynamicEqBand(1);
+    check(model.dynamicEqFrequency() == 850 && !model.dynamicEqBandEnabled()
+          && model.defaultOf(QStringLiteral("dynamicEqFrequency")).toDouble() == 1000,
+          "band selection exposes saved values and the selected band's frequency default");
+    model.setDynamicEqFrequency(2100);
+    model.setDynamicEqBandEnabled(true);
+    model.setDynamicEqBand(2);
+    check(model.dynamicEqFrequency() == 7300 && model.dynamicEqDefaultFrequency() == 6000
+          && model.dynamicEqParams().band[1].frequencyHz == 2100
+          && model.dynamicEqParams().band[0].frequencyHz == 175,
+          "editing and switching dynamic EQ bands preserves independent state");
+    model.setDynamicEqQ(1000); model.setGateRange(-1000);
+    model.setDynamicEqFrequency(std::numeric_limits<double>::infinity());
+    check(model.dynamicEqQ() == 8 && model.gateRange() == 0 && model.dynamicEqFrequency() == 7300,
+          "gate/dynamic EQ edits clamp ranges and reject non-finite values");
+    model.setDeEsserFrequency(-1000);
+    model.setDeEsserRange(1000);
+    check(model.tapeDrive() == 24 && model.deEsserFrequency() == 2000 && model.deEsserRange() == 18,
+          "tape and de-esser UI parameter limits match the DSP protocol");
     model.setBinauralYaw(1000);
     model.setNeuralDrive(-1000);
     check(model.binauralYaw() == 180 && model.neuralDrive() == -12,
@@ -119,6 +157,37 @@ int main(int argc, char **argv)
     check(loadDreamPreset(path, &output, &error) && output.params.binaural.model == 0
           && output.params.binaural.elevationDeg == 0 && output.params.binaural.yawDeg == -125,
           "old JSON spatial presets retain the analytic model and their original direction");
+    fx.remove(QStringLiteral("gate"));
+    fx.remove(QStringLiteral("dynamicEq"));
+    fx[QStringLiteral("enableMask")] = int(kEnTape | kEnDeEsser);
+    QJsonArray v10Order;
+    for (int i = 27; i >= 0; --i) v10Order.append(i);
+    fx[QStringLiteral("order")] = v10Order;
+    root[QStringLiteral("effects")] = fx;
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+    file.write(QJsonDocument(root).toJson()); file.close();
+    bool v10Ok = loadDreamPreset(path, &output, &error) && output.params.enableMask == (kEnTape | kEnDeEsser)
+        && output.params.gate.thresholdDb == -50 && output.params.dynamicEq.band[2].frequencyHz == 6000
+        && output.params.tape.driveDb == 12 && output.params.deEsser.frequencyHz == 7200;
+    int previousV10 = 28;
+    for (auto id : output.params.order) if (id < 28) { v10Ok &= id < previousV10; previousV10 = id; }
+    check(v10Ok, "28-stage JSON presets keep their order and leave gate/dynamic EQ disabled");
+    fx.remove(QStringLiteral("tape"));
+    fx.remove(QStringLiteral("deEsser"));
+    fx[QStringLiteral("enableMask")] = int(kEnNeural);
+    QJsonArray v9Order;
+    for (int i = 25; i >= 0; --i) v9Order.append(i);
+    fx[QStringLiteral("order")] = v9Order;
+    root[QStringLiteral("effects")] = fx;
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+    file.write(QJsonDocument(root).toJson());
+    file.close();
+    bool v9Ok = loadDreamPreset(path, &output, &error) && output.params.enableMask == kEnNeural
+        && output.params.tape.driveDb == 6 && output.params.deEsser.ratio == 4
+        && output.params.neural.driveDb == 9;
+    int previousV9 = 26;
+    for (auto id : output.params.order) if (id < 26) { v9Ok &= id < previousV9; previousV9 = id; }
+    check(v9Ok, "26-stage JSON presets retain settings and order with tape/de-esser disabled");
     for (const char *key : {"binaural", "neural", "chorus", "flanger", "phaser", "fdn"})
         fx.remove(QLatin1String(key));
     fx[QStringLiteral("enableMask")] = int(kEnTube);

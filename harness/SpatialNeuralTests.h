@@ -342,7 +342,7 @@ void runSpatialNeuralTests(Check &&check)
     check(energy(isolated[1]) == 0.0, "neural: no recurrent state leaks into the silent channel");
 
     bool bypass = true;
-    for (double rate : { 44100.0, 96000.0, 192000.0 }) {
+    for (double rate : { 0.0, 4000.0, 384000.0 }) {
         neural.prepare(rate, 2);
         whole = signal;
         process(neural, whole, 0, n);
