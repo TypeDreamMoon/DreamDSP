@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>DreamDSP</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b2750"/>
+      <stop offset="1" stop-color="#080b17"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9cc0ff"/>
+      <stop offset="1" stop-color="#3d7eff"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#8db4ff"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#3d7eff" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#3d7eff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="url(#tile)"/>
+  <rect x="9" y="9" width="238" height="238" rx="57" fill="none" stroke="#6f9bff" stroke-opacity="0.28" stroke-width="2"/>
+  <circle cx="129" cy="128" r="96" fill="url(#glow)"/>
+
+  <!-- the D: a stem and a semicircular bowl, one closed stroke -->
+  <path d="M82 70 V186 H118 A58 58 0 0 0 118 70 Z"
+        fill="none" stroke="url(#ring)" stroke-width="22" stroke-linejoin="round" stroke-linecap="round"/>
+
+  <!-- the signal inside it: three level bars -->
+  <rect x="104" y="108" width="12" height="40" rx="6" fill="url(#bar)"/>
+  <rect x="124" y="88"  width="12" height="80" rx="6" fill="url(#bar)"/>
+  <rect x="144" y="104" width="12" height="48" rx="6" fill="url(#bar)"/>
+
+  <!-- a four-pointed star, for the dream -->
+  <path d="M206 38 L211 54 L227 59 L211 64 L206 80 L201 64 L185 59 L201 54 Z" fill="#cfe0ff"/>
+</svg>

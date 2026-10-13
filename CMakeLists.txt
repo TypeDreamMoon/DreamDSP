@@ -24,6 +24,12 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# RC is for the executable's icon (assets/DreamDSP.rc); the project is otherwise
+# C++ only.
+if(WIN32)
+    enable_language(RC)
+endif()
+
 find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui Quick Network Concurrent)
 find_package(HuskarUI REQUIRED)
 
@@ -43,6 +49,13 @@ set(HUSKARUI_BIN_DIR "${HUSKARUI_ROOT}/bin")
 qt_add_executable(DreamDSP
     src/main.cpp
 )
+
+# The icon Explorer, the taskbar and the window frame show. Qt looks for a
+# resource named IDI_ICON1 when it registers its window class, so no code is
+# needed to hand it to the windows.
+if(WIN32)
+    target_sources(DreamDSP PRIVATE assets/DreamDSP.rc)
+endif()
 
 # The design tokens are a singleton; qt_add_qml_module only writes it into the
 # module's qmldir as one when told.
@@ -90,6 +103,9 @@ qt_add_qml_module(DreamDSP
         qml/components/BinauralScene.qml
         qml/components/OutputPane.qml
         qml/components/ChainPane.qml
+        qml/components/SplashScreen.qml
+    RESOURCES
+        Images/character.png
     SOURCES
         src/core/Biquad.h              src/core/Biquad.cpp
         src/core/ApoConfig.h           src/core/ApoConfig.cpp

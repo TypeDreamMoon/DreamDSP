@@ -1,0 +1,3 @@
+// Named, not numbered: Qt registers its window class with the icon called
+// IDI_ICON1, which is how the window and the taskbar pick this up too.
+IDI_ICON1 ICON "DreamDSP.ico"

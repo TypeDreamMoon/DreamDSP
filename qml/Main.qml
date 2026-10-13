@@ -75,6 +75,27 @@ HusWindow {
         }
     }
 
+    // The intro plays over the whole application, below the caption bar so the
+    // window can still be dragged and closed while it runs. Skipped wherever a
+    // person is not watching: hidden starts, and the diagnostic runs that grab
+    // or poke the window and must see the real interface.
+    readonly property bool skipIntro: {
+        const a = Qt.application.arguments;
+        return ['--no-splash', '--tray', '--grab', '--slidertest', '--applyir']
+            .some(flag => a.includes(flag));
+    }
+
+    Loader {
+        id: intro
+        anchors.fill: parent
+        anchors.topMargin: win.captionBar.height
+        z: 1000
+        active: !win.skipIntro
+        sourceComponent: SplashScreen {
+            onFinished: intro.active = false
+        }
+    }
+
     // HusWindow draws no background of its own.
     Rectangle {
         anchors.fill: parent

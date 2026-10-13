@@ -45,6 +45,11 @@ AppSupportURL={#AppUrl}/issues
 AppUpdatesURL={#AppUrl}/releases
 VersionInfoVersion={#AppVersion}
 
+; The wizard's own icon, and the one Add/Remove Programs shows. The shipped exe
+; carries the same icon as a resource, so this needs no file of its own.
+SetupIconFile=..\assets\DreamDSP.ico
+UninstallDisplayIcon={app}\{#AppExe}
+
 ; Per-user, so no elevation is needed to install or to update.
 PrivilegesRequired=lowest
 DefaultDirName={autopf}\{#AppName}
