@@ -237,6 +237,7 @@ void AppController::setCurrentDevice(int index)
         stashCurrentProfile();
 
     m_currentDevice = index;
+    pollVolume();      // the new endpoint's volume, not the old one's until the timer
 
     if (m_perDevice)
         applyProfile(profileKeyForDevice(index));
@@ -1199,13 +1200,34 @@ void AppController::setMetering(bool on)
 
 void AppController::pollVolume()
 {
-    if (!m_endpointVolume.attach(profileKeyForDevice(m_currentDevice))) {
+    // "All devices" means whichever endpoint is the default now, not the one
+    // that was when the reader was first attached.
+    const QString key = profileKeyForDevice(m_currentDevice);
+    if (key.isEmpty())
+        m_endpointVolume.detach();
+
+    float db = 1.0f;     // 1.0 is the "no reading" sentinel
+    // Two goes: the interface Windows hands out belongs to the endpoint as it
+    // was when it was asked for. Restart the audio service, attach the APO,
+    // replug the USB device -- all of which this program causes or sits
+    // through -- and every call on it fails from then on. It used to be kept
+    // for as long as the device id stayed the same, which is forever, so the
+    // loudness stage read "cannot read the system volume" until the program
+    // was restarted. A failed read drops it and asks again.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (m_endpointVolume.attach(key)) {
+            db = m_endpointVolume.levelDb();
+            if (db <= 0.0f)
+                break;
+        }
+        m_endpointVolume.detach();
+    }
+
+    if (db > 0.0f) {
         m_output.setVolume(0.0, false);
         return;
     }
-    const float db = m_endpointVolume.levelDb();
-    // 1.0 is the "no reading" sentinel; a real attenuation is never positive.
-    m_output.setVolume(db > 0.0f ? 0.0 : double(db), db <= 0.0f);
+    m_output.setVolume(double(db), true);
 }
 
 void AppController::pollMeter()
