@@ -2,6 +2,14 @@ cmake_minimum_required(VERSION 3.21)
 
 project(DreamDSP VERSION 0.3.5 LANGUAGES CXX)
 
+# Localised MSVC detection can be misdecoded when the configure console's
+# code page differs from the compiler's. A bad prefix drops ALL header deps in
+# Ninja, leaving old object layouts linked with newly compiled DSP methods.
+set(DREAMDSP_MSVC_INCLUDE_PREFIX "" CACHE STRING "Override MSVC /showIncludes prefix if auto-detection is misdecoded")
+if(MSVC AND DREAMDSP_MSVC_INCLUDE_PREFIX)
+    set(CMAKE_CL_SHOWINCLUDES_PREFIX "${DREAMDSP_MSVC_INCLUDE_PREFIX}")
+endif()
+
 # The version comes from the git tag, not from the line above -- that one is
 # only the fallback for a tree with no tags at all. See cmake/Version.cmake.
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
