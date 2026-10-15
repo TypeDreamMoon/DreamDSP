@@ -11,6 +11,7 @@ QVector<HotkeyManager::ActionInfo> HotkeyManager::actions()
 {
     return {
         { "toggleMaster", "总开关(旁通全部效果)" },
+        { "toggleAb", "A/B 对比:在两组设置之间切换" },
         { "toggleEq",     "开关均衡器" },
         { "toggleEngage", "接管 / 停止接管 config.txt" },
         { "gainUp",       "整体增益 +1 dB" },

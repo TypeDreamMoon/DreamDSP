@@ -538,13 +538,8 @@ QString AppController::fullPresetPath(const QString &name) const
         .filePath(name + QStringLiteral(".dreamdsp"));
 }
 
-bool AppController::saveFullPreset(const QString &name)
+DreamPreset AppController::snapshot(const QString &name) const
 {
-    if (name.trimmed().isEmpty()) {
-        setError(QStringLiteral("预设名不能为空"));
-        return false;
-    }
-
     DreamPreset p;
     p.name = name;
     p.eq = currentAsPreset();
@@ -563,6 +558,17 @@ bool AppController::saveFullPreset(const QString &name)
     p.convolutionFile = m_convolution.path;
     p.convolutionName = m_convolution.name;
     p.autoEqSource = m_autoEqSource;
+    return p;
+}
+
+bool AppController::saveFullPreset(const QString &name)
+{
+    if (name.trimmed().isEmpty()) {
+        setError(QStringLiteral("预设名不能为空"));
+        return false;
+    }
+
+    const DreamPreset p = snapshot(name);
 
     QDir().mkpath(PresetStore::userDirectory());
     QString err;
@@ -577,15 +583,8 @@ bool AppController::saveFullPreset(const QString &name)
     return true;
 }
 
-bool AppController::loadFullPreset(const QString &path)
+void AppController::applySnapshot(const DreamPreset &p)
 {
-    DreamPreset p;
-    QString err;
-    if (!loadDreamPreset(path, &p, &err)) {
-        setError(QStringLiteral("读取失败:%1").arg(err));
-        return false;
-    }
-
     m_restoring = true;
     m_bands.setBands(p.eq.bands);
     setPreamp(p.eq.preamp);
@@ -600,6 +599,9 @@ bool AppController::loadFullPreset(const QString &path)
     setMasterEnabled((p.params.flags & dsp::kPfBypass) == 0u);
     emit chainChanged();
     m_autoEqSource = p.autoEqSource;
+    m_autoEqEntry = -1;
+    m_autoEqFixed = false;
+    emit autoEqChanged();
 
     m_publisher.setConvolutionMix(p.params.convolution.mix);
     m_publisher.setConvolutionTrimDb(p.params.convolution.trimDb);
@@ -608,12 +610,21 @@ bool AppController::loadFullPreset(const QString &path)
     // machines can name a file that is not here, which is worth saying rather
     // than silently dropping.
     const bool wantConvolution = (p.params.enableMask & dsp::kEnConvolution) != 0;
-    if (!p.convolutionFile.isEmpty() && QFileInfo::exists(p.convolutionFile)) {
+    if (!p.convolutionFile.isEmpty() && m_convolution.path == p.convolutionFile) {
+        // Already the one loaded: only the switch can differ. Reloading it
+        // would convert the file again and add a second copy to the list.
+        m_publisher.setConvolutionEnabled(wantConvolution);
+        setConvolutionEnabled(wantConvolution);
+    } else if (!p.convolutionFile.isEmpty() && QFileInfo::exists(p.convolutionFile)) {
         applyImpulseFile(p.convolutionFile);
         m_publisher.setConvolutionEnabled(wantConvolution);
         setConvolutionEnabled(wantConvolution);
     } else if (!p.convolutionFile.isEmpty()) {
         setError(QStringLiteral("预设里的脉冲响应不在这台机器上:%1").arg(p.convolutionFile));
+    } else if (m_convolutionEnabled) {
+        // A preset without one says "no convolution", not "leave whatever was".
+        m_publisher.setConvolutionEnabled(false);
+        setConvolutionEnabled(false);
     }
 
     setCurrentPreset(p.name);
@@ -621,10 +632,96 @@ bool AppController::loadFullPreset(const QString &path)
     flushParams();
     emit generatedTextChanged();
     scheduleWrite();
+}
+
+bool AppController::loadFullPreset(const QString &path)
+{
+    DreamPreset p;
+    QString err;
+    if (!loadDreamPreset(path, &p, &err)) {
+        setError(QStringLiteral("读取失败:%1").arg(err));
+        return false;
+    }
+
+    applySnapshot(p);
 
     if (lastError().isEmpty())
         setMessage(QStringLiteral("已载入完整预设「%1」").arg(p.name));
     return true;
+}
+
+// -------------------------------------------------------------- A/B compare
+
+AppController::AbSlot AppController::captureSlot() const
+{
+    AbSlot s;
+    s.preset = snapshot(m_currentPreset);
+    s.dirty = m_dirty;
+    s.autoEqEntry = m_autoEqEntry;
+    s.autoEqFixed = m_autoEqFixed;
+    s.valid = true;
+    return s;
+}
+
+void AppController::applySlot(const AbSlot &slot)
+{
+    applySnapshot(slot.preset);
+    // applySnapshot says "this is a saved preset, nothing unsaved"; a side of
+    // an A/B comparison is exactly the place where that is not true.
+    markDirty(slot.dirty);
+    m_autoEqEntry = slot.autoEqEntry;
+    m_autoEqFixed = slot.autoEqFixed;
+    emit autoEqChanged();
+}
+
+void AppController::startAb()
+{
+    if (m_abActive >= 0)
+        return;
+    m_ab[0] = captureSlot();
+    m_ab[1] = m_ab[0];
+    m_abActive = 0;
+    emit abChanged();
+    setMessage(QStringLiteral("A/B 对比已开始 · A 是现在的设置,B 是它的副本 —— 切到 B 改一改,再来回切换听差别"));
+}
+
+void AppController::selectAb(int slot)
+{
+    if (m_abActive < 0 || slot < 0 || slot > 1 || slot == m_abActive)
+        return;
+    // Whatever was changed on this side stays with this side.
+    m_ab[m_abActive] = captureSlot();
+    m_abActive = slot;
+    applySlot(m_ab[slot]);
+    emit abChanged();
+}
+
+void AppController::toggleAb()
+{
+    if (m_abActive < 0)
+        startAb();
+    else
+        selectAb(1 - m_abActive);
+}
+
+void AppController::copyAb()
+{
+    if (m_abActive < 0)
+        return;
+    m_ab[1 - m_abActive] = captureSlot();
+    setMessage(QStringLiteral("已把 %1 复制到 %2")
+                   .arg(m_abActive == 0 ? QStringLiteral("A") : QStringLiteral("B"),
+                        m_abActive == 0 ? QStringLiteral("B") : QStringLiteral("A")));
+}
+
+void AppController::stopAb()
+{
+    if (m_abActive < 0)
+        return;
+    m_abActive = -1;
+    m_ab[0] = {};
+    m_ab[1] = {};
+    emit abChanged();
 }
 
 QVariantList AppController::fullPresets() const
@@ -1024,6 +1121,7 @@ QVariantList AppController::searchImpulses(const QString &needle, int limit)
         out.append(QVariantMap{
             { QStringLiteral("index"), i },
             { QStringLiteral("name"), ir.name },
+            { QStringLiteral("path"), ir.path },
             { QStringLiteral("category"), ir.category },
             { QStringLiteral("rate"), ir.sampleRate },
             { QStringLiteral("channels"), ir.channels },
@@ -1307,6 +1405,11 @@ void AppController::onHotkey(const QString &id)
         setMasterEnabled(!m_masterEnabled);
         setMessage(m_masterEnabled ? QStringLiteral("总开关已打开")
                                    : QStringLiteral("总开关已关闭 · 全部效果旁通"));
+    } else if (id == QLatin1String("toggleAb")) {
+        toggleAb();
+        setMessage(m_abActive == 0 ? QStringLiteral("A")
+                   : m_abActive == 1 ? QStringLiteral("B")
+                                     : QStringLiteral("A/B 已关闭"));
     } else if (id == QLatin1String("toggleEq")) {
         setEqEnabled(!m_eqEnabled);
     } else if (id == QLatin1String("toggleEngage")) {
@@ -1496,6 +1599,9 @@ bool AppController::importAutoEq(int entryIndex, bool fixedBand)
     m_restoring = false;
 
     m_autoEqSource = e.device;
+    m_autoEqEntry = entryIndex;
+    m_autoEqFixed = fixedBand;
+    emit autoEqChanged();
     setCurrentPreset(e.device);
     markDirty(true);
     setError({});

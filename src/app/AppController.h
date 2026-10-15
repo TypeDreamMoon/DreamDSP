@@ -122,6 +122,17 @@ class AppController : public QObject
     Q_PROPERTY(bool perDevice READ perDevice WRITE setPerDevice NOTIFY perDeviceChanged)
     Q_PROPERTY(bool autoEqLoaded READ autoEqLoaded NOTIFY autoEqChanged)
     Q_PROPERTY(int autoEqCount READ autoEqCount NOTIFY autoEqChanged)
+    // Which database entry the current curve came from, for the list to mark.
+    // The entry is a row of the loaded database, so it is only known for an
+    // import made in this run; after a restart only the device name is.
+    Q_PROPERTY(QString autoEqSource READ autoEqSource NOTIFY autoEqChanged)
+    Q_PROPERTY(int autoEqEntry READ autoEqEntry NOTIFY autoEqChanged)
+    Q_PROPERTY(bool autoEqFixed READ autoEqFixed NOTIFY autoEqChanged)
+
+    // A/B comparison: -1 off, 0 = A, 1 = B. Each side is a whole snapshot of
+    // the application -- equalizer, effects, convolution, output, order --
+    // so switching is the quickest way to hear what a change did.
+    Q_PROPERTY(int abActive READ abActive NOTIFY abChanged)
 
     // --- the DreamDSP APO, i.e. actually being in the audio path ----------
     Q_PROPERTY(bool apoInstalled READ apoInstalled NOTIFY apoStateChanged)
@@ -363,6 +374,16 @@ public:
 
     // --- AutoEQ -----------------------------------------------------------
     bool autoEqLoaded() const { return m_autoEq.loaded(); }
+    QString autoEqSource() const { return m_autoEqSource; }
+    int autoEqEntry() const { return m_autoEqEntry; }
+    bool autoEqFixed() const { return m_autoEqFixed; }
+
+    int abActive() const { return m_abActive; }
+    Q_INVOKABLE void startAb();               // A = what is set now, B = a copy of it
+    Q_INVOKABLE void selectAb(int slot);      // keep the edits on this side, show the other
+    Q_INVOKABLE void toggleAb();              // start if off, otherwise flip
+    Q_INVOKABLE void copyAb();                // overwrite the other side with this one
+    Q_INVOKABLE void stopAb();                // keep what is showing, drop the other side
     int autoEqCount() const { return m_autoEq.entries().size(); }
     Q_INVOKABLE bool loadAutoEq();
     // [{ index, label, device, measurer, target, source, hasFixed }]
@@ -398,6 +419,7 @@ signals:
     void fullPresetsChanged();
     void perDeviceChanged();
     void autoEqChanged();
+    void abChanged();
     void hotkeysChanged();
     void apoStateChanged();
     void apoStatusChanged();
@@ -458,6 +480,23 @@ private:
     QVector<float> m_impulseCurve;
     // What the last AutoEQ import was, carried into a full preset.
     QString m_autoEqSource;
+    int m_autoEqEntry = -1;
+    bool m_autoEqFixed = false;
+
+    // The whole application as one value, for A/B and for the full presets.
+    struct AbSlot {
+        DreamPreset preset;
+        bool dirty = false;
+        int autoEqEntry = -1;
+        bool autoEqFixed = false;
+        bool valid = false;
+    };
+    DreamPreset snapshot(const QString &name) const;
+    void applySnapshot(const DreamPreset &p);
+    AbSlot captureSlot() const;
+    void applySlot(const AbSlot &slot);
+    AbSlot m_ab[2];
+    int m_abActive = -1;
     double m_impulseCurveFloor = -30.0;
 
     ApoState m_apoState;

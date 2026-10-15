@@ -858,6 +858,56 @@ int runSliderTest(QObject *rootObject)
     check(std::abs(ctl->bands()->gain(0) - before) < 0.001,
           QStringLiteral("original value restored"));
 
+    // ---- A/B comparison. Runs against the live session too, so it puts every
+    // value back and checks that switching is lossless: a snapshot that drops
+    // a setting would make A and B differ in ways nobody changed.
+    {
+        out() << "\n[A/B]" << Qt::endl;
+        const double preamp0 = ctl->preamp();
+        const double gain0 = ctl->bands()->gain(0);
+        const bool eq0 = ctl->eqEnabled();
+        const bool conv0 = ctl->convolutionEnabled();
+        const QString file0 = ctl->convolutionFile();
+        const int bands0 = ctl->bands()->rowCount();
+        const QVariantList chain0 = ctl->chain();
+
+        ctl->startAb();
+        check(ctl->abActive() == 0, QStringLiteral("A/B starts on A"));
+
+        ctl->selectAb(1);
+        check(ctl->abActive() == 1, QStringLiteral("switches to B"));
+        check(std::abs(ctl->preamp() - preamp0) < 1e-6 && std::abs(ctl->bands()->gain(0) - gain0) < 1e-6,
+              QStringLiteral("B starts as a copy of A"));
+
+        ctl->setPreamp(preamp0 - 3.0);
+        ctl->bands()->setGain(0, gain0 + 2.0);
+        ctl->selectAb(0);
+        check(std::abs(ctl->preamp() - preamp0) < 1e-6 && std::abs(ctl->bands()->gain(0) - gain0) < 1e-6,
+              QStringLiteral("back on A: B's edits did not leak"));
+        check(ctl->eqEnabled() == eq0 && ctl->convolutionEnabled() == conv0
+                  && ctl->convolutionFile() == file0 && ctl->bands()->rowCount() == bands0,
+              QStringLiteral("A round-trips switches, convolution and band count"));
+        check(ctl->chain() == chain0, QStringLiteral("A round-trips the chain order and switches"));
+
+        ctl->selectAb(1);
+        check(std::abs(ctl->preamp() - (preamp0 - 3.0)) < 1e-6
+                  && std::abs(ctl->bands()->gain(0) - (gain0 + 2.0)) < 1e-6,
+              QStringLiteral("B kept its own edits"));
+
+        ctl->copyAb();
+        ctl->selectAb(0);
+        ctl->selectAb(1);
+        check(std::abs(ctl->preamp() - (preamp0 - 3.0)) < 1e-6,
+              QStringLiteral("copy B -> A leaves B as it was"));
+
+        ctl->stopAb();
+        check(ctl->abActive() == -1, QStringLiteral("A/B stops"));
+        ctl->setPreamp(preamp0);
+        ctl->bands()->setGain(0, gain0);
+        ctl->flushNow();
+        check(std::abs(ctl->preamp() - preamp0) < 1e-6, QStringLiteral("session values restored"));
+    }
+
     out() << "\n" << (g_failures == 0 ? "PASS" : "FAIL")
           << " -- " << g_failures << " failure(s)" << Qt::endl;
     out().flush();

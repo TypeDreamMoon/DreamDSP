@@ -89,6 +89,8 @@ qt_add_qml_module(DreamDSP
         qml/components/StatusPill.qml
         qml/components/PresetBar.qml
         qml/components/FullPresetButton.qml
+        qml/components/ListRow.qml
+        qml/components/AbControl.qml
         qml/components/BandTable.qml
         qml/components/TrayMenu.qml
         qml/components/SystemPane.qml

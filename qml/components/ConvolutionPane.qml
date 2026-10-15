@@ -92,23 +92,17 @@ Item {
 
                     HusScrollBar.vertical: HusScrollBar { }
 
-                    delegate: Rectangle {
+                    delegate: ListRow {
                         id: row
                         required property var modelData
-                        readonly property bool current:
-                            AppController.convolutionFile !== ''
-                            && row.modelData.name === AppController.convolutionName
+                        // By path: names repeat across folders ("01.Acoustic"),
+                        // and two rows must not both claim to be in use.
+                        current: AppController.convolutionFile !== ''
+                                 && row.modelData.path === AppController.convolutionFile
+                        readonly property var hover: row   // read by the apply button below
 
                         width: ListView.view.width
                         height: 44
-                        radius: 6
-                        color: row.current
-                               ? Qt.alpha(HusTheme.Primary.colorPrimary, 0.12)
-                               : hover.hovered
-                                 ? (HusTheme.isDark ? Qt.rgba(1, 1, 1, 0.05) : Qt.rgba(0, 0, 0, 0.04))
-                                 : 'transparent'
-
-                        HoverHandler { id: hover }
 
                         RowLayout {
                             anchors.fill: parent

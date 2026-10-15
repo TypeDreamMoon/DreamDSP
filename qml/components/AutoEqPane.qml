@@ -59,6 +59,39 @@ Item {
             }
         }
 
+        // Where the current curve came from. The list shows 150 rows of
+        // thousands, so the one in use is often not among them.
+        RowLayout {
+            Layout.fillWidth: true
+            visible: AppController.autoEqSource !== ''
+            spacing: 8
+
+            HusText {
+                text: '当前曲线来自'
+                font.pixelSize: Ui.label
+                opacity: 0.55
+            }
+            HusText {
+                Layout.fillWidth: true
+                text: AppController.autoEqSource
+                      + (AppController.autoEqEntry >= 0
+                         ? (AppController.autoEqFixed ? ' · 10 段' : ' · 参数均衡') : '')
+                font.pixelSize: Ui.label
+                font.weight: Font.DemiBold
+                color: HusTheme.Primary.colorPrimary
+                elide: Text.ElideRight
+            }
+            HusButton {
+                visible: AppController.autoEqLoaded
+                type: HusButton.Type_Link
+                text: '在列表中找到它'
+                onClicked: {
+                    searchField.text = AppController.autoEqSource;
+                    root.runSearch();
+                }
+            }
+        }
+
         HusDivider { Layout.fillWidth: true }
 
         ListView {
@@ -71,19 +104,24 @@ Item {
 
             HusScrollBar.vertical: HusScrollBar { }
 
-            delegate: Rectangle {
+            delegate: ListRow {
                 id: row
                 required property int index
                 required property var modelData
 
+                // The exact entry when it is known (an import made in this run),
+                // otherwise any row with the same device name -- after a
+                // restart that is all there is to go on.
+                current: AppController.autoEqSource !== ''
+                         && (AppController.autoEqEntry >= 0
+                             ? row.modelData.index === AppController.autoEqEntry
+                             : row.modelData.device === AppController.autoEqSource)
+                readonly property bool usedParam: row.current && !AppController.autoEqFixed
+                readonly property bool usedFixed: row.current && AppController.autoEqFixed
+                readonly property var hover: row   // the buttons below read hover.hovered
+
                 width: ListView.view.width
                 height: 46
-                radius: 6
-                color: hover.hovered
-                       ? (HusTheme.isDark ? Qt.rgba(1, 1, 1, 0.05) : Qt.rgba(0, 0, 0, 0.04))
-                       : 'transparent'
-
-                HoverHandler { id: hover }
 
                 RowLayout {
                     anchors.fill: parent
@@ -116,8 +154,9 @@ Item {
                     // Primary only on the row under the pointer: a filled
                     // button on every one of 150 rows is a wall of blue.
                     HusButton {
-                        text: '导入'
-                        type: hover.hovered ? HusButton.Type_Primary : HusButton.Type_Default
+                        text: row.usedParam ? '已导入' : '导入'
+                        type: (row.usedParam || hover.hovered) ? HusButton.Type_Primary
+                                                               : HusButton.Type_Default
                         onClicked: AppController.importAutoEq(row.modelData.index, false)
 
                         HusToolTip {
@@ -128,7 +167,8 @@ Item {
                     }
 
                     HusButton {
-                        text: '10 段'
+                        text: row.usedFixed ? '已用 10 段' : '10 段'
+                        type: row.usedFixed ? HusButton.Type_Primary : HusButton.Type_Default
                         enabled: row.modelData.hasFixed
                         opacity: enabled ? 1 : 0.35
                         onClicked: AppController.importAutoEq(row.modelData.index, true)

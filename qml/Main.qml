@@ -205,6 +205,8 @@ HusWindow {
 
                     MeterBar { Layout.alignment: Qt.AlignVCenter }
 
+                    AbControl { }
+
                     FullPresetButton { }
 
                     // Shows the explanations under the controls. They are
@@ -229,7 +231,12 @@ HusWindow {
                     }
 
                     HusSelect {
+                        // Gives way when the header is crowded -- A/B mode adds a
+                        // control and the refresh button was pushed off the edge.
+                        Layout.fillWidth: true
                         Layout.preferredWidth: 250
+                        Layout.maximumWidth: 250
+                        Layout.minimumWidth: 110
                         model: AppController.deviceNames.map((n, i) => ({ label: n, value: i }))
                         currentIndex: AppController.currentDevice
                         onActivated: (index) => AppController.currentDevice = index

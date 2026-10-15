@@ -52,13 +52,13 @@ Item {
             spacing: Ui.gap
             // Preset bar + curve + graphic card + a parametric card tall
             // enough for sliders.
-            readonly property real minHeight: 40 + 250 + 12 + graphicCard.implicitHeight + 12 + 300 + 24
+            readonly property real minHeight: 40 + 190 + 12 + graphicCard.implicitHeight + 12 + 260 + 24
 
             PresetBar { Layout.fillWidth: true }
 
             SectionCard {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 250
+                Layout.preferredHeight: 190
                 title: '频响曲线'
                 hint: AppController.spectrumEnabled
                       ? (AppController.spectrumLive ? '预测响应 + 实时频谱' : '实时频谱 · 当前无声音')
@@ -91,29 +91,47 @@ Item {
             }
 
             SectionCard {
-                Layout.fillWidth: true
                 id: graphicCard
-            // Open while there is no curve, so how to load one is on screen;
-                // it only folds away once it has something to fold.
-                collapsible: AppController.graphicLoaded
+                Layout.fillWidth: true
+                // Folded to its header while there is no curve: there is nothing
+                // in it to adjust, and the band sliders below need the room.
+                // The paste button opens it again for the paste box.
+                collapsible: true
                 active: AppController.graphicEnabled && AppController.graphicLoaded
                 title: '图形均衡'
                 hint: AppController.graphicLoaded
                       ? '31 段 1/3 倍频'
-                      : '31 段 1/3 倍频 · 需要先载入一条曲线'
+                      : '还没有曲线 · 载入 AutoEQ 的 GraphicEQ.txt'
 
-                headerRight: HusSwitch {
-                    id: graphicSwitch
-                    // Nothing to switch on until a curve is loaded: 31 bands at
-                    // 0 dB do nothing, and a switch that is on while doing nothing
-                    // is the thing that made this card look broken.
-                    enabled: AppController.graphicLoaded || AppController.graphicEnabled
-                    checked: AppController.graphicEnabled
-                    onToggled: {
-                        AppController.graphicEnabled = checked;
-                        // A refused request leaves the model where it was; the
-                        // binding the click broke has to be put back by hand.
-                        checked = Qt.binding(() => AppController.graphicEnabled);
+                // One row while there is no curve. The explanation used to be a
+                // box of its own, which pushed the band sliders below the fold
+                // at the default window size -- where they cannot be dragged.
+                headerRight: RowLayout {
+                    spacing: 10
+
+                    HusButton {
+                        visible: !AppController.graphicLoaded
+                        text: '粘贴曲线'
+                        type: HusButton.Type_Primary
+                        onClicked: {
+                            graphicCard._override = 1;
+                            pasteBox.visible = !pasteBox.visible;
+                        }
+                    }
+
+                    HusSwitch {
+                        id: graphicSwitch
+                        // Nothing to switch on until a curve is loaded: 31 bands at
+                        // 0 dB do nothing, and a switch that is on while doing nothing
+                        // is the thing that made this card look broken.
+                        enabled: AppController.graphicLoaded || AppController.graphicEnabled
+                        checked: AppController.graphicEnabled
+                        onToggled: {
+                            AppController.graphicEnabled = checked;
+                            // A refused request leaves the model where it was; the
+                            // binding the click broke has to be put back by hand.
+                            checked = Qt.binding(() => AppController.graphicEnabled);
+                        }
                     }
                 }
 
@@ -122,62 +140,11 @@ Item {
                     spacing: 8
                     opacity: (AppController.graphicEnabled || !AppController.graphicLoaded) ? 1.0 : 0.5
 
-                    // Nothing loaded: say what this is for and how to get a curve in,
-                    // instead of a strength slider that scales nothing.
-                    Rectangle {
-                        visible: !AppController.graphicLoaded
-                        Layout.fillWidth: true
-                        implicitHeight: emptyCol.implicitHeight + 28
-                        radius: Ui.smallRadius
-                        color: 'transparent'
-                        border.width: 1
-                        border.color: dropHint.containsDrag
-                                      ? HusTheme.Primary.colorPrimary
-                                      : (HusTheme.isDark ? Qt.rgba(1, 1, 1, 0.16) : Qt.rgba(0, 0, 0, 0.14))
-
-                        DropArea { id: dropHint; anchors.fill: parent
-                            onDropped: (drop) => {
-                                if (drop.hasUrls && drop.urls.length > 0)
-                                    AppController.loadGraphicEqFile(drop.urls[0]);
-                            }
-                        }
-
-                        ColumnLayout {
-                            id: emptyCol
-                            anchors.fill: parent
-                            anchors.margins: 14
-                            spacing: 8
-
-                            HusText {
-                                Layout.fillWidth: true
-                                text: '还没有曲线'
-                                font.pixelSize: Ui.body
-                                font.weight: Font.DemiBold
-                            }
-                            HusText {
-                                Layout.fillWidth: true
-                                wrapMode: Text.WordWrap
-                                font.pixelSize: Ui.label
-                                opacity: 0.6
-                                text: '这里载入的是别人做好的 GraphicEQ 曲线(比如 AutoEQ 网站上每款耳机的 GraphicEQ.txt),'
-                                      + '拟合成 31 段均衡。已经在 AutoEQ 页导入过同一副耳机的话,不需要再载入。'
-                            }
-                            RowLayout {
-                                spacing: 8
-                                HusButton {
-                                    text: '粘贴曲线'
-                                    type: HusButton.Type_Primary
-                                    onClicked: pasteBox.visible = !pasteBox.visible
-                                }
-                                HusText {
-                                    text: '或把 *GraphicEQ.txt 拖到这里'
-                                    font.pixelSize: Ui.label
-                                    opacity: 0.5
-                                }
-                            }
-                        }
+                    Note {
+                        visible: Ui.showNotes && !AppController.graphicLoaded
+                        text: '这里载入的是别人做好的 GraphicEQ 曲线(比如 AutoEQ 网站上每款耳机的 GraphicEQ.txt),拟合成 31 段均衡。'
+                              + '已经在 AutoEQ 页导入过同一副耳机的话,不需要再载入。也可以把文件直接拖到这张卡片上。'
                     }
-
                     RowLayout {
                         visible: AppController.graphicLoaded
                         Layout.fillWidth: true
