@@ -61,6 +61,12 @@ class AppController : public QObject
     Q_PROPERTY(dreamdsp::EffectsModel *effects READ effects CONSTANT)
     Q_PROPERTY(dreamdsp::OutputModel *output READ output CONSTANT)
     Q_PROPERTY(QString currentPreset READ currentPreset NOTIFY currentPresetChanged)
+    // The file the loaded curve came from, when it came from one. A curve typed
+    // into the paste box leaves this empty on purpose: there is no path to
+    // remember, and inventing one would be a promise the next start could not
+    // keep.
+    Q_PROPERTY(QString eqSourcePath READ eqSourcePath NOTIFY eqSourceChanged)
+    Q_PROPERTY(bool eqSourceExists READ eqSourceExists NOTIFY eqSourceChanged)
     Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
 
     Q_PROPERTY(double preamp READ preamp WRITE setPreamp NOTIFY preampChanged)
@@ -191,6 +197,8 @@ public:
     bool apoInSync() const;
     QString apoStatusText() const;
     QString currentPreset() const { return m_currentPreset; }
+    QString eqSourcePath() const { return m_eqSourcePath; }
+    bool eqSourceExists() const;
     bool dirty() const { return m_dirty; }
 
     double preamp() const { return m_preamp; }
@@ -252,6 +260,10 @@ public:
     // ParametricEQ.txt (AutoEQ, APO, review tables) and GraphicEQ.txt, and the
     // names people give them say nothing about which is which.
     Q_INVOKABLE bool loadEqFile(const QUrl &url);
+
+    // Re-reads the file this curve came from, so a target curve edited in place
+    // can be picked up without a second file dialog.
+    Q_INVOKABLE bool reloadEqSource();
 
     // Writes the curve that is loaded as a FiiO XML into the preset directory,
     // which is what a K17/K19 DSP client -- or another copy of DreamDSP -- can
@@ -402,6 +414,7 @@ public:
     Q_INVOKABLE bool importAutoEq(int entryIndex, bool fixedBand);
 
 signals:
+    void eqSourceChanged();
     void apoChanged();
     void devicesChanged();
     void currentDeviceChanged();
@@ -457,6 +470,7 @@ private:
     void setError(const QString &err);
     void setMessage(const QString &msg);
     void setCurrentPreset(const QString &name);
+    void setEqSource(const QString &path);
     void markDirty(bool dirty);
 
     void saveSession();
@@ -464,6 +478,13 @@ private:
     static QString sessionPath();
 
     Preset currentAsPreset() const;
+
+    // Reads a curve file and puts it on the equalizer, without touching the
+    // recorded source -- loadEqFile wraps this so the source is set only for a
+    // file that actually arrived.
+    bool applyEqFile(const QString &path);
+    // The body of importGraphicEq, shared with the file route.
+    bool applyGraphicEqText(const QString &text);
 
     // Puts an imported curve on the equalizer and says where it came from.
     // Separate from loadPreset because nothing on disk matches it yet: the
@@ -552,6 +573,7 @@ private:
     bool m_dirty = false;
     bool m_restoring = false;
     QString m_currentPreset;
+    QString m_eqSourcePath;
     // The device an imported curve named ("FIIO K17 R2R"), so exporting it again
     // says the same thing rather than inventing a provenance.
     QString m_importedModel;

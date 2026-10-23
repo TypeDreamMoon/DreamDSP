@@ -88,7 +88,7 @@ QStringList logTail(int lines)
 QString effectNames(uint32_t mask)
 {
     static const struct { uint32_t bit; const char *name; } kNames[] = {
-        { dsp::kEnEqualizer, "参数均衡" },  { dsp::kEnGraphic, "图形均衡" },
+        { dsp::kEnEqualizer, "参数均衡" },  { dsp::kEnGraphic, "图形曲线" },
         { dsp::kEnLoudness, "等响度" },     { dsp::kEnDynBass, "动态低音" },
         { dsp::kEnBass, "虚拟低音" },       { dsp::kEnExciter, "激励器" },
         { dsp::kEnTube, "电子管" },         { dsp::kEnTransient, "瞬态整形" },

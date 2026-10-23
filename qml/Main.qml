@@ -292,9 +292,15 @@ HusWindow {
                     opacity: 0.5
                     text: {
                         switch (win.page) {
-                        case 0: return '参数均衡 ' + (AppController.eqEnabled ? '开' : '关')
-                                       + ' · 图形均衡 ' + (AppController.graphicEnabled && AppController.graphicLoaded ? '开'
-                                                       : AppController.graphicLoaded ? '关' : '未载入曲线');
+                        case 0: {
+                            // One equalizer now: the graphic bank is part of it
+                            // and only worth mentioning when it has a curve.
+                            let text = '参数均衡 ' + (AppController.eqEnabled ? '开' : '关')
+                                       + ' · ' + AppController.bands.count + ' 段';
+                            if (AppController.graphicLoaded)
+                                text += ' · 图形曲线 ' + (AppController.graphicEnabled ? '开' : '关');
+                            return text;
+                        }
                         case 1: return parent.stagesOn(1);
                         case 2: return AppController.convolutionEnabled ? '脉冲响应已启用' : '没有启用脉冲响应';
                         case 3: return parent.stagesOn(3);

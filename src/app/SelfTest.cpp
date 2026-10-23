@@ -27,6 +27,7 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QSettings>
 #include <QTemporaryDir>
 #include <QTextStream>
 
@@ -912,6 +913,64 @@ int runSliderTest(QObject *rootObject)
         ctl->bands()->setGain(0, gain0);
         ctl->flushNow();
         check(std::abs(ctl->preamp() - preamp0) < 1e-6, QStringLiteral("session values restored"));
+    }
+
+    // ---- Curve source. Runs on the live session too, so everything it touches
+    // is snapshotted and put back: this exercises the real import path
+    // (file -> bands -> remembered source) rather than the parsers alone.
+    {
+        const QVector<PresetBand> savedBands = ctl->bands()->bands();
+        const double savedPreamp = ctl->preamp();
+
+        QTemporaryDir dir;
+        const QString curve = QDir(dir.path()).filePath(QStringLiteral("curve.txt"));
+        {
+            QFile f(curve);
+            f.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            f.write("Preamp: -3.0 dB\n"
+                    "Filter 1: ON PK Fc 2957 Hz Gain -5.2 dB Q 4.24\n"
+                    "Filter 2: ON PK Fc 105 Hz Gain 3.0 dB Q 0.70\n");
+        }
+
+        check(ctl->loadEqFile(QUrl::fromLocalFile(curve)),
+              QStringLiteral("a dropped file is applied"));
+        check(ctl->bands()->rowCount() == 2,
+              QStringLiteral("its bands replaced the session's (%1)").arg(ctl->bands()->rowCount()));
+        check(ctl->eqSourcePath() == curve,
+              QStringLiteral("the file it came from is remembered"));
+        check(ctl->eqSourceExists(), QStringLiteral("and it is reported as present"));
+
+        // Edited in place, then reloaded: that is the point of remembering a path.
+        {
+            QFile f(curve);
+            f.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            f.write("Preamp: -2.0 dB\n"
+                    "Filter 1: ON PK Fc 1000 Hz Gain 1.0 dB Q 1.00\n"
+                    "Filter 2: ON PK Fc 2000 Hz Gain -1.0 dB Q 1.00\n"
+                    "Filter 3: ON PK Fc 4000 Hz Gain 2.0 dB Q 1.00\n");
+        }
+        check(ctl->reloadEqSource() && ctl->bands()->rowCount() == 3,
+              QStringLiteral("reloading picks up the edited file"));
+
+        // Typed in, not opened: no file, so nothing to remember.
+        check(ctl->importGraphicEq(QStringLiteral("GraphicEQ: 20 0.0; 100 3.0; 1000 -1.0; 10000 1.0")),
+              QStringLiteral("a pasted curve is applied"));
+        check(ctl->eqSourcePath().isEmpty(),
+              QStringLiteral("a pasted curve records no source"));
+
+        ctl->clearGraphicEq();
+        ctl->bands()->setBands(savedBands);
+        ctl->setPreamp(savedPreamp);
+        ctl->flushNow();
+
+        // The path is persisted in QSettings, and the file it names is about to
+        // disappear with the temporary directory -- a dead source left behind
+        // would show up on the settings page of the next real start.
+        QSettings settings(QStringLiteral("DreamDSP"), QStringLiteral("DreamDSP"));
+        settings.remove(QStringLiteral("eqSourcePath"));
+
+        check(ctl->bands()->rowCount() == savedBands.size(),
+              QStringLiteral("the session's bands are back"));
     }
 
     out() << "\n" << (g_failures == 0 ? "PASS" : "FAIL")

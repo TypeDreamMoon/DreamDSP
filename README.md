@@ -56,7 +56,7 @@ Everything runs in DreamDSP's own APO.
 | Effect | Status |
 |---|---|
 | Parametric EQ, 32 bands, 18 filter types, double precision | done |
-| Graphic EQ, 31 ISO bands, imports AutoEQ `GraphicEQ:` curves | done |
+| Graphic EQ, 31 ISO bands, fitted from AutoEQ `GraphicEQ:` curves | in the same card as the parametric bands |
 | Preamp, per-device profiles | done |
 | AutoEQ headphone correction (20,777 curves) | done |
 | Peace `.peace` preset interop | done |
@@ -404,14 +404,25 @@ preset file, so it can be inspected or copied like any other.
 ### Curves made by someone else
 
 A shared headphone curve travels in three shapes, and *导入…* on the preset row
-(or dropping the file on the equalizer card) accepts all of them — the shape is
-decided by the contents, because the filenames say nothing:
+(or dropping the file anywhere on the 参数均衡 card) accepts all of them — the
+shape is decided by the contents, because the filenames say nothing:
 
 | Shape | Who writes it | What happens |
 |---|---|---|
 | `<FiiO_DSP …>.xml` | FiiO's K17/K19 DSP client, AutoEQ→FiiO converters | every `<eq>` band becomes a parametric band |
 | `ParametricEQ.txt` | AutoEQ, Equalizer APO, review tables | `Filter N: ON PK Fc …` lines become bands |
 | `GraphicEQ.txt` | every measurement site | fitted to the 31-band graphic bank |
+
+There is one equalizer card, not two. The third-octave bank is still a stage in
+the chain — it is what a point-curve import is fitted to — but it is not a thing
+to choose between: importing decides. When it holds a curve the card grows a
+strip for it (amount, off switch, the 31 bands, and how far the fit sits from
+the curve that was asked for); otherwise the strip is not there.
+
+A curve that came from a file remembers its path, shown on the card with a
+*重新载入* button so a target edited elsewhere can be picked up without another
+dialog. A curve typed into the paste box has no path and records none: the row
+is absent rather than pointing at a file that was never involved.
 
 *导出 XML* writes the loaded curve back out as a FiiO XML in the preset
 folder, which is what a K17/K19 DSP client — or another copy of DreamDSP —
@@ -496,7 +507,10 @@ the install directory refused, a *loaded* DLL renamed aside and replaced, and a
 file that cannot be released kept for the next start.
 
 `--slidertest` posts real `QMouseEvent`s into the live scene and asserts that
-band 0's model value follows the drag, then restores it. Dragging is the one
+band 0's model value follows the drag, then restores it. It also drives the
+curve-source path on the live session — import a file, edit it, reload, then
+paste text and check nothing was recorded — and puts the session's bands back
+afterwards. Dragging is the one
 interaction a screenshot cannot verify — and it was silently broken twice, so
 it gets a test. Note it walks the **visual** tree (`childItems()`), not
 `QObject::findChildren`: Repeater delegates are not QObject children of the

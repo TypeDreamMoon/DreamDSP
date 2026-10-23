@@ -496,6 +496,7 @@ void AppController::refreshDevices()
 void AppController::resetAll()
 {
     m_bands.zeroGains();
+    setEqSource(QString());
     setPreamp(0.0);
 
     // The effects too. They used to be left alone because they lived in QML and
@@ -1672,6 +1673,7 @@ void AppController::loadPreset(int row)
     m_restoring = false;
 
     setCurrentPreset(p.name);
+    setEqSource(QString());   // the curve is a preset now, not that file
     markDirty(false);
     setError({});
     setMessage(QStringLiteral("已载入「%1」· %2 段").arg(p.name).arg(p.bands.size()));
@@ -1754,7 +1756,17 @@ bool AppController::applyImportedPreset(const Preset &preset, const QString &sou
 bool AppController::loadEqFile(const QUrl &url)
 {
     const QString path = url.isLocalFile() ? url.toLocalFile() : url.toString();
+    if (!applyEqFile(path))
+        return false;
 
+    // Only a curve that actually arrived gets a source. A file that failed to
+    // parse leaves the previous one alone rather than pointing at itself.
+    setEqSource(path);
+    return true;
+}
+
+bool AppController::applyEqFile(const QString &path)
+{
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
         setError(QStringLiteral("打不开 %1:%2").arg(path, f.errorString()));
@@ -1807,7 +1819,7 @@ bool AppController::loadEqFile(const QUrl &url)
 
     // Everything else is a point-by-point curve, which the graphic equalizer
     // already knows how to fit.
-    return importGraphicEq(text);
+    return applyGraphicEqText(text);
 }
 
 bool AppController::exportFiiXml(const QString &name)
@@ -1842,6 +1854,38 @@ bool AppController::exportFiiXml(const QString &name)
     return true;
 }
 
+// ----------------------------------------------------------- curve source
+
+bool AppController::eqSourceExists() const
+{
+    return !m_eqSourcePath.isEmpty() && QFileInfo::exists(m_eqSourcePath);
+}
+
+void AppController::setEqSource(const QString &path)
+{
+    if (m_eqSourcePath == path)
+        return;
+    m_eqSourcePath = path;
+
+    QSettings s(QStringLiteral("DreamDSP"), QStringLiteral("DreamDSP"));
+    s.setValue(QStringLiteral("eqSourcePath"), path);
+
+    emit eqSourceChanged();
+}
+
+bool AppController::reloadEqSource()
+{
+    if (m_eqSourcePath.isEmpty()) {
+        setMessage(QStringLiteral("当前曲线不是从文件载入的"));
+        return false;
+    }
+    if (!QFileInfo::exists(m_eqSourcePath)) {
+        setError(QStringLiteral("找不到 %1 —— 文件可能被移动或删除").arg(m_eqSourcePath));
+        return false;
+    }
+    return loadEqFile(QUrl::fromLocalFile(m_eqSourcePath));
+}
+
 // ------------------------------------------------------- graphic equalizer
 
 bool AppController::graphicLoaded() const
@@ -1871,6 +1915,15 @@ QVariantList AppController::graphicBands() const
 }
 
 bool AppController::importGraphicEq(const QString &text)
+{
+    // Typed in, not opened: there is no file, so nothing to remember.
+    setEqSource(QString());
+    return applyGraphicEqText(text);
+}
+
+// The paste box and the file route share this, and only the file route knows
+// where the curve came from -- so the source is set by the caller.
+bool AppController::applyGraphicEqText(const QString &text)
 {
     const GraphicCurve curve = parseGraphicCurve(text);
     if (curve.size() < 2) {
@@ -1933,7 +1986,7 @@ void AppController::setGraphicEnabled(bool on)
     // Switching on a bank of 31 zeroes did nothing and still read as "on"
     // everywhere a stage is counted. Off is always allowed; on needs a curve.
     if (on && !graphicLoaded()) {
-        setMessage(QStringLiteral("图形均衡还没有曲线 —— 先粘贴或拖入一条 GraphicEQ 曲线"));
+        setMessage(QStringLiteral("图形曲线还没有内容 —— 先粘贴或拖入一条 GraphicEQ 曲线"));
         emit graphicChanged();   // put the switch that asked back where it was
         emit chainChanged();
         return;
@@ -1970,7 +2023,7 @@ struct StageInfo {
 // Index-aligned with the kStage* ids, so a lookup is a subscript.
 const StageInfo kStages[] = {
     { dsp::kStageEqualizer,   "参数均衡",   "32 段 · 18 种滤波器",    0 },
-    { dsp::kStageGraphic,     "图形均衡",   "31 段 · 从曲线导入",     0 },
+    { dsp::kStageGraphic,     "图形曲线",   "31 段 · 和参数段一起装在「参数均衡」里", 0 },
     { dsp::kStageLoudness,    "等响度补偿", "跟随系统音量",           3 },
     { dsp::kStageDynBass,     "动态低音",   "按剩余余量提升低频",     1 },
     { dsp::kStageBass,        "虚拟低音",   "合成谐波,小喇叭用",     1 },
@@ -2377,6 +2430,12 @@ void AppController::restoreSession()
         m_convolutionEnabled = s.value(QStringLiteral("convolutionEnabled"), false).toBool();
     }
     m_currentPreset = s.value(QStringLiteral("currentPreset")).toString();
+
+    // Only if the file is still there: a remembered path to something deleted
+    // would offer a "重新载入" that cannot work.
+    const QString source = s.value(QStringLiteral("eqSourcePath")).toString();
+    if (!source.isEmpty() && QFileInfo::exists(source))
+        m_eqSourcePath = source;
     m_pendingDeviceId = s.value(QStringLiteral("deviceId")).toString();
 
     Preset p;
@@ -2390,6 +2449,7 @@ void AppController::restoreSession()
     emit eqEnabledChanged();
     emit preampChanged();
     emit currentPresetChanged();
+    emit eqSourceChanged();
     emit generatedTextChanged();
 }
 

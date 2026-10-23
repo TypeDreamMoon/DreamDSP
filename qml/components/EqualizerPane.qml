@@ -5,6 +5,13 @@ import DreamDSP
 
 // The equalizer: presets, predicted response with an optional live spectrum,
 // and the bands themselves as either sliders or a parameter table.
+//
+// One card, not two. The third-octave graphic bank that used to sit in a card of
+// its own above this one is still a stage in the chain -- it is what a
+// point-by-point curve (AutoEQ's GraphicEQ.txt) gets fitted to -- but it is not
+// a thing the user picks between. Importing a curve chooses for them, and the
+// only control it needs is an amount and an off switch, both of which live in
+// the strip that appears when there is a curve.
 Item {
     id: root
 
@@ -33,9 +40,9 @@ Item {
         return r;
     }
 
-    // Scrolls when the cards do not fit -- the empty graphic card is taller
-    // than the loaded one, and the band sliders must keep a usable height
-    // whatever else is on the page.
+    // Scrolls when the cards do not fit -- the paste box and the graphic strip
+    // are both taller than what is left of the window, and the band sliders must
+    // keep a usable height whatever else is on the page.
     Flickable {
         id: flick
         anchors.fill: parent
@@ -50,9 +57,9 @@ Item {
             width: flick.width - 12
             height: flick.contentHeight
             spacing: Ui.gap
-            // Preset bar + curve + graphic card + a parametric card tall
-            // enough for sliders.
-            readonly property real minHeight: 40 + 190 + 12 + graphicCard.implicitHeight + 12 + 260 + 24
+            // Preset bar + curve + the equalizer card tall enough for sliders,
+            // a source line and the graphic strip when one is loaded.
+            readonly property real minHeight: 40 + 190 + 12 + 470 + 24
 
             PresetBar { Layout.fillWidth: true }
 
@@ -91,135 +98,156 @@ Item {
             }
 
             SectionCard {
-                id: graphicCard
                 Layout.fillWidth: true
-                // Folded to its header while there is no curve: there is nothing
-                // in it to adjust, and the band sliders below need the room.
-                // The paste button opens it again for the paste box.
-                collapsible: true
-                active: AppController.graphicEnabled && AppController.graphicLoaded
-                title: '图形均衡'
-                hint: AppController.graphicLoaded
-                      ? '31 段 1/3 倍频'
-                      : '还没有曲线 · 拖入 GraphicEQ.txt / 飞傲调音文件 .xml 都可以'
+                Layout.fillHeight: true
+                title: '参数均衡'
+                hint: {
+                    const bands = AppController.bands.count;
+                    const base = root.bandView === 0 ? '拖动滑块调整增益 · ±15 dB'
+                                                     : '逐段编辑频率 / 增益 / Q / 滤波器类型';
+                    return AppController.graphicLoaded
+                           ? base + ' · 另有一条 31 段图形曲线'
+                           : base + ' · ' + bands + ' 段';
+                }
 
-                // One row while there is no curve. The explanation used to be a
-                // box of its own, which pushed the band sliders below the fold
-                // at the default window size -- where they cannot be dragged.
                 headerRight: RowLayout {
                     spacing: 10
 
+                    // Only while there is no curve: once one is loaded, "换一条"
+                    // in the strip below is where this lives.
                     HusButton {
                         visible: !AppController.graphicLoaded
                         text: '粘贴曲线'
-                        type: HusButton.Type_Primary
-                        onClicked: {
-                            graphicCard._override = 1;
-                            pasteBox.visible = !pasteBox.visible;
-                        }
+                        onClicked: pasteBox.visible = !pasteBox.visible
+                    }
+
+                    HusSegmented {
+                        options: [{ label: '图形' }, { label: '参数' }]
+                        Component.onCompleted: currentIndex = root.bandView
+                        onCurrentIndexChanged: root.bandView = currentIndex
                     }
 
                     HusSwitch {
-                        id: graphicSwitch
-                        // Nothing to switch on until a curve is loaded: 31 bands at
-                        // 0 dB do nothing, and a switch that is on while doing nothing
-                        // is the thing that made this card look broken.
-                        enabled: AppController.graphicLoaded || AppController.graphicEnabled
-                        checked: AppController.graphicEnabled
-                        onToggled: {
-                            AppController.graphicEnabled = checked;
-                            // A refused request leaves the model where it was; the
-                            // binding the click broke has to be put back by hand.
-                            checked = Qt.binding(() => AppController.graphicEnabled);
-                        }
+                        checked: AppController.eqEnabled
+                        onToggled: AppController.eqEnabled = checked
                     }
                 }
 
                 ColumnLayout {
                     anchors.fill: parent
                     spacing: 8
-                    opacity: (AppController.graphicEnabled || !AppController.graphicLoaded) ? 1.0 : 0.5
 
-                    Note {
-                        visible: Ui.showNotes && !AppController.graphicLoaded
-                        text: '这里载入的是别人做好的曲线：AutoEQ 网站的 GraphicEQ.txt 会拟合成 31 段均衡；'
-                              + '别人分享的飞傲调音文件(.xml)或 ParametricEQ.txt 会直接变成上面的参数均衡段。'
-                              + '在 AutoEQ 页导入过同一副耳机的话,不需要再载入。也可以把文件直接拖到这张卡片上。'
-                    }
+                    // ------------------------------------------------ source
+                    // Where the curve came from, when it came from a file. A
+                    // curve typed into the paste box has no path and no row:
+                    // there is nothing to reopen.
                     RowLayout {
-                        visible: AppController.graphicLoaded
+                        Layout.fillWidth: true
+                        spacing: 8
+                        visible: AppController.eqSourcePath.length > 0
+
+                        HusText {
+                            text: '来源'
+                            font.pixelSize: 11
+                            opacity: 0.55
+                        }
+
+                        HusText {
+                            Layout.fillWidth: true
+                            text: AppController.eqSourcePath
+                            elide: Text.ElideMiddle
+                            font.pixelSize: 11
+                            opacity: AppController.eqSourceExists ? 0.8 : 0.45
+                            color: AppController.eqSourceExists
+                                   ? HusTheme.Primary.colorTextBase
+                                   : HusTheme.Primary.colorWarning
+                        }
+
+                        HusButton {
+                            text: '重新载入'
+                            enabled: AppController.eqSourceExists
+                            onClicked: AppController.reloadEqSource()
+
+                            HusToolTip {
+                                parent: parent
+                                visible: parent.hovered
+                                text: (AppController.eqSourceExists
+                                       ? AppController.eqSourcePath
+                                       : AppController.eqSourcePath + ' —— 文件不在了')
+                                      + '\n按这个路径再读一次,外部改过文件时用'
+                            }
+                        }
+                    }
+
+                    // -------------------------------------------- graphic bank
+                    // Present only when a point-by-point curve was fitted to the
+                    // third-octave bank. It is a stage of its own underneath, but
+                    // there is nothing to choose here: the import chose it.
+                    RowLayout {
                         Layout.fillWidth: true
                         spacing: 10
+                        visible: AppController.graphicLoaded
 
-                        HusText { text: '强度'; font.pixelSize: 12; opacity: 0.7 }
+                        HusText {
+                            text: '图形曲线'
+                            font.pixelSize: 12
+                            opacity: 0.7
+                        }
+
+                        HusText {
+                            text: '31 段 · 与目标偏差 ' + AppController.graphicFitError.toFixed(2) + ' dB'
+                            font.pixelSize: 11
+                            opacity: 0.5
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        HusText { text: '强度'; font.pixelSize: 11; opacity: 0.6 }
+
                         Fader {
-                            Layout.fillWidth: true
+                            Layout.preferredWidth: 150
                             min: 0; max: 1; stepSize: 0.01
                             value: AppController.graphicAmount
                             onFirstMoved: AppController.graphicAmount = currentValue
                         }
+
                         HusText {
                             text: Math.round(AppController.graphicAmount * 100) + '%'
-                            font.pixelSize: 12
-                            Layout.preferredWidth: 42
+                            font.pixelSize: 11
+                            Layout.preferredWidth: 38
                         }
+
                         HusButton {
                             text: '换一条'
                             onClicked: pasteBox.visible = !pasteBox.visible
                         }
+
                         HusButton {
                             text: '清除'
-                            enabled: AppController.graphicLoaded
                             onClicked: AppController.clearGraphicEq()
                         }
-                    }
 
-                    HusText {
-                        visible: AppController.graphicLoaded
-                        Layout.fillWidth: true
-                        wrapMode: Text.WordWrap
-                        font.pixelSize: 11
-                        opacity: 0.55
-                        // The gap between what was asked for and what a third-octave
-                        // bank can produce. Stated, because it is a real limit and a
-                        // silent one would be worse.
-                        text: '已载入曲线 · 与目标最大偏差 '
-                              + AppController.graphicFitError.toFixed(2) + ' dB'
-                    }
-
-                    ColumnLayout {
-                        id: pasteBox
-                        visible: false
-                        Layout.fillWidth: true
-                        spacing: 6
-
-                        HusInput {
-                            id: curveText
-                            Layout.fillWidth: true
-                            placeholderText: 'GraphicEQ: 20 -1.5; 25 -1.4; 31.5 -1.3; ...'
-                        }
-                        RowLayout {
-                            spacing: 8
-                            HusButton {
-                                text: '载入'
-                                type: HusButton.Type_Primary
-                                onClicked: {
-                                    if (AppController.importGraphicEq(curveText.text))
-                                        pasteBox.visible = false;
-                                }
-                            }
-                            HusText {
-                                text: '也可以把 *GraphicEQ.txt 直接拖到这张卡片上'
-                                font.pixelSize: 11
-                                opacity: 0.5
+                        HusSwitch {
+                            id: graphicSwitch
+                            // 31 bands at 0 dB do nothing, so the switch follows
+                            // what is loaded rather than the other way round.
+                            enabled: AppController.graphicLoaded || AppController.graphicEnabled
+                            checked: AppController.graphicEnabled
+                            onToggled: {
+                                AppController.graphicEnabled = checked;
+                                // A refused request leaves the model where it
+                                // was; the binding the click broke has to be put
+                                // back by hand.
+                                checked = Qt.binding(() => AppController.graphicEnabled);
                             }
                         }
                     }
 
-                    // The 31 bands as they came out of the fit.
+                    // The 31 bands as they came out of the fit, small: the
+                    // sliders below are where the curve gets adjusted.
                     RowLayout {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 74
+                        Layout.preferredHeight: 56
                         spacing: 2
                         visible: AppController.graphicLoaded
 
@@ -233,7 +261,7 @@ Item {
                                 Rectangle {
                                     anchors.horizontalCenter: parent.horizontalCenter
                                     width: Math.max(3, parent.width - 3)
-                                    // Zero sits on the mid-line; +-15 dB fills the card.
+                                    // Zero sits on the mid-line; +-15 dB fills the row.
                                     readonly property real half: parent.height / 2
                                     readonly property real px:
                                         Math.max(-half, Math.min(half, modelData.gain / 15 * half))
@@ -241,145 +269,160 @@ Item {
                                     y: px >= 0 ? half - px : half
                                     radius: 2
                                     color: HusTheme.Primary.colorPrimary
-                                    opacity: 0.85
+                                    opacity: AppController.graphicEnabled ? 0.85 : 0.35
                                 }
                             }
                         }
+                    }
+
+                    // ------------------------------------------------- paste
+                    ColumnLayout {
+                        id: pasteBox
+                        visible: false
+                        Layout.fillWidth: true
+                        spacing: 6
+
+                        HusInput {
+                            id: curveText
+                            Layout.fillWidth: true
+                            placeholderText: 'GraphicEQ: 20 -1.5; 25 -1.4; 31.5 -1.3; …'
+                        }
+                        RowLayout {
+                            spacing: 8
+                            HusButton {
+                                text: '载入'
+                                type: HusButton.Type_Primary
+                                onClicked: {
+                                    if (AppController.importGraphicEq(curveText.text))
+                                        pasteBox.visible = false;
+                                }
+                            }
+                            HusText {
+                                text: '粘贴的曲线不记录来源;文件请直接拖到这张卡片上'
+                                font.pixelSize: 11
+                                opacity: 0.5
+                            }
+                        }
+                    }
+
+                    // ------------------------------------------------- bands
+                    StackLayout {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        currentIndex: root.bandView
+
+                        RowLayout {
+                            spacing: 6
+
+                            // The preamp belongs with the bands: it is just another
+                            // gain stage in the same chain.
+                            ColumnLayout {
+                                Layout.fillHeight: true
+                                Layout.preferredWidth: 44
+                                spacing: 6
+
+                                HusText {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: (AppController.preamp > 0.05 ? '+' : '')
+                                          + AppController.preamp.toFixed(1)
+                                    font.pixelSize: 11
+                                    opacity: Math.abs(AppController.preamp) < 0.05 ? 0.4 : 0.95
+                                    color: Math.abs(AppController.preamp) < 0.05
+                                           ? HusTheme.Primary.colorTextBase
+                                           : HusTheme.Primary.colorWarning
+                                }
+
+                                Fader {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    Layout.fillHeight: true
+                                    orientation: Qt.Vertical
+                                    min: -30
+                                    max: 10
+                                    stepSize: 0.1
+                                    value: AppController.preamp
+                                    onFirstMoved: AppController.preamp = currentValue
+                                    onFirstReleased: AppController.preamp = currentValue
+                                }
+
+                                HusText {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: '前置'
+                                    font.pixelSize: 10
+                                    opacity: 0.6
+                                }
+
+                                Item { Layout.preferredHeight: 1 }
+                            }
+
+                            HusDivider {
+                                Layout.fillHeight: true
+                                Layout.rightMargin: 8
+                                orientation: Qt.Vertical
+                            }
+
+                            // Positioned by hand rather than by the row: a layout
+                            // places children in the order they were created, and
+                            // these have to be in frequency order instead.
+                            Item {
+                                id: stripArea
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                readonly property real pitch:
+                                    strips.count > 0 ? width / strips.count : width
+
+                                Repeater {
+                                    id: strips
+                                    model: AppController.bands
+                                    onCountChanged: Qt.callLater(root.refreshFreqs)
+
+                                    delegate: BandStrip {
+                                        required property var model
+                                        required property int index
+                                        readonly property real freq: model.frequency
+                                        onFreqChanged: Qt.callLater(root.refreshFreqs)
+
+                                        x: root.rankOf(index) * stripArea.pitch
+                                        width: stripArea.pitch
+                                        height: stripArea.height
+                                        Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+
+                                        bandIndex: index
+                                        gain: model.gain
+                                        label: model.label
+                                        range: 15
+                                        onGainEdited: (v) => AppController.bands.setGain(index, v)
+                                    }
+                                }
+                            }
+                        }
+
+                        BandTable { }
                     }
                 }
 
                 // Second child of the card, not of the layout above it: a DropArea
                 // anchored inside a ColumnLayout is undefined behaviour, and the
                 // card's content area is a plain Item that takes anchors happily.
-                // It has to come after the layout -- SectionCard sizes itself from
-                // children[0].
+                // It has to come after the layout -- SectionCard sizes itself
+                // from children[0].
+                //
+                // Anything lands here: a FiiO XML, an AutoEQ parametric text, a
+                // GraphicEQ curve, a .peace preset. loadEqFile decides from the
+                // contents, because the names say nothing.
                 DropArea {
                     anchors.fill: parent
+                    // Below the controls, not on top of them: an item stacked
+                    // above another takes the mouse press even when it does not
+                    // use it, and a card-sized target that swallowed clicks
+                    // would make every slider in this card dead. Drops are
+                    // routed to the DropArea whatever its z is.
+                    z: -1
                     onDropped: (drop) => {
-                        // Anything: a FiiO XML, an AutoEQ parametric text, a
-                        // GraphicEQ curve. loadEqFile decides from the contents.
                         if (drop.hasUrls && drop.urls.length > 0)
                             AppController.loadEqFile(drop.urls[0]);
                     }
                 }
             }
-
-            SectionCard {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                title: '参数均衡'
-                hint: root.bandView === 0 ? '拖动滑块调整增益 · ±15 dB'
-                                          : '逐段编辑频率 / 增益 / Q / 滤波器类型'
-
-                // The view selector and the stage's own switch. Every other effect
-                // in the application has one of these; this one did not, which is
-                // why the parametric equalizer looked like it was always on.
-                headerRight: RowLayout {
-                    spacing: 10
-                    HusSegmented {
-                        options: [{ label: '图形' }, { label: '参数' }]
-                        Component.onCompleted: currentIndex = root.bandView
-                        onCurrentIndexChanged: root.bandView = currentIndex
-                    }
-                    HusSwitch {
-                        checked: AppController.eqEnabled
-                        onToggled: AppController.eqEnabled = checked
-                    }
-                }
-
-                StackLayout {
-                    anchors.fill: parent
-                    currentIndex: root.bandView
-
-                    RowLayout {
-                        spacing: 6
-
-                        // The preamp belongs with the bands: it is just another
-                        // gain stage in the same chain.
-                        ColumnLayout {
-                            Layout.fillHeight: true
-                            Layout.preferredWidth: 44
-                            spacing: 6
-
-                            HusText {
-                                Layout.alignment: Qt.AlignHCenter
-                                text: (AppController.preamp > 0.05 ? '+' : '')
-                                      + AppController.preamp.toFixed(1)
-                                font.pixelSize: 11
-                                opacity: Math.abs(AppController.preamp) < 0.05 ? 0.4 : 0.95
-                                color: Math.abs(AppController.preamp) < 0.05
-                                       ? HusTheme.Primary.colorTextBase
-                                       : HusTheme.Primary.colorWarning
-                            }
-
-                            Fader {
-                                Layout.alignment: Qt.AlignHCenter
-                                Layout.fillHeight: true
-                                orientation: Qt.Vertical
-                                min: -30
-                                max: 10
-                                stepSize: 0.1
-                                value: AppController.preamp
-                                onFirstMoved: AppController.preamp = currentValue
-                                onFirstReleased: AppController.preamp = currentValue
-                            }
-
-                            HusText {
-                                Layout.alignment: Qt.AlignHCenter
-                                text: '前置'
-                                font.pixelSize: 10
-                                opacity: 0.6
-                            }
-
-                            Item { Layout.preferredHeight: 1 }
-                        }
-
-                        HusDivider {
-                            Layout.fillHeight: true
-                            Layout.rightMargin: 8
-                            orientation: Qt.Vertical
-                        }
-
-                        // Positioned by hand rather than by the row: a layout
-                        // places children in the order they were created, and
-                        // these have to be in frequency order instead.
-                        Item {
-                            id: stripArea
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            readonly property real pitch:
-                                strips.count > 0 ? width / strips.count : width
-
-                            Repeater {
-                                id: strips
-                                model: AppController.bands
-                                onCountChanged: Qt.callLater(root.refreshFreqs)
-
-                                delegate: BandStrip {
-                                    required property var model
-                                    required property int index
-                                    readonly property real freq: model.frequency
-                                    onFreqChanged: Qt.callLater(root.refreshFreqs)
-
-                                    x: root.rankOf(index) * stripArea.pitch
-                                    width: stripArea.pitch
-                                    height: stripArea.height
-                                    Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-
-                                    bandIndex: index
-                                    gain: model.gain
-                                    label: model.label
-                                    range: 15
-                                    onGainEdited: (v) => AppController.bands.setGain(index, v)
-                                }
-                            }
-                        }
-                    }
-
-                    BandTable { }
-                }
-            }
-            }
+        }
     }
-
 }
