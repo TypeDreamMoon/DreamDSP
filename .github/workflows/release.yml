@@ -57,7 +57,28 @@ jobs:
         with:
           arch: x64
 
+      # HuskarUI is a dependency that almost never changes, and rebuilding it
+      # every release produced DLLs that differ byte for byte from the last
+      # release's -- so a file-level delta carried 6 MB of them every time for
+      # no reason. Keyed on the submodule's own commit, so a bump rebuilds.
+      - name: HuskarUI revision
+        id: huskarui
+        shell: pwsh
+        run: |
+          $line = (git submodule status third_party/HuskarUI).Trim()
+          $rev = $line.Split(' ')[0].TrimStart('+', '-')
+          "rev=$rev" | Out-File -Append $env:GITHUB_OUTPUT
+          Write-Host "HuskarUI at $rev"
+
+      - name: Restore the HuskarUI build
+        id: huskarui-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/HuskarUI-install
+          key: huskarui-v1-${{ steps.huskarui.outputs.rev }}-qt${{ env.QT_VERSION }}
+
       - name: Build HuskarUI
+        if: steps.huskarui-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           # Installed into the working tree rather than into the Qt SDK, so the
@@ -70,6 +91,26 @@ jobs:
             -DINSTALL_HUSKARUI_IN_DEFAULT_LOCATION=OFF
           cmake --build build/huskarui --parallel
           cmake --install build/huskarui
+
+      - name: Save the HuskarUI build
+        if: steps.huskarui-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: third_party/HuskarUI-install
+          key: huskarui-v1-${{ steps.huskarui.outputs.rev }}-qt${{ env.QT_VERSION }}
+
+      # A cache that restored but is missing its config (an interrupted save,
+      # an eviction mid-extract) must not be mistaken for a built dependency.
+      - name: Check the HuskarUI install
+        shell: pwsh
+        run: |
+          $config = "third_party/HuskarUI-install/lib/cmake/HuskarUI/HuskarUIConfig.cmake"
+          $qml    = "third_party/HuskarUI-install/qml/HuskarUI/qmldir"
+          if (-not (Test-Path $config) -or -not (Test-Path $qml)) {
+            throw "HuskarUI install incomplete: $config or $qml missing"
+          }
+          $hits = "${{ steps.huskarui-cache.outputs.cache-hit }}"
+          Write-Host "HuskarUI install present (cache hit: $hits)"
 
       - name: Configure
         shell: pwsh
