@@ -299,11 +299,18 @@ Item {
                         wrapMode: Text.WordWrap
                         font.pixelSize: 12
                         text: '新版本 ' + AppController.updates.latestVersion
-                              + (AppController.updates.downloaded
-                                 ? ' 已下载并通过 SHA-256 校验'
-                                 : (AppController.updates.busy
-                                    ? ' 下载中 ' + AppController.updates.downloadPercent + '%'
-                                    : ' 可用'))
+                              + (AppController.updates.deltaStaged
+                                 ? ' 的增量更新已下载并通过 SHA-256 校验'
+                                 : (AppController.updates.deltaAvailable
+                                    ? ' 可用 · 增量更新只需 '
+                                      + AppController.updates.deltaMegabytes.toFixed(1) + ' MB'
+                                      + '（不下载整个安装包）'
+                                    : (AppController.updates.downloaded
+                                       ? ' 已下载并通过 SHA-256 校验'
+                                       : (AppController.updates.busy
+                                          ? ' 下载中 '
+                                            + AppController.updates.downloadPercent + '%'
+                                          : ' 可用'))))
                     }
 
                     HusButton {
@@ -315,7 +322,11 @@ Item {
                     }
 
                     HusButton {
-                        text: '安装并重启'
+                        // A file-level update cannot be applied while this copy
+                        // has those files mapped, so it is staged and applied
+                        // on the next start -- which main() then does by
+                        // reopening the window.
+                        text: AppController.updates.deltaStaged ? '退出并更新' : '安装并重启'
                         type: HusButton.Type_Primary
                         visible: AppController.updates.downloaded
                         onClicked: AppController.updates.installNow()
@@ -330,8 +341,13 @@ Item {
                     // Said plainly rather than left as a surprise: installing
                     // replaces a component that lives inside audiodg.exe, so
                     // the audio service restarts and the machine goes quiet.
-                    text: '安装会关闭 DreamDSP 并重启音频服务,全机声音会中断一瞬 —— '
-                          + '不会在你没点之前自动进行。'
+                    // A file-level update swaps the program's own files at
+                    // start-up and does not touch the audio service.
+                    text: AppController.updates.deltaStaged
+                          ? '退出后自动重新打开，新版本就会生效。'
+                            + '若音频组件也有更新，到「系统音频」页重装一次即可。'
+                          : '安装会关闭 DreamDSP 并重启音频服务,全机声音会中断一瞬 —— '
+                            + '不会在你没点之前自动进行。'
                 }
             }
 

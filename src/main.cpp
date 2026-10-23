@@ -1,7 +1,9 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
+#include <QProcess>
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
 #include <QStringList>
@@ -11,6 +13,7 @@
 
 #include "app/AppController.h"
 #include "app/SelfTest.h"
+#include "core/FileUpdate.h"
 #include "platform/ApoInstaller.h"
 #include "platform/AudioDevices.h"
 #include "platform/SingleInstance.h"
@@ -202,6 +205,62 @@ int main(int argc, char *argv[])
     if (diagnostic || args.contains(QStringLiteral("--playtone")))
         qInstallMessageHandler(logToStderr);
 
+    {
+        // --update-report <container>: what the workflow published, as the
+        // updater will read it. A release can be checked against its own asset
+        // without downloading it twice or installing anything.
+        const int at = args.indexOf(QStringLiteral("--update-report"));
+        if (at >= 0) {
+            attachConsoleIfNeeded();
+            if (at + 1 >= args.size()) {
+                std::puts("--update-report needs a container path");
+                return 2;
+            }
+            dreamdsp::FileUpdate pkg;
+            QString err;
+            if (!dreamdsp::FileUpdatePackage::read(args.at(at + 1), &pkg, &err)) {
+                std::printf("error     %s\n", err.toLocal8Bit().constData());
+                std::fflush(stdout);
+                return 1;
+            }
+            std::printf("version   %s\n", pkg.version.toLocal8Bit().constData());
+            std::printf("base      %s\n", pkg.base.toLocal8Bit().constData());
+            std::printf("files     %d\n", int(pkg.files.size()));
+            std::printf("remove    %d\n", int(pkg.remove.size()));
+            std::printf("payload   %lld bytes\n", static_cast<long long>(pkg.payloadSize()));
+            for (const dreamdsp::FileUpdateEntry &e : std::as_const(pkg.files)) {
+                std::printf("  %-52s %10lld  %s\n", e.path.toLocal8Bit().constData(),
+                            static_cast<long long>(e.size), e.sha256.toLocal8Bit().constData());
+            }
+            for (const QString &r : std::as_const(pkg.remove))
+                std::printf("  - %s\n", r.toLocal8Bit().constData());
+            std::fflush(stdout);
+            return 0;
+        }
+    }
+
+    // Before the window, before anything is read out of the program directory:
+    // a downloaded update is swapped in here. Qt and HuskarUI are already
+    // mapped by now -- the loader ran before main -- which is why the swap
+    // renames the old files aside instead of trying to overwrite them; the new
+    // ones are what the next start loads. Failures are kept and retried on the
+    // following start rather than reported and abandoned.
+    {
+        const dreamdsp::FileUpdatePackage::ApplyResult update =
+            dreamdsp::FileUpdatePackage::applyPending(QCoreApplication::applicationDirPath());
+        if (update.applied || !update.error.isEmpty()) {
+            if (diagnostic) {
+                std::fprintf(stderr, "[update] %s\n",
+                             update.error.isEmpty()
+                                 ? qPrintable(QStringLiteral("applied %1 (%2 files)")
+                                                  .arg(update.version)
+                                                  .arg(update.replaced.size()))
+                                 : qPrintable(update.error));
+                std::fflush(stderr);
+            }
+        }
+    }
+
     dreamdsp::SingleInstance instance;
     if (!diagnostic && !instance.acquire())
         return 0;   // an instance was already running and has been raised
@@ -376,5 +435,16 @@ int main(int argc, char *argv[])
 
     if (comReady && hr != RPC_E_CHANGED_MODE)
         ::CoUninitialize();
+
+    // "Install and restart" writes this before asking us to quit. Applied
+    // updates normally need nothing but a restart, and making the user hunt for
+    // the shortcut afterwards is how an update gets left half-installed.
+    {
+        const QString marker = QDir(dreamdsp::FileUpdatePackage::stageDirectory())
+                                   .filePath(QStringLiteral("restart-after-update"));
+        if (QFileInfo::exists(marker) && QFile::remove(marker))
+            QProcess::startDetached(QCoreApplication::applicationFilePath(), QStringList());
+    }
+
     return rc;
 }

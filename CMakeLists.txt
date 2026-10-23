@@ -113,6 +113,7 @@ qt_add_qml_module(DreamDSP
         src/core/ApoConfig.h           src/core/ApoConfig.cpp
         src/core/PeacePreset.h         src/core/PeacePreset.cpp
         src/core/FiiEqXml.h            src/core/FiiEqXml.cpp
+        src/core/FileUpdate.h          src/core/FileUpdate.cpp
         src/core/ParametricEqText.h    src/core/ParametricEqText.cpp
         src/core/DreamPreset.h         src/core/DreamPreset.cpp
         src/core/GraphicCurve.h        src/core/GraphicCurve.cpp
@@ -168,6 +169,14 @@ target_compile_definitions(DreamDSP PRIVATE
     NOMINMAX
     WIN32_LEAN_AND_MEAN
 )
+
+# A build cut from a tag is the version a delta can be applied on top of; an
+# untagged or dirty tree only says which commit it is, and patching files from
+# somebody else's release into it would be a lie the updater can detect but not
+# repair.
+if(DREAMDSP_IS_RELEASE)
+    target_compile_definitions(DreamDSP PRIVATE DREAMDSP_IS_RELEASE=1)
+endif()
 
 target_link_libraries(DreamDSP PRIVATE
     Qt6::Quick

@@ -9,6 +9,7 @@
 #include "core/Fft.h"
 #include "GraphicEq.h"
 #include "core/DreamPreset.h"
+#include "core/FileUpdate.h"
 #include "core/FiiEqXml.h"
 #include "core/GraphicCurve.h"
 #include "core/ParametricEqText.h"
@@ -20,6 +21,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QDirIterator>
 #include <QFileInfo>
 #include <QMouseEvent>
 #include <QQmlEngine>
@@ -30,6 +32,8 @@
 
 #include <algorithm>
 #include <cmath>
+
+#include <windows.h>
 #include <cstring>
 #include <functional>
 
@@ -1038,6 +1042,287 @@ void testEqImport()
           << Qt::endl;
 }
 
+// --------------------------------------------------- incremental updates
+
+void testFileUpdate()
+{
+    out() << "\n[incremental update]" << Qt::endl;
+
+    QTemporaryDir tmp;
+    if (!tmp.isValid()) {
+        check(false, QStringLiteral("temporary directory"));
+        return;
+    }
+
+    const QDir root(tmp.path());
+    const QString payloadDir = root.filePath(QStringLiteral("payload"));
+    const QString installDir = root.filePath(QStringLiteral("install"));
+    const QString stageDir = root.filePath(QStringLiteral("stage"));
+    QDir().mkpath(installDir);
+
+    const auto writeFile = [](const QString &path, const QByteArray &bytes) {
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            return false;
+        return f.write(bytes) == bytes.size();
+    };
+    const auto readFile = [](const QString &path) {
+        QFile f(path);
+        return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+    };
+
+    // The release's payload: the files that changed, and nothing else. A delta
+    // that carried the 40 MB of Qt runtime would not be worth having.
+    writeFile(QDir(payloadDir).filePath(QStringLiteral("DreamDSP.exe")),
+              QByteArray("new exe bytes"));
+    writeFile(QDir(payloadDir).filePath(QStringLiteral("qml/extra.qml")),
+              QByteArray("import QtQuick\n"));
+
+    // What is installed now.
+    writeFile(QDir(installDir).filePath(QStringLiteral("DreamDSP.exe")),
+              QByteArray("old exe bytes"));
+    writeFile(QDir(installDir).filePath(QStringLiteral("stale.txt")), QByteArray("gone"));
+    writeFile(QDir(installDir).filePath(QStringLiteral("keep.txt")), QByteArray("untouched"));
+
+    const QString container = root.filePath(QStringLiteral("delta.bin"));
+    QString err;
+    check(FileUpdatePackage::writeFromDirectory(
+              container, QStringLiteral("0.6.0"), QStringLiteral("0.5.0"),
+              { QStringLiteral("DreamDSP.exe"), QStringLiteral("qml/extra.qml") },
+              { QStringLiteral("stale.txt") }, payloadDir, &err),
+          QStringLiteral("wrote a delta container (%1)")
+              .arg(err.isEmpty() ? QStringLiteral("ok") : err));
+
+    FileUpdate pkg;
+    check(FileUpdatePackage::read(container, &pkg, &err),
+          QStringLiteral("read it back (%1)").arg(err.isEmpty() ? QStringLiteral("ok") : err));
+    check(pkg.version == QStringLiteral("0.6.0") && pkg.base == QStringLiteral("0.5.0"),
+          QStringLiteral("version %1 on top of %2").arg(pkg.version, pkg.base));
+    check(pkg.files.size() == 2 && pkg.remove.size() == 1,
+          QStringLiteral("%1 file(s), %2 to remove").arg(pkg.files.size()).arg(pkg.remove.size()));
+    check(pkg.payloadSize() == QFileInfo(container).size() - pkg.payloadOffset,
+          QStringLiteral("payload size matches the container"));
+
+    check(FileUpdatePackage::stageInto(container, pkg, stageDir, &err),
+          QStringLiteral("staged (%1)").arg(err.isEmpty() ? QStringLiteral("ok") : err));
+    check(QFileInfo::exists(QDir(stageDir).filePath(QStringLiteral("plan.json"))),
+          QStringLiteral("plan.json written"));
+
+    const FileUpdatePackage::ApplyResult applied =
+        FileUpdatePackage::applyFrom(stageDir, installDir);
+    check(applied.applied && applied.complete,
+          QStringLiteral("applied %1 file(s), nothing left over").arg(applied.replaced.size()));
+    check(readFile(QDir(installDir).filePath(QStringLiteral("DreamDSP.exe")))
+              == QByteArray("new exe bytes"),
+          QStringLiteral("the program file was replaced"));
+    check(readFile(QDir(installDir).filePath(QStringLiteral("qml/extra.qml")))
+              == QByteArray("import QtQuick\n"),
+          QStringLiteral("a new file was created, with its directory"));
+    check(!QFileInfo::exists(QDir(installDir).filePath(QStringLiteral("stale.txt"))),
+          QStringLiteral("a file the release dropped was removed"));
+    check(readFile(QDir(installDir).filePath(QStringLiteral("keep.txt")))
+              == QByteArray("untouched"),
+          QStringLiteral("a file the package does not mention was left alone"));
+    check(!QFileInfo::exists(stageDir), QStringLiteral("the stage directory is cleaned up"));
+
+    // A second apply with nothing staged must do nothing rather than fail.
+    const FileUpdatePackage::ApplyResult again =
+        FileUpdatePackage::applyFrom(stageDir, installDir);
+    check(!again.applied && !again.complete && again.error.isEmpty(),
+          QStringLiteral("applying an empty stage is a no-op"));
+
+    // Every file is checked against the header's hash, so a corrupted payload
+    // never reaches the install directory -- the run above proves it would
+    // otherwise have been swapped in.
+    {
+        QFile f(container);
+        f.open(QIODevice::ReadOnly);
+        QByteArray bytes = f.readAll();
+        f.close();
+        bytes[bytes.size() - 1] = char(bytes.at(bytes.size() - 1) ^ 0x5a);
+        const QString tampered = root.filePath(QStringLiteral("tampered.bin"));
+        writeFile(tampered, bytes);
+
+        FileUpdate bad;
+        const bool readOk = FileUpdatePackage::read(tampered, &bad, &err);
+        check(readOk, QStringLiteral("a tampered container still parses (its files do not)"));
+        const QString tamperStage = root.filePath(QStringLiteral("stage-tampered"));
+        err.clear();
+        const bool tainted = FileUpdatePackage::stageInto(tampered, bad, tamperStage, &err);
+        check(!tainted && !err.isEmpty(), QStringLiteral("staging refused it: %1").arg(err));
+        check(!QFileInfo::exists(QDir(tamperStage).filePath(QStringLiteral("plan.json"))),
+              QStringLiteral("nothing was staged from it"));
+    }
+
+    // A file mapped by a running process cannot be deleted or overwritten, but
+    // it can be renamed -- which is the whole trick the update relies on, and
+    // the one thing a test with plain files cannot exercise. So load a DLL that
+    // the package is about to replace.
+    {
+        const QString lockedName = QStringLiteral("locked-test.dll");
+        const QString locked = QDir(installDir).filePath(lockedName);
+        QFile::remove(locked);
+
+        // DreamDspApo.dll has no Qt in it: a second copy of a Qt DLL inside a
+        // Qt process upsets its static destructors at exit, which would make
+        // this test itself the bug.
+        bool copied = false;
+        {
+            const QString source = QDir(QCoreApplication::applicationDirPath())
+                                       .filePath(QStringLiteral("DreamDspApo.dll"));
+            copied = QFileInfo::exists(source) && QFile::copy(source, locked);
+        }
+
+        HMODULE module = nullptr;
+        if (copied)
+            module = ::LoadLibraryW(reinterpret_cast<LPCWSTR>(locked.utf16()));
+
+        if (!module) {
+            out() << "  --   could not take a DLL lock; the rename path is untested here"
+                  << Qt::endl;
+        } else {
+            const QString payloadDir2 = root.filePath(QStringLiteral("payload-locked"));
+            writeFile(QDir(payloadDir2).filePath(lockedName),
+                      QByteArray("replacement bytes for a loaded module"));
+            const QString container2 = root.filePath(QStringLiteral("locked.bin"));
+            const QString stage2 = root.filePath(QStringLiteral("stage-locked"));
+
+            QString err2;
+            const bool wrote = FileUpdatePackage::writeFromDirectory(
+                container2, QStringLiteral("0.6.1"), QStringLiteral("0.6.0"),
+                { lockedName }, {}, payloadDir2, &err2);
+            FileUpdate pkg2;
+            const bool readOk = wrote && FileUpdatePackage::read(container2, &pkg2, &err2);
+            const bool staged = readOk && FileUpdatePackage::stageInto(container2, pkg2, stage2, &err2);
+            check(staged, QStringLiteral("a package that replaces a loaded DLL staged (%1)")
+                              .arg(err2.isEmpty() ? QStringLiteral("ok") : err2));
+
+            const FileUpdatePackage::ApplyResult lockedResult =
+                FileUpdatePackage::applyFrom(stage2, installDir);
+            check(lockedResult.complete && lockedResult.replaced.contains(lockedName),
+                  QStringLiteral("the loaded DLL was renamed aside and replaced"));
+
+            QFile f(locked);
+            const bool opened = f.open(QIODevice::ReadOnly);
+            check(opened && f.readAll() == QByteArray("replacement bytes for a loaded module"),
+                  QStringLiteral("the new bytes are on disk while the old image still runs"));
+            f.close();
+
+            ::FreeLibrary(module);
+
+            // Now that nothing holds the image, the next start's sweep clears
+            // the leftovers without being told which they were.
+            // An empty package is a start with nothing to do: the sweep is the
+            // only thing it should touch.
+            const QString emptyContainer = root.filePath(QStringLiteral("empty.bin"));
+            const QString emptyStage = root.filePath(QStringLiteral("stage-empty"));
+            FileUpdate emptyPkg;
+            QString err3;
+            FileUpdatePackage::writeFromDirectory(emptyContainer, QStringLiteral("0.6.1"),
+                                                  QStringLiteral("0.6.0"), {}, {},
+                                                  root.path(), &err3);
+            const bool emptyRead = FileUpdatePackage::read(emptyContainer, &emptyPkg, &err3);
+            const bool emptyStaged = emptyRead
+                && FileUpdatePackage::stageInto(emptyContainer, emptyPkg, emptyStage, &err3);
+            check(emptyStaged, QStringLiteral("staged an empty package (%1)").arg(err3));
+            FileUpdatePackage::applyFrom(emptyStage, installDir);
+            QDirIterator leftovers(installDir, { QStringLiteral("*.ddsp-old") }, QDir::Files,
+                                   QDirIterator::Subdirectories);
+            const bool anyLeft = leftovers.hasNext();
+            check(!anyLeft, QStringLiteral("renamed-aside leftovers are cleaned up"));
+        }
+    }
+
+    // An application directory that cannot take a file: the package has to
+    // survive the half-done state, keep what is outstanding, and say so --
+    // rather than report success, or throw the staged copy away.
+    {
+        const QString payloadDir3 = root.filePath(QStringLiteral("payload-busy"));
+        writeFile(QDir(payloadDir3).filePath(QStringLiteral("busy.txt")), QByteArray("new"));
+        const QString container3 = root.filePath(QStringLiteral("busy.bin"));
+        const QString stage3 = root.filePath(QStringLiteral("stage-busy"));
+        QString err3;
+        FileUpdatePackage::writeFromDirectory(container3, QStringLiteral("0.6.2"),
+                                              QStringLiteral("0.6.1"),
+                                              { QStringLiteral("busy.txt") }, {},
+                                              payloadDir3, &err3);
+        FileUpdate pkg3;
+        const bool readOk3 = FileUpdatePackage::read(container3, &pkg3, &err3);
+        check(readOk3 && FileUpdatePackage::stageInto(container3, pkg3, stage3, &err3),
+              QStringLiteral("staged a package whose target is held open"));
+
+        // Hold the target with no sharing at all: Windows then refuses both the
+        // delete and the rename, which is the one case the updater cannot work
+        // around.
+        writeFile(QDir(installDir).filePath(QStringLiteral("busy.txt")), QByteArray("old"));
+        const QString busyPath = QDir(installDir).filePath(QStringLiteral("busy.txt"));
+        HANDLE held = ::CreateFileW(reinterpret_cast<LPCWSTR>(busyPath.utf16()),
+                                    GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (held == INVALID_HANDLE_VALUE) {
+            out() << "  --   could not hold a file exclusively; the retry path is untested"
+                  << Qt::endl;
+        } else {
+            const FileUpdatePackage::ApplyResult busy =
+                FileUpdatePackage::applyFrom(stage3, installDir);
+            check(!busy.complete && busy.failed.contains(QStringLiteral("busy.txt"))
+                      && !busy.error.isEmpty(),
+                  QStringLiteral("a file that cannot be released is reported: %1").arg(busy.error));
+            check(QFileInfo::exists(QDir(stage3).filePath(QStringLiteral("plan.json"))),
+                  QStringLiteral("the package is kept for the next start"));
+
+            // And the next start, with the file free, finishes the job.
+            ::CloseHandle(held);
+            const FileUpdatePackage::ApplyResult retry =
+                FileUpdatePackage::applyFrom(stage3, installDir);
+            check(retry.complete && retry.replaced.contains(QStringLiteral("busy.txt")),
+                  QStringLiteral("the next start finishes it"));
+            check(!QFileInfo::exists(stage3), QStringLiteral("and clears the stage"));
+        }
+    }
+
+    // A package that tries to write outside the directory it is applied to is
+    // refused at parse time, before anything is staged or renamed.
+    {
+        const QByteArray header = R"({"version":"9.9.9","base":"0.5.0",)"
+                                  R"("files":[{"path":"../evil.txt","size":1,)"
+                                  R"("sha256":"0000000000000000000000000000000000000000000000000000000000000000"}],)"
+                                  R"("remove":[]})";
+        const QString escaped = root.filePath(QStringLiteral("escape.bin"));
+        QFile f(escaped);
+        f.open(QIODevice::WriteOnly | QIODevice::Truncate);
+        f.write("DDUPD1\n");
+        const quint32 len = quint32(header.size());
+        QByteArray lenBytes;
+        lenBytes.append(char((len >> 24) & 0xff));
+        lenBytes.append(char((len >> 16) & 0xff));
+        lenBytes.append(char((len >> 8) & 0xff));
+        lenBytes.append(char(len & 0xff));
+        f.write(lenBytes);
+        f.write(header);
+        f.close();
+
+        FileUpdate escapedPkg;
+        err.clear();
+        const bool escapedOk = FileUpdatePackage::read(escaped, &escapedPkg, &err);
+        check(!escapedOk && !err.isEmpty(),
+              QStringLiteral("a path escaping the install directory is refused: %1").arg(err));
+    }
+
+    // Not a container at all: the updater must not mistake an ordinary file for
+    // one, because everything after the header trusts it.
+    {
+        const QString junk = root.filePath(QStringLiteral("junk.bin"));
+        writeFile(junk, QByteArray("<?xml version=\"1.0\"?><FiiO_DSP/>"));
+        FileUpdate junkPkg;
+        err.clear();
+        const bool junkOk = FileUpdatePackage::read(junk, &junkPkg, &err);
+        check(!junkOk && !err.isEmpty(),
+              QStringLiteral("a file that is not a container is refused: %1").arg(err));
+    }
+}
+
 int runSelfTest()
 {
     g_failures = 0;
@@ -1055,6 +1340,7 @@ int runSelfTest()
     testPresets(apo);
     testAutoEq(apo);
     testEqImport();
+    testFileUpdate();
 
     out() << "\n" << (g_failures == 0 ? "PASS" : "FAIL")
           << " -- " << g_failures << " failure(s)" << Qt::endl;

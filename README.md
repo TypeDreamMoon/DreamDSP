@@ -429,6 +429,48 @@ is Peace's `$FilterTypes` array (`Peace.au3:384`), reproduced in
 9=HSC  10=BWLP 11=BWHP 12=LRLP 13=LRHP 14=LSCQ 15=HSCQ 16=LSQ  17=HSQ
 ```
 
+## Updates
+
+Every release publishes an installer and, from the second release that does,
+its SHA-256 in the notes. The in-app updater only ever runs a file whose hash it
+checked against that line, and installing is always an explicit click.
+
+The installer is 50 MB and 40 of them are the Qt runtime, which does not change
+between releases. So the workflow also publishes:
+
+| Asset | What it is |
+|---|---|
+| `DreamDSP-<ver>-win64-setup.exe` | the installer, as before |
+| `DreamDSP-<ver>-manifest.json` | every file in the payload: path, size, SHA-256 |
+| `DreamDSP-<ver>-files-from-<base>.bin` | only the files whose hash differs from `<base>`, plus the files `<base>` had and this one does not |
+
+A delta applies on top of exactly one version — the one published before it —
+because that is the only base whose contents the workflow can diff against. A
+copy on anything older takes the installer. This is also why dev builds (not cut
+from a tag) never apply a delta: their version string says which commit they
+are, and patching somebody else's release into that tree would be a lie the
+updater can detect but not repair.
+
+Applying one is not a file copy. Every file in the package is checked against
+its own hash, the package is staged under `%LOCALAPPDATA%\DreamDSP\pending`,
+and the swap happens at the next start — before the window, because the files
+being replaced include the Qt DLLs this process has mapped. A mapped image
+cannot be deleted but it can be renamed, so the old file is moved to
+`*.ddsp-old`, the new one written in its place, and the leftovers swept up on a
+later start. Anything that cannot be released is *kept* rather than reported as
+done, and retried on the next start; “Install and restart” reopens the window
+afterwards so the update does not depend on the user finding the shortcut again.
+
+A delta that fails to verify, parse or stage says so and leaves the installer
+path available. `--update-report <file>` prints what a published container
+claims, which is how a release can be checked against its own asset.
+
+The audio component is deliberately not part of this: `DreamDspApo.dll` is
+staged into `ProgramData` and registered in HKLM, which needs elevation and a
+restart of the audio service. If a release changes it, the settings page already
+shows the staged copy as out of date and offers to reinstall it — a file-level
+update does not restart the machine's audio to do so silently.
+
 ## Self-tests
 
 ```bat
@@ -446,9 +488,12 @@ eye, obvious to the test.
 
 `--selftest` checks the parts a screenshot cannot: biquad magnitudes against
 known values, `config.txt` include add/remove idempotency and BOM-freedom, a
-parse plus write/read round-trip of **every** `.peace` file on the machine, and
-the same round-trip for the FiiO XML reader/writer — including that a K19
-`version="1.0"` file is refused instead of read as +120 dB.
+parse plus write/read round-trip of **every** `.peace` file on the machine, the
+same round-trip for the FiiO XML reader/writer — including that a K19
+`version="1.0"` file is refused instead of read as +120 dB — and the update
+path: a container round-trip, a tampered payload refused, a path that escapes
+the install directory refused, a *loaded* DLL renamed aside and replaced, and a
+file that cannot be released kept for the next start.
 
 `--slidertest` posts real `QMouseEvent`s into the live scene and asserts that
 band 0's model value follows the drag, then restores it. Dragging is the one

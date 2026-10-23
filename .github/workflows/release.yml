@@ -117,6 +117,128 @@ jobs:
           "tag=$tag"         | Out-File -Append $env:GITHUB_OUTPUT
           "version=$version" | Out-File -Append $env:GITHUB_OUTPUT
 
+      # The installer is 50 MB and 40 of them are the Qt runtime, which does not
+      # change between releases. So alongside it, publish what actually differs:
+      # a manifest of every file in the payload, and a delta container holding
+      # only the files whose SHA-256 is not what the previous release had.
+      #
+      # The delta applies on top of exactly one version -- the one before this --
+      # because that is the only base whose file contents are known here. A copy
+      # on anything older takes the installer, which is still published and still
+      # the thing the checksum in the notes describes.
+      - name: Manifest and incremental delta
+        id: delta
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = "${{ steps.version.outputs.version }}"
+          $tag     = "${{ steps.version.outputs.tag }}"
+          $stage   = (Resolve-Path build/stage).Path
+
+          # The payload as it will be installed: relative path, size, SHA-256.
+          # Sorted, so two runs of the same tree produce the same manifest and
+          # the delta below is a diff of contents rather than of directory order.
+          $files = @(
+            Get-ChildItem $stage -Recurse -File | ForEach-Object {
+              [pscustomobject]@{
+                path   = ($_.FullName.Substring($stage.Length + 1).Split([IO.Path]::DirectorySeparatorChar) -join '/')
+                size   = $_.Length
+                sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+              }
+            } | Sort-Object path
+          )
+
+          $manifestPath = "build/DreamDSP-$version-manifest.json"
+          $manifestJson = [ordered]@{ version = $version; files = $files } |
+                          ConvertTo-Json -Depth 8 -Compress
+          [IO.File]::WriteAllText((Join-Path $PWD $manifestPath), $manifestJson,
+                                  (New-Object Text.UTF8Encoding($false)))
+          Write-Host "manifest: $($files.Count) files -> $manifestPath"
+
+          $assets = @($manifestPath)
+
+          # The newest earlier release that published a manifest. Releases before
+          # this workflow change have none, and neither does the first one after
+          # it -- the delta starts with the release after that, which is correct
+          # rather than convenient.
+          $cur = [version]$version
+          $prev = $null
+          $prevVer = $null
+          $prevAsset = $null
+          foreach ($r in (gh api "repos/${{ github.repository }}/releases?per_page=50" | ConvertFrom-Json)) {
+            if ($r.draft -or $r.prerelease -or $r.tag_name -eq $tag) { continue }
+            try { $rv = [version]($r.tag_name -replace '^v','') } catch { continue }
+            if ($rv -ge $cur) { continue }
+            $m = $r.assets | Where-Object { $_.name -like '*-manifest.json' } | Select-Object -First 1
+            if (-not $m) { continue }
+            if (-not $prev -or $rv -gt $prevVer) { $prev = $r; $prevVer = $rv; $prevAsset = $m }
+          }
+
+          $deltaPath = $null
+          if ($prev) {
+            $dir = "build/prev-manifest"
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            gh release download $prev.tag_name --pattern $prevAsset.name --dir $dir --clobber
+            $old = Get-Content (Join-Path $dir $prevAsset.name) -Raw | ConvertFrom-Json
+
+            $oldHash = @{}
+            foreach ($f in $old.files) { $oldHash[$f.path] = $f.sha256 }
+            $newHash = @{}
+            foreach ($f in $files)     { $newHash[$f.path] = $f.sha256 }
+
+            $changed = @($files | Where-Object {
+              -not $oldHash.ContainsKey($_.path) -or $oldHash[$_.path] -ne $_.sha256 })
+            $removed = @($old.files | Where-Object { -not $newHash.ContainsKey($_.path) } |
+                         ForEach-Object { $_.path })
+
+            $base = $prev.tag_name -replace '^v',''
+            $header = [ordered]@{ version = $version; base = $base
+                                  files = $changed; remove = $removed }
+            $headerBytes = [Text.Encoding]::UTF8.GetBytes(
+              ($header | ConvertTo-Json -Depth 8 -Compress))
+
+            # The container format is described in src/core/FileUpdate.h and read
+            # there; it is deliberately trivial so that the two implementations
+            # cannot disagree about anything but the bytes themselves.
+            $deltaPath = "build/DreamDSP-$version-files-from-$base.bin"
+            $out = [IO.File]::Create((Join-Path $PWD $deltaPath))
+            try {
+              $out.Write([Text.Encoding]::ASCII.GetBytes("DDUPD1`n"), 0, 7)
+              $len = [BitConverter]::GetBytes([uint32]$headerBytes.Length)
+              if ([BitConverter]::IsLittleEndian) { [Array]::Reverse($len) }
+              $out.Write($len, 0, 4)
+              $out.Write($headerBytes, 0, $headerBytes.Length)
+              foreach ($f in $changed) {
+                $in = [IO.File]::OpenRead((Join-Path $stage $f.path))
+                try { $in.CopyTo($out) } finally { $in.Close() }
+              }
+            } finally { $out.Close() }
+
+            $assets += $deltaPath
+            $mb = (Get-Item $deltaPath).Length / 1MB
+            Write-Host ("delta from {0}: {1} changed, {2} removed, {3:N1} MB" -f
+                        $base, $changed.Count, $removed.Count, $mb)
+          } else {
+            Write-Host "no earlier release with a manifest -- publishing the installer only"
+          }
+
+          # The updater reads one `SHA-256: <hash>  <name>` line per asset and
+          # will not offer anything whose line is missing.
+          $checksums = foreach ($a in $assets) {
+            "SHA-256: $((Get-FileHash $a -Algorithm SHA256).Hash.ToLower())  $(Split-Path $a -Leaf)"
+          }
+
+          # Explicitly UTF-8: Windows PowerShell 5.1 would otherwise write
+          # UTF-16 here and the runner would read mojibake.
+          "assets<<DDEOF" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          ($assets -join "`n") | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          "DDEOF" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          "checksums<<DDEOF" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          ($checksums -join "`n") | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          "DDEOF" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
       - name: Build the installer
         shell: pwsh
         run: |
@@ -150,7 +272,10 @@ jobs:
           name: DreamDSP ${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
-          files: ${{ steps.checksum.outputs.file }}
+          # The installer, plus the manifest and the delta when there is one.
+          files: |
+            ${{ steps.checksum.outputs.file }}
+            ${{ steps.delta.outputs.assets }}
           body: |
             ## DreamDSP ${{ steps.version.outputs.version }}
 
@@ -169,11 +294,17 @@ jobs:
 
             ### 校验
 
-            下载后请核对,应用内的自动更新也是照这一行校验的:
+            下载后请核对,应用内的自动更新也是照这里逐行校验的:
 
             ```
             SHA-256: ${{ steps.checksum.outputs.sha256 }}  ${{ steps.checksum.outputs.name }}
+            ${{ steps.delta.outputs.checksums }}
             ```
+
+            除安装包外还附带两个文件:`-manifest.json` 是整个安装内容的文件清单,
+            `-files-from-<基础版本>.bin` 是相对上一个版本的增量包。应用内的自动更新
+            优先用增量包(几 MB 而不是五十 MB),校验不过或装不进去就退回完整安装包;
+            两个文件的校验值同样在上面这几行里。
 
             ### 卸载
 

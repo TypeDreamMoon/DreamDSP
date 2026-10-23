@@ -25,6 +25,13 @@ namespace dreamdsp {
 //     is fine; replacing a component that lives inside audiodg.exe and
 //     restarts the machine's audio service is not something to do while
 //     somebody is in a call.
+//
+// Two kinds of update are published for every release after the one that
+// introduced deltas: the installer, and a file-level delta that applies on top
+// of the immediately previous version. The delta is preferred when this copy
+// is on that version, because it is a few MB instead of fifty; both are held to
+// the same SHA-256 discipline, and a delta that fails to verify or to stage
+// leaves the installer path available rather than dead-ending.
 class UpdateChecker : public QObject
 {
     Q_OBJECT
@@ -41,6 +48,16 @@ class UpdateChecker : public QObject
     Q_PROPERTY(QString status READ status NOTIFY stateChanged)
     Q_PROPERTY(bool downloaded READ downloaded NOTIFY stateChanged)
     Q_PROPERTY(bool automatic READ automatic WRITE setAutomatic NOTIFY automaticChanged)
+    // The delta that applies on top of this copy's version, when the release
+    // published one. `deltaStaged` means it is downloaded, verified and waiting
+    // for a restart -- not installed, because the files are in use.
+    Q_PROPERTY(bool deltaAvailable READ deltaAvailable NOTIFY stateChanged)
+    Q_PROPERTY(bool deltaStaged READ deltaStaged NOTIFY stateChanged)
+    Q_PROPERTY(double deltaMegabytes READ deltaMegabytes NOTIFY stateChanged)
+    // A staged package that the last start could not finish applying, with the
+    // version it belongs to. Named so the interface can say which update is
+    // waiting instead of "an update".
+    Q_PROPERTY(QString pendingVersion READ pendingVersion NOTIFY stateChanged)
 
 public:
     explicit UpdateChecker(QObject *parent = nullptr);
@@ -54,7 +71,19 @@ public:
     bool busy() const { return m_busy; }
     int downloadPercent() const { return m_percent; }
     QString status() const { return m_status; }
-    bool downloaded() const { return !m_downloadedPath.isEmpty(); }
+    // A package that cannot land does not count as "downloaded": the thing to
+    // offer then is the installer.
+    bool downloaded() const
+    {
+        return !m_deltaBlocked && (!m_downloadedPath.isEmpty() || m_deltaStaged);
+    }
+
+    // Not offered when a start already tried and could not finish: repeating a
+    // package that will not land is not an update, it is a loop.
+    bool deltaAvailable() const { return !m_deltaUrl.isEmpty() && !m_deltaBlocked; }
+    bool deltaStaged() const { return m_deltaStaged && !m_deltaBlocked; }
+    double deltaMegabytes() const { return double(m_deltaSize) / (1024.0 * 1024.0); }
+    QString pendingVersion() const { return m_pendingVersion; }
 
     // Check on start-up, and daily thereafter. On by default; it asks GitHub
     // for one small JSON document and sends nothing about the machine.
@@ -96,6 +125,19 @@ private:
 
     QString m_downloadedPath;
     QString m_status;
+
+    // The file-level delta: where it is, what it must hash to, and whether it
+    // is staged. `m_deltaMode` is what the current download is, because one
+    // code path fetches both kinds.
+    QString m_deltaUrl;
+    QString m_deltaName;
+    QString m_deltaSha256;
+    qint64 m_deltaSize = 0;
+    bool m_deltaStaged = false;
+    bool m_deltaMode = false;
+    bool m_deltaBlocked = false;
+    QString m_pendingVersion;
+
     bool m_updateAvailable = false;
     bool m_busy = false;
     bool m_automatic = true;

@@ -1,5 +1,7 @@
 #include "platform/UpdateChecker.h"
 
+#include "core/FileUpdate.h"
+
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDesktopServices>
@@ -13,6 +15,7 @@
 #include <QNetworkRequest>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QUrl>
@@ -43,6 +46,22 @@ QString downloadDirectory()
            + QStringLiteral("/DreamDSP-update");
 }
 
+// The release notes carry one `SHA-256: <64 hex>  <filename>` line per asset,
+// written by the workflow. Releases before deltas existed have exactly one.
+QHash<QString, QString> hashesFromNotes(const QString &notes)
+{
+    QHash<QString, QString> out;
+    static const QRegularExpression re(
+        QStringLiteral(R"(SHA-?256[:\s]+([0-9a-fA-F]{64})\s+(\S+))"),
+        QRegularExpression::CaseInsensitiveOption);
+    auto it = re.globalMatch(notes);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch m = it.next();
+        out.insert(m.captured(2).trimmed(), m.captured(1).toLower());
+    }
+    return out;
+}
+
 } // namespace
 
 UpdateChecker::UpdateChecker(QObject *parent)
@@ -51,6 +70,13 @@ UpdateChecker::UpdateChecker(QObject *parent)
 {
     QSettings s(QStringLiteral("DreamDSP"), QStringLiteral("DreamDSP"));
     m_automatic = s.value(QStringLiteral("checkForUpdates"), true).toBool();
+
+    // A package the last start could not finish applying -- one or two files
+    // were still mapped by the old process. Saying so afterwards is better than
+    // leaving an update that appears to have vanished.
+    m_pendingVersion = FileUpdatePackage::stagedVersion();
+    m_deltaStaged = !m_pendingVersion.isEmpty();
+    m_deltaBlocked = FileUpdatePackage::lastApplyFailed();
 }
 
 UpdateChecker::~UpdateChecker() = default;
@@ -170,30 +196,47 @@ void UpdateChecker::onCheckFinished(QNetworkReply *reply)
     m_expectedSha256.clear();
     m_assetSize = 0;
 
+    m_deltaUrl.clear();
+    m_deltaName.clear();
+    m_deltaSha256.clear();
+    m_deltaSize = 0;
+
+    const QHash<QString, QString> hashes = hashesFromNotes(m_releaseNotes);
+
+    // The delta is built against exactly the version the workflow published
+    // before this one, and only a build cut from a tag *is* that version. An
+    // untagged or dirty build says so in its version string, and gets the
+    // installer rather than a set of files from somebody else's release.
+    QString deltaName;
+#if defined(DREAMDSP_IS_RELEASE)
+    deltaName = QStringLiteral("DreamDSP-%1-files-from-%2.bin")
+                    .arg(m_latestVersion, QString::fromLatin1(DREAMDSP_VERSION));
+#endif
+
     for (const QJsonValue &v : release.value(QStringLiteral("assets")).toArray()) {
         const QJsonObject asset = v.toObject();
         const QString name = asset.value(QStringLiteral("name")).toString();
-        if (!name.endsWith(QLatin1String(".exe"), Qt::CaseInsensitive))
-            continue;
         const QUrl url(asset.value(QStringLiteral("browser_download_url")).toString());
         if (!hostAllowed(url))
             continue;
-        m_assetUrl = url.toString();
-        m_assetName = name;
-        m_assetSize = qint64(asset.value(QStringLiteral("size")).toDouble());
-        break;
+
+        if (m_assetUrl.isEmpty() && name.endsWith(QLatin1String(".exe"), Qt::CaseInsensitive)) {
+            m_assetUrl = url.toString();
+            m_assetName = name;
+            m_assetSize = qint64(asset.value(QStringLiteral("size")).toDouble());
+            m_expectedSha256 = hashes.value(name);
+        } else if (!deltaName.isEmpty() && name == deltaName) {
+            m_deltaUrl = url.toString();
+            m_deltaName = name;
+            m_deltaSize = qint64(asset.value(QStringLiteral("size")).toDouble());
+            m_deltaSha256 = hashes.value(name);
+        }
     }
 
-    // Written into the release notes by the workflow, as
-    // `SHA-256: <64 hex> <filename>`.
-    if (!m_assetName.isEmpty()) {
-        const QRegularExpression re(
-            QStringLiteral("SHA-?256[:\\s]+([0-9a-fA-F]{64})"),
-            QRegularExpression::CaseInsensitiveOption);
-        const QRegularExpressionMatch m = re.match(m_releaseNotes);
-        if (m.hasMatch())
-            m_expectedSha256 = m.captured(1).toLower();
-    }
+    // A release published before the notes named their assets carried a bare
+    // checksum. There is only one asset then, so it can only mean that one.
+    if (m_expectedSha256.isEmpty() && hashes.size() == 1 && !m_assetName.isEmpty())
+        m_expectedSha256 = hashes.constBegin().value();
 
     const int cmp = compareVersions(QString::fromLatin1(DREAMDSP_VERSION), m_latestVersion);
     m_updateAvailable = cmp < 0;
@@ -210,6 +253,17 @@ void UpdateChecker::onCheckFinished(QNetworkReply *reply)
         setStatus(QStringLiteral("有新版本 %1,但发布说明里没有 SHA-256 校验值,"
                                  "不会自动下载 —— 请到发布页手动获取")
                       .arg(m_latestVersion));
+    } else if (m_deltaStaged && m_pendingVersion == m_latestVersion && !m_deltaBlocked) {
+        setStatus(QStringLiteral("新版本 %1 的增量更新已就绪,退出 DreamDSP 后生效")
+                      .arg(m_latestVersion));
+    } else if (m_deltaBlocked) {
+        // The last attempt could not replace something. Say which way out.
+        setStatus(QStringLiteral("有新版本 %1 可用,但上次的增量更新没能装进去 —— "
+                                 "可以改用完整安装包").arg(m_latestVersion));
+    } else if (deltaAvailable() && !m_deltaSha256.isEmpty()) {
+        setStatus(QStringLiteral("有新版本 %1 可用(增量更新 %2 MB,不需要下载整个安装包)")
+                      .arg(m_latestVersion)
+                      .arg(deltaMegabytes(), 0, 'f', 1));
     } else {
         setStatus(QStringLiteral("有新版本 %1 可用").arg(m_latestVersion));
     }
@@ -218,10 +272,21 @@ void UpdateChecker::onCheckFinished(QNetworkReply *reply)
 
 void UpdateChecker::download()
 {
-    if (m_busy || m_assetUrl.isEmpty() || m_expectedSha256.isEmpty())
+    if (m_busy)
         return;
 
-    const QUrl url(m_assetUrl);
+    // The delta first: it applies on top of this version, it is a few MB, and
+    // it is held to the same published checksum as the installer. Falling back
+    // to the installer is what happens when the delta is missing, unverifiable
+    // or fails to stage -- never a dead end.
+    m_deltaMode = deltaAvailable() && !m_deltaSha256.isEmpty() && !m_deltaStaged;
+
+    const QString urlText = m_deltaMode ? m_deltaUrl : m_assetUrl;
+    const QString name = m_deltaMode ? m_deltaName : m_assetName;
+    if (urlText.isEmpty() || (m_deltaMode ? m_deltaSha256 : m_expectedSha256).isEmpty())
+        return;
+
+    const QUrl url(urlText);
     if (!hostAllowed(url)) {
         setStatus(QStringLiteral("下载地址不在允许的域名内,已拒绝"));
         return;
@@ -230,7 +295,7 @@ void UpdateChecker::download()
     m_busy = true;
     m_percent = 0;
     m_downloadedPath.clear();
-    setStatus(QStringLiteral("正在下载 %1…").arg(m_assetName));
+    setStatus(QStringLiteral("正在下载 %1…").arg(name));
 
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::UserAgentHeader,
@@ -274,11 +339,50 @@ void UpdateChecker::onDownloadFinished(QNetworkReply *reply)
 
     const QString actual =
         QString::fromLatin1(QCryptographicHash::hash(payload, QCryptographicHash::Sha256).toHex());
-    if (actual != m_expectedSha256) {
+    const QString expected = m_deltaMode ? m_deltaSha256 : m_expectedSha256;
+    if (actual != expected) {
         // A hard failure with nothing left on disk. A mismatch means the file
         // is not the one the build produced, and there is no reading of that
         // which makes running it acceptable.
         setStatus(QStringLiteral("校验失败 —— 下载的文件与发布公布的 SHA-256 不符,已丢弃"));
+        return;
+    }
+
+    if (m_deltaMode) {
+        // Staged, not applied: every file this would replace is mapped by this
+        // process right now, so the swap belongs to the next start.
+        QDir().mkpath(downloadDirectory());
+        const QString container = downloadDirectory() + QLatin1Char('/') + m_deltaName;
+        {
+            QFile file(container);
+            if (!file.open(QIODevice::WriteOnly)) {
+                setStatus(QStringLiteral("无法写入 %1").arg(container));
+                return;
+            }
+            file.write(payload);
+        }
+
+        FileUpdate pkg;
+        QString err;
+        if (!FileUpdatePackage::read(container, &pkg, &err)) {
+            QFile::remove(container);
+            setStatus(QStringLiteral("增量更新包无法解析:%1 —— 可以重新下载完整安装包").arg(err));
+            return;
+        }
+        if (!FileUpdatePackage::stage(container, pkg, &err)) {
+            QFile::remove(container);
+            setStatus(QStringLiteral("增量更新无法就绪:%1 —— 可以重新下载完整安装包").arg(err));
+            return;
+        }
+        QFile::remove(container);
+
+        const int count = pkg.files.size();
+        m_deltaStaged = true;
+        m_pendingVersion = pkg.version;
+        setStatus(QStringLiteral("增量更新 %1 已下载并通过校验(%2 个文件,%3 MB),退出 DreamDSP 后生效")
+                      .arg(pkg.version)
+                      .arg(count)
+                      .arg(m_deltaSize / (1024.0 * 1024.0), 0, 'f', 1));
         return;
     }
 
@@ -298,10 +402,36 @@ void UpdateChecker::onDownloadFinished(QNetworkReply *reply)
 
 void UpdateChecker::installNow()
 {
+    if (m_deltaStaged) {
+        // Nothing in the program directory can be replaced while this process
+        // has it mapped, so the package is applied at the next start. The
+        // marker tells main() to reopen the window afterwards -- one click
+        // for the user instead of "quit, then find the shortcut again".
+        QSaveFile marker(QDir(FileUpdatePackage::stageDirectory())
+                              .filePath(QStringLiteral("restart-after-update")));
+        if (marker.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            marker.write(QByteArrayLiteral("1"));
+            marker.commit();
+        }
+        setStatus(m_pendingVersion.isEmpty()
+                      ? QStringLiteral("正在退出,重启后完成更新")
+                      : QStringLiteral("正在退出,重启后完成到 %1 的更新").arg(m_pendingVersion));
+        emit quitRequested();
+        return;
+    }
+
     if (m_downloadedPath.isEmpty() || !QFile::exists(m_downloadedPath)) {
         setStatus(QStringLiteral("还没有已下载的安装包"));
         return;
     }
+
+    // The installer replaces the whole directory, so anything staged from a
+    // delta that could not land is now both wrong and pointless.
+    QDir(FileUpdatePackage::stageDirectory()).removeRecursively();
+    m_deltaStaged = false;
+    m_deltaBlocked = false;
+    m_pendingVersion.clear();
+    emit stateChanged();
 
     // /SILENT rather than /VERYSILENT: the progress window is worth seeing,
     // because the installer stops the audio service to replace the processing
