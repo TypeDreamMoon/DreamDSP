@@ -989,9 +989,23 @@ int runSliderTest(QObject *rootObject)
         check(ctl->eqHistory().at(0).toMap().value(QStringLiteral("path")).toString() == curve,
               QStringLiteral("and moves back to the front"));
 
+        ctl->loadEqFile(QUrl::fromLocalFile(other));
+        ctl->loadEqFile(QUrl::fromLocalFile(other));
+        int sameFile = 0;
+        for (const QVariant &entry : ctl->eqHistory()) {
+            if (entry.toMap().value(QStringLiteral("path")).toString().endsWith(
+                    QStringLiteral("other.txt")))
+                ++sameFile;
+        }
+        check(sameFile == 1,
+              QStringLiteral("loading the same file twice leaves one entry (%1)").arg(sameFile));
+
+        // Whatever is in effect right now: clearing the record must not change
+        // it, and the loop above has moved it on from `curve` to `other`.
+        const QString inEffect = ctl->eqSourcePath();
         ctl->clearEqHistory();
         check(ctl->eqHistory().isEmpty(), QStringLiteral("the recent list can be cleared"));
-        check(ctl->eqSourcePath() == curve,
+        check(!inEffect.isEmpty() && ctl->eqSourcePath() == inEffect,
               QStringLiteral("clearing it leaves the loaded curve's source alone"));
 
         ctl->clearGraphicEq();
@@ -1136,6 +1150,35 @@ void testEqImport()
 }
 
 // --------------------------------------------------- incremental updates
+
+void testEqPathSpelling()
+{
+    out() << "\n[curve paths]" << Qt::endl;
+
+    // Native separators, forward slashes, redundant segments and a different
+    // case: all four spellings name the same file.
+    const QString native = QStringLiteral("E:\\Downloads\\JT7\\curve.xml");
+    const QString posix = QStringLiteral("E:/Downloads/JT7/curve.xml");
+    const QString messy = QStringLiteral("e:/Downloads//JT7/./curve.xml");
+    const QString lower = QStringLiteral("E:\\downloads\\jt7\\curve.xml");
+
+    check(AppController::normaliseEqPath(native) == AppController::normaliseEqPath(posix),
+          QStringLiteral("backslashes and slashes are one file"));
+    check(AppController::normaliseEqPath(messy) == AppController::normaliseEqPath(posix),
+          QStringLiteral("redundant separators and . are one file"));
+    check(AppController::normaliseEqPath(lower).compare(AppController::normaliseEqPath(posix),
+                                                       Qt::CaseInsensitive) == 0,
+          QStringLiteral("case is one file"));
+    check(AppController::normaliseEqPath(QStringLiteral("  ")).isEmpty(),
+          QStringLiteral("an empty path does not become the working directory"));
+
+    // The list is what compares them, so a duplicate written by an older build
+    // has to disappear rather than show up twice in the combo box.
+    const QStringList stored{ native, posix, messy, QStringLiteral("F:/other/x.txt"), posix };
+    const QStringList cleaned = AppController::cleanEqHistory(stored);
+    check(cleaned.size() == 2,
+          QStringLiteral("five spellings of two files clean down to %1").arg(cleaned.size()));
+}
 
 void testFileUpdate()
 {
@@ -1433,6 +1476,7 @@ int runSelfTest()
     testPresets(apo);
     testAutoEq(apo);
     testEqImport();
+    testEqPathSpelling();
     testFileUpdate();
 
     out() << "\n" << (g_failures == 0 ? "PASS" : "FAIL")

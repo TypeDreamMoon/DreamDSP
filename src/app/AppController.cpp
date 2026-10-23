@@ -1862,6 +1862,38 @@ bool AppController::eqSourceExists() const
     return !m_eqSourcePath.isEmpty() && QFileInfo::exists(m_eqSourcePath);
 }
 
+QString AppController::normaliseEqPath(const QString &path)
+{
+    if (path.trimmed().isEmpty())
+        return {};
+    // fromNativeSeparators first: QDir::cleanPath only understands '/' and would
+    // otherwise leave "E:\a\..\a\file" as a different string from the
+    // same file spelled with forward slashes.
+    const QString cleaned = QDir::cleanPath(QDir::fromNativeSeparators(path.trimmed()));
+    return QFileInfo(cleaned).absoluteFilePath();
+}
+
+QStringList AppController::cleanEqHistory(const QStringList &paths)
+{
+    QStringList out;
+    out.reserve(paths.size());
+    for (const QString &raw : paths) {
+        const QString path = normaliseEqPath(raw);
+        if (path.isEmpty())
+            continue;
+        bool seen = false;
+        for (const QString &existing : std::as_const(out)) {
+            if (existing.compare(path, Qt::CaseInsensitive) == 0) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen)
+            out << path;
+    }
+    return out;
+}
+
 QVariantList AppController::eqHistory() const
 {
     QVariantList out;
@@ -1888,24 +1920,27 @@ constexpr int kMaxRecentCurves = 8;
 
 void AppController::setEqHistory(const QStringList &paths)
 {
-    m_eqHistory = paths;
+    m_eqHistory = cleanEqHistory(paths);
     QSettings s(QStringLiteral("DreamDSP"), QStringLiteral("DreamDSP"));
     s.setValue(QStringLiteral("eqHistory"), m_eqHistory);
+    s.sync();
     emit eqHistoryChanged();
 }
 
 void AppController::rememberEqFile(const QString &path)
 {
-    if (path.isEmpty())
+    const QString normalised = normaliseEqPath(path);
+    if (normalised.isEmpty())
         return;
 
     QStringList paths = m_eqHistory;
     paths.erase(std::remove_if(paths.begin(), paths.end(),
-                               [&path](const QString &existing) {
-                                   return existing.compare(path, Qt::CaseInsensitive) == 0;
+                               [&normalised](const QString &existing) {
+                                   return normaliseEqPath(existing)
+                                              .compare(normalised, Qt::CaseInsensitive) == 0;
                                }),
                 paths.end());
-    paths.prepend(path);
+    paths.prepend(normalised);
     while (paths.size() > kMaxRecentCurves)
         paths.removeLast();
 
@@ -1919,7 +1954,7 @@ bool AppController::loadEqHistory(int index)
     if (index < 0 || index >= m_eqHistory.size())
         return false;
 
-    const QString path = m_eqHistory.at(index);
+    const QString path = normaliseEqPath(m_eqHistory.at(index));
     if (!QFileInfo::exists(path)) {
         // A file that has gone is removed from the list rather than left as a
         // choice that cannot work.
@@ -1942,15 +1977,16 @@ void AppController::clearEqHistory()
 
 void AppController::setEqSource(const QString &path)
 {
-    if (m_eqSourcePath == path)
+    const QString normalised = normaliseEqPath(path);
+    if (m_eqSourcePath == normalised)
         return;
-    m_eqSourcePath = path;
+    m_eqSourcePath = normalised;
 
     QSettings s(QStringLiteral("DreamDSP"), QStringLiteral("DreamDSP"));
-    s.setValue(QStringLiteral("eqSourcePath"), path);
+    s.setValue(QStringLiteral("eqSourcePath"), normalised);
 
-    if (!path.isEmpty())
-        rememberEqFile(path);
+    if (!normalised.isEmpty())
+        rememberEqFile(normalised);
 
     emit eqSourceChanged();
 }
@@ -2515,17 +2551,27 @@ void AppController::restoreSession()
 
     // Only if the file is still there: a remembered path to something deleted
     // would offer a "重新载入" that cannot work.
-    const QString source = s.value(QStringLiteral("eqSourcePath")).toString();
+    const QString source = normaliseEqPath(s.value(QStringLiteral("eqSourcePath")).toString());
     if (!source.isEmpty() && QFileInfo::exists(source))
         m_eqSourcePath = source;
 
     // The same for the recent list, which also loses files moved or deleted
     // since last run. Kept in its stored order, newest first.
-    QStringList history = s.value(QStringLiteral("eqHistory")).toStringList();
+    const QStringList stored = s.value(QStringLiteral("eqHistory")).toStringList();
+    QStringList history = cleanEqHistory(stored);
     history.erase(std::remove_if(history.begin(), history.end(),
                                  [](const QString &path) { return !QFileInfo::exists(path); }),
                   history.end());
     m_eqHistory = history;
+    if (history != stored) {
+        // Corrected on disk, not only in memory: a list written by an older
+        // build can hold the same file twice, and showing it once while leaving
+        // the file full of repeats means it comes back on the next import.
+        // Synced because this runs during start-up, and start-up is exactly
+        // when a process is most likely to be killed before it flushes.
+        s.setValue(QStringLiteral("eqHistory"), history);
+        s.sync();
+    }
     m_pendingDeviceId = s.value(QStringLiteral("deviceId")).toString();
 
     Preset p;

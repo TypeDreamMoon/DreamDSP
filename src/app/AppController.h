@@ -204,6 +204,17 @@ public:
     QString eqSourcePath() const { return m_eqSourcePath; }
     bool eqSourceExists() const;
     QVariantList eqHistory() const;
+
+    // One spelling per file. Paths reach this program from a file dialog, from
+    // QSettings written by an older build, from a shell, and from QUrl, and they
+    // disagree about separators and case; the recent list compares them, so it
+    // has to be given one form. Public because the self-test checks that the
+    // spellings collapse rather than the list they end up in.
+    static QString normaliseEqPath(const QString &path);
+    // Normalises a whole list and drops the repeats, keeping the order. Also
+    // applied when the list is read back, because an older build may have
+    // written duplicates that this one would otherwise show.
+    static QStringList cleanEqHistory(const QStringList &paths);
     bool dirty() const { return m_dirty; }
 
     double preamp() const { return m_preamp; }
