@@ -4,7 +4,7 @@
 #include "WavFile.h"
 
 #include "core/ApoConfig.h"
-#include "core/FiiEqXml.h"
+#include "core/PeqXmlFile.h"
 #include "core/GraphicCurve.h"
 #include "core/ParametricEqText.h"
 #include "platform/Autostart.h"
@@ -1776,20 +1776,21 @@ bool AppController::applyEqFile(const QString &path)
     const QString text = QString::fromUtf8(data);
 
     // Routed by content, not by extension: the same curve arrives as .xml from
-    // FiiO's client, as ParametricEQ.txt from AutoEQ and as GraphicEQ.txt from
+    // a DSP client, as ParametricEQ.txt from AutoEQ and as GraphicEQ.txt from
     // every measurement site, and people rename them freely.
-    if (FiiEqXml::looksLikeFiiXml(data)) {
+    if (PeqXmlFile::looksLikePeqXml(data)) {
         Preset p;
         QString model;
         QString err;
-        if (!FiiEqXml::read(path, &p, &model, &err)) {
+        if (!PeqXmlFile::read(path, &p, &model, &err)) {
             setError(QStringLiteral("导入失败:%1").arg(err));
             return false;
         }
         m_importedModel = model;
-        return applyImportedPreset(
-            p, model.isEmpty() ? QStringLiteral("飞傲调音文件")
-                               : QStringLiteral("飞傲 %1 曲线").arg(model));
+        // The device a file names stays internal: it is used when exporting the
+        // curve again, and reporting it would put somebody else's product name
+        // in this program's status bar.
+        return applyImportedPreset(p, QStringLiteral("PEQ 曲线文件"));
     }
 
     if (ParametricEqText::looksLikeParametricEq(text)) {
@@ -1844,7 +1845,7 @@ bool AppController::exportFiiXml(const QString &name)
 
     const QString path = dir.filePath(clean + QStringLiteral(".xml"));
     QString err;
-    if (!FiiEqXml::write(path, p, m_importedModel, &err)) {
+    if (!PeqXmlFile::write(path, p, m_importedModel, &err)) {
         setError(QStringLiteral("导出失败:%1").arg(err));
         return false;
     }
@@ -1861,6 +1862,84 @@ bool AppController::eqSourceExists() const
     return !m_eqSourcePath.isEmpty() && QFileInfo::exists(m_eqSourcePath);
 }
 
+QVariantList AppController::eqHistory() const
+{
+    QVariantList out;
+    out.reserve(m_eqHistory.size());
+    for (int i = 0; i < m_eqHistory.size(); ++i) {
+        const QFileInfo info(m_eqHistory.at(i));
+        // Name first, folder second: two files can share a name, and the folder
+        // is the only thing that tells them apart in a combo box.
+        const QString folder = info.absolutePath().section(QLatin1Char('/'), -1);
+        out.append(QVariantMap{
+            { QStringLiteral("value"), i },
+            { QStringLiteral("path"), m_eqHistory.at(i) },
+            { QStringLiteral("label"), info.fileName() + QStringLiteral("  ·  ") + folder },
+        });
+    }
+    return out;
+}
+
+namespace {
+// Eight is enough to hold the curves anyone actually alternates between and few
+// enough that the list stays readable in a dropdown.
+constexpr int kMaxRecentCurves = 8;
+}
+
+void AppController::setEqHistory(const QStringList &paths)
+{
+    m_eqHistory = paths;
+    QSettings s(QStringLiteral("DreamDSP"), QStringLiteral("DreamDSP"));
+    s.setValue(QStringLiteral("eqHistory"), m_eqHistory);
+    emit eqHistoryChanged();
+}
+
+void AppController::rememberEqFile(const QString &path)
+{
+    if (path.isEmpty())
+        return;
+
+    QStringList paths = m_eqHistory;
+    paths.erase(std::remove_if(paths.begin(), paths.end(),
+                               [&path](const QString &existing) {
+                                   return existing.compare(path, Qt::CaseInsensitive) == 0;
+                               }),
+                paths.end());
+    paths.prepend(path);
+    while (paths.size() > kMaxRecentCurves)
+        paths.removeLast();
+
+    if (paths == m_eqHistory)
+        return;
+    setEqHistory(paths);
+}
+
+bool AppController::loadEqHistory(int index)
+{
+    if (index < 0 || index >= m_eqHistory.size())
+        return false;
+
+    const QString path = m_eqHistory.at(index);
+    if (!QFileInfo::exists(path)) {
+        // A file that has gone is removed from the list rather than left as a
+        // choice that cannot work.
+        QStringList paths = m_eqHistory;
+        paths.removeAt(index);
+        setEqHistory(paths);
+        setError(QStringLiteral("找不到 %1 —— 文件可能被移动或删除").arg(path));
+        return false;
+    }
+    return loadEqFile(QUrl::fromLocalFile(path));
+}
+
+void AppController::clearEqHistory()
+{
+    if (m_eqHistory.isEmpty())
+        return;
+    setEqHistory({});
+    setMessage(QStringLiteral("已清空最近导入的曲线记录"));
+}
+
 void AppController::setEqSource(const QString &path)
 {
     if (m_eqSourcePath == path)
@@ -1869,6 +1948,9 @@ void AppController::setEqSource(const QString &path)
 
     QSettings s(QStringLiteral("DreamDSP"), QStringLiteral("DreamDSP"));
     s.setValue(QStringLiteral("eqSourcePath"), path);
+
+    if (!path.isEmpty())
+        rememberEqFile(path);
 
     emit eqSourceChanged();
 }
@@ -2436,6 +2518,14 @@ void AppController::restoreSession()
     const QString source = s.value(QStringLiteral("eqSourcePath")).toString();
     if (!source.isEmpty() && QFileInfo::exists(source))
         m_eqSourcePath = source;
+
+    // The same for the recent list, which also loses files moved or deleted
+    // since last run. Kept in its stored order, newest first.
+    QStringList history = s.value(QStringLiteral("eqHistory")).toStringList();
+    history.erase(std::remove_if(history.begin(), history.end(),
+                                 [](const QString &path) { return !QFileInfo::exists(path); }),
+                  history.end());
+    m_eqHistory = history;
     m_pendingDeviceId = s.value(QStringLiteral("deviceId")).toString();
 
     Preset p;
@@ -2450,6 +2540,7 @@ void AppController::restoreSession()
     emit preampChanged();
     emit currentPresetChanged();
     emit eqSourceChanged();
+    emit eqHistoryChanged();
     emit generatedTextChanged();
 }
 

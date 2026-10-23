@@ -60,7 +60,7 @@ Everything runs in DreamDSP's own APO.
 | Preamp, per-device profiles | done |
 | AutoEQ headphone correction (20,777 curves) | done |
 | Peace `.peace` preset interop | done |
-| FiiO DSP curve `.xml` import/export (K17/K19 client) | done |
+| PEQ curve `.xml` import/export (the `<FiiO_DSP>` document) | done |
 | Convolution / impulse response, any rate, any file rate | done |
 | Compressor, with auto knee/attack/release/makeup | done |
 | Three-band multiband compressor | done |
@@ -409,7 +409,7 @@ shape is decided by the contents, because the filenames say nothing:
 
 | Shape | Who writes it | What happens |
 |---|---|---|
-| `<FiiO_DSP …>.xml` | FiiO's K17/K19 DSP client, AutoEQ→FiiO converters | every `<eq>` band becomes a parametric band |
+| `<FiiO_DSP …>.xml` | a DSP client's PEQ export, AutoEQ→PEQ converters | every `<eq>` band becomes a parametric band |
 | `ParametricEQ.txt` | AutoEQ, Equalizer APO, review tables | `Filter N: ON PK Fc …` lines become bands |
 | `GraphicEQ.txt` | every measurement site | fitted to the 31-band graphic bank |
 
@@ -421,15 +421,17 @@ the curve that was asked for); otherwise the strip is not there.
 
 A curve that came from a file remembers its path, shown on the card with a
 *重新载入* button so a target edited elsewhere can be picked up without another
-dialog. A curve typed into the paste box has no path and records none: the row
-is absent rather than pointing at a file that was never involved.
+dialog, and every file imported before is kept in a combo box beside it — eight
+entries, newest first, with the ones whose file has gone dropped on load. A
+curve typed into the paste box has no path and records none: it never enters the
+list, and the row points at no file rather than one that was never involved.
 
-*导出 XML* writes the loaded curve back out as a FiiO XML in the preset
-folder, which is what a K17/K19 DSP client — or another copy of DreamDSP —
-will read. FiiO's two encodings are not the same: `version="0.0.1"` stores
-plain Hz/dB/Q and round-trips, while the K19 client's `version="1.0"` stores
-register values (gains around 120, frequencies quantised) and is refused with
-an explanation rather than imported as a curve that is 12 dB out.
+*导出 XML* writes the loaded curve back out in that document format, in the
+preset folder, where a DSP client — or another copy of DreamDSP — will read it.
+Its two encodings are not the same: `version="0.0.1"` stores plain Hz/dB/Q and
+round-trips, while `version="1.0"` stores register values (gains around 120,
+frequencies quantised) and is refused with an explanation rather than imported
+as a curve that is 12 dB out.
 
 The `[Filters]` section stores a filter type as an integer. The decoding table
 is Peace's `$FilterTypes` array (`Peace.au3:384`), reproduced in
@@ -500,7 +502,7 @@ eye, obvious to the test.
 `--selftest` checks the parts a screenshot cannot: biquad magnitudes against
 known values, `config.txt` include add/remove idempotency and BOM-freedom, a
 parse plus write/read round-trip of **every** `.peace` file on the machine, the
-same round-trip for the FiiO XML reader/writer — including that a K19
+same round-trip for the PEQ `.xml` reader/writer — including that a
 `version="1.0"` file is refused instead of read as +120 dB — and the update
 path: a container round-trip, a tampered payload refused, a path that escapes
 the install directory refused, a *loaded* DLL renamed aside and replaced, and a

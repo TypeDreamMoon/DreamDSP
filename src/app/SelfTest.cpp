@@ -10,7 +10,7 @@
 #include "GraphicEq.h"
 #include "core/DreamPreset.h"
 #include "core/FileUpdate.h"
-#include "core/FiiEqXml.h"
+#include "core/PeqXmlFile.h"
 #include "core/GraphicCurve.h"
 #include "core/ParametricEqText.h"
 #include "core/PeacePreset.h"
@@ -922,6 +922,13 @@ int runSliderTest(QObject *rootObject)
         const QVector<PresetBand> savedBands = ctl->bands()->bands();
         const double savedPreamp = ctl->preamp();
 
+        // The source and the recent list live in QSettings, so they outlive
+        // this process: snapshot them and put them back rather than leave a
+        // real user's history pointing at files this test created and deleted.
+        QSettings settings(QStringLiteral("DreamDSP"), QStringLiteral("DreamDSP"));
+        const QString sourceBefore = settings.value(QStringLiteral("eqSourcePath")).toString();
+        const QStringList historyBefore = settings.value(QStringLiteral("eqHistory")).toStringList();
+
         QTemporaryDir dir;
         const QString curve = QDir(dir.path()).filePath(QStringLiteral("curve.txt"));
         {
@@ -958,16 +965,43 @@ int runSliderTest(QObject *rootObject)
         check(ctl->eqSourcePath().isEmpty(),
               QStringLiteral("a pasted curve records no source"));
 
+        // The recent list: a second file joins at the front, picking the older
+        // one loads it and moves it back to the front, and clearing the list
+        // leaves the curve alone.
+        const QString other = QDir(dir.path()).filePath(QStringLiteral("other.txt"));
+        {
+            QFile f(other);
+            f.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            f.write("Preamp: -1.0 dB\n"
+                    "Filter 1: ON PK Fc 500 Hz Gain 4.0 dB Q 1.00\n");
+        }
+        ctl->loadEqFile(QUrl::fromLocalFile(other));
+        const QVariantList recent = ctl->eqHistory();
+        check(recent.size() >= 2
+                  && recent.at(0).toMap().value(QStringLiteral("path")).toString() == other
+                  && recent.at(1).toMap().value(QStringLiteral("path")).toString() == curve,
+              QStringLiteral("the newest file leads the recent list (%1 entries)").arg(recent.size()));
+
+        check(ctl->loadEqHistory(1) && ctl->bands()->rowCount() == 3,
+              QStringLiteral("picking the older entry loads that file again"));
+        check(ctl->eqSourcePath() == curve,
+              QStringLiteral("and it becomes the current source"));
+        check(ctl->eqHistory().at(0).toMap().value(QStringLiteral("path")).toString() == curve,
+              QStringLiteral("and moves back to the front"));
+
+        ctl->clearEqHistory();
+        check(ctl->eqHistory().isEmpty(), QStringLiteral("the recent list can be cleared"));
+        check(ctl->eqSourcePath() == curve,
+              QStringLiteral("clearing it leaves the loaded curve's source alone"));
+
         ctl->clearGraphicEq();
         ctl->bands()->setBands(savedBands);
         ctl->setPreamp(savedPreamp);
         ctl->flushNow();
 
-        // The path is persisted in QSettings, and the file it names is about to
-        // disappear with the temporary directory -- a dead source left behind
-        // would show up on the settings page of the next real start.
-        QSettings settings(QStringLiteral("DreamDSP"), QStringLiteral("DreamDSP"));
-        settings.remove(QStringLiteral("eqSourcePath"));
+        // Both keys outlive the process; the files they named here do not.
+        settings.setValue(QStringLiteral("eqSourcePath"), sourceBefore);
+        settings.setValue(QStringLiteral("eqHistory"), historyBefore);
 
         check(ctl->bands()->rowCount() == savedBands.size(),
               QStringLiteral("the session's bands are back"));
@@ -985,28 +1019,28 @@ void testEqImport()
 
     QTemporaryDir tmp;
 
-    // One band of each shape a FiiO file can hold. Written and read back: the
+    // One band of each shape the format can hold. Written and read back: the
     // encoding is the part that cannot be eyeballed, and a curve that lands a
     // shelf where the peak was sounds wrong in a way nobody can debug.
     Preset original;
     original.name = QStringLiteral("JT7 → Harman 2018");
     original.description = QStringLiteral("round-trip");
     original.preamp = -3.0;
-    original.bands.push_back({ 47.0, 5.4, FiiEqXml::kStandardShelfQ, FilterType::LSC, true });
+    original.bands.push_back({ 47.0, 5.4, PeqXmlFile::kStandardShelfQ, FilterType::LSC, true });
     original.bands.push_back({ 2967.0, -4.0, 2.17, FilterType::PK, true });
-    original.bands.push_back({ 4582.0, -1.4, FiiEqXml::kStandardShelfQ, FilterType::HSC, true });
+    original.bands.push_back({ 4582.0, -1.4, PeqXmlFile::kStandardShelfQ, FilterType::HSC, true });
     original.bands.push_back({ 1113.0, 0.2, 0.5, FilterType::LSCQ, true });
 
     const QString xmlPath = QDir(tmp.path()).filePath(QStringLiteral("curve.xml"));
     QString err;
-    check(FiiEqXml::write(xmlPath, original, QStringLiteral("FIIO K17 R2R"), &err),
-          QStringLiteral("wrote a FiiO XML (%1)").arg(err.isEmpty() ? QStringLiteral("ok") : err));
+    check(PeqXmlFile::write(xmlPath, original, QStringLiteral("ANY DSP"), &err),
+          QStringLiteral("wrote a PEQ .xml (%1)").arg(err.isEmpty() ? QStringLiteral("ok") : err));
 
     Preset back;
     QString model;
-    check(FiiEqXml::read(xmlPath, &back, &model, &err),
+    check(PeqXmlFile::read(xmlPath, &back, &model, &err),
           QStringLiteral("read it back (%1)").arg(err.isEmpty() ? QStringLiteral("ok") : err));
-    check(model == QStringLiteral("FIIO K17 R2R"), QStringLiteral("model survives: %1").arg(model));
+    check(model == QStringLiteral("ANY DSP"), QStringLiteral("model survives: %1").arg(model));
     check(back.name == original.name, QStringLiteral("styleName survives: %1").arg(back.name));
     check(std::abs(back.preamp - original.preamp) < 1e-6, QStringLiteral("masterGain survives"));
     check(back.bands.size() == original.bands.size(),
@@ -1036,7 +1070,7 @@ void testEqImport()
         "</eq></eqList></eqGroup></module></FiiO_DSP>";
     Preset v1;
     err.clear();
-    const bool encodedRefused = !FiiEqXml::readData(encoded, &v1, nullptr, &err);
+    const bool encodedRefused = !PeqXmlFile::readData(encoded, &v1, nullptr, &err);
     check(encodedRefused && !err.isEmpty(),
           QStringLiteral("refuses the version 1.0 encoding: %1").arg(err));
 
@@ -1066,7 +1100,7 @@ void testEqImport()
     check(!ParametricEqText::looksLikeParametricEq(graphic),
           QStringLiteral("a GraphicEQ curve is not parametric text"));
 
-    // Whatever FiiO files are actually on this machine, parsed for real -- the
+    // Whatever PEQ .xml files are on this machine, parsed for real -- the
     // synthetic document above proves the format, not the corpus.
     QStringList dirs;
     const ApoInstall apo = locateApo();
@@ -1082,12 +1116,12 @@ void testEqImport()
         const QStringList files = dir.entryList({ QStringLiteral("*.xml") }, QDir::Files, QDir::Name);
         for (const QString &file : files) {
             QFile f(dir.filePath(file));
-            if (!f.open(QIODevice::ReadOnly) || !FiiEqXml::looksLikeFiiXml(f.readAll()))
+            if (!f.open(QIODevice::ReadOnly) || !PeqXmlFile::looksLikePeqXml(f.readAll()))
                 continue;
             ++found;
             Preset p;
             QString e;
-            if (FiiEqXml::read(dir.filePath(file), &p, nullptr, &e)) {
+            if (PeqXmlFile::read(dir.filePath(file), &p, nullptr, &e)) {
                 out() << QStringLiteral("    %1  %2 bands  preamp %3 dB")
                              .arg(file, -40).arg(p.bands.size(), 2).arg(p.preamp, 5, 'f', 1)
                       << Qt::endl;
@@ -1096,7 +1130,7 @@ void testEqImport()
             }
         }
     }
-    out() << QStringLiteral("  --   %1 FiiO XML file(s) found in the config and preset folders")
+    out() << QStringLiteral("  --   %1 PEQ .xml file(s) found in the config and preset folders")
                  .arg(found)
           << Qt::endl;
 }

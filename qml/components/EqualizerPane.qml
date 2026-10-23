@@ -40,6 +40,24 @@ Item {
         return r;
     }
 
+    // Which recent entry is in effect, kept in step by hand (see historySelect).
+    function syncHistory() {
+        const entries = AppController.eqHistory;
+        let found = -1;
+        for (let i = 0; i < entries.length; ++i) {
+            if (entries[i].path === AppController.eqSourcePath) { found = i; break; }
+        }
+        historySelect.currentIndex = found;
+    }
+
+    Component.onCompleted: syncHistory()
+
+    Connections {
+        target: AppController
+        function onEqSourceChanged() { root.syncHistory() }
+        function onEqHistoryChanged() { root.syncHistory() }
+    }
+
     // Scrolls when the cards do not fit -- the paste box and the graphic strip
     // are both taller than what is left of the window, and the band sliders must
     // keep a usable height whatever else is on the page.
@@ -140,16 +158,33 @@ Item {
                     // ------------------------------------------------ source
                     // Where the curve came from, when it came from a file. A
                     // curve typed into the paste box has no path and no row:
-                    // there is nothing to reopen.
+                    // there is nothing to reopen, and nothing to remember.
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8
                         visible: AppController.eqSourcePath.length > 0
+                                 || AppController.eqHistory.length > 0
 
                         HusText {
-                            text: '来源'
+                            text: '曲线来源'
                             font.pixelSize: 11
                             opacity: 0.55
+                        }
+
+                        // The files imported before, newest first. Picking one
+                        // loads it again; the row below shows which one is in
+                        // effect now.
+                        HusSelect {
+                            id: historySelect
+                            Layout.preferredWidth: 330
+                            model: AppController.eqHistory
+                            // Driven imperatively: choosing an entry makes the
+                            // control write currentIndex itself, which would
+                            // destroy a binding here and leave the box frozen on
+                            // whatever was picked first.
+                            currentIndex: -1
+                            placeholderText: '最近导入的曲线…'
+                            onActivated: (index) => AppController.loadEqHistory(index)
                         }
 
                         HusText {
@@ -175,6 +210,19 @@ Item {
                                        ? AppController.eqSourcePath
                                        : AppController.eqSourcePath + ' —— 文件不在了')
                                       + '\n按这个路径再读一次,外部改过文件时用'
+                            }
+                        }
+
+                        HusIconButton {
+                            type: HusButton.Type_Text
+                            iconSource: HusIcon.DeleteOutlined
+                            enabled: AppController.eqHistory.length > 0
+                            onClicked: AppController.clearEqHistory()
+
+                            HusToolTip {
+                                parent: parent
+                                visible: parent.hovered
+                                text: '清空最近导入的曲线记录(当前曲线不变)'
                             }
                         }
                     }
@@ -406,7 +454,7 @@ Item {
                 // It has to come after the layout -- SectionCard sizes itself
                 // from children[0].
                 //
-                // Anything lands here: a FiiO XML, an AutoEQ parametric text, a
+                // Anything lands here: a PEQ .xml, an AutoEQ parametric text, a
                 // GraphicEQ curve, a .peace preset. loadEqFile decides from the
                 // contents, because the names say nothing.
                 DropArea {

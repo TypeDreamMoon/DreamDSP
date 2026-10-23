@@ -1,4 +1,4 @@
-#include "core/FiiEqXml.h"
+#include "core/PeqXmlFile.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -12,7 +12,7 @@ namespace dreamdsp {
 
 namespace {
 
-// FiiO writes with a period, but the files get hand-edited on machines with a
+// These files are written with a period, but get hand-edited on machines with a
 // comma locale, so accept both.
 bool toNumber(const QString &text, double *out)
 {
@@ -43,12 +43,12 @@ constexpr double kMaxQ = 100.0;
 
 } // namespace
 
-bool FiiEqXml::looksLikeFiiXml(const QByteArray &data)
+bool PeqXmlFile::looksLikePeqXml(const QByteArray &data)
 {
     return data.contains("FiiO_DSP");
 }
 
-bool FiiEqXml::read(const QString &path, Preset *out, QString *model, QString *error)
+bool PeqXmlFile::read(const QString &path, Preset *out, QString *model, QString *error)
 {
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
@@ -72,7 +72,7 @@ bool FiiEqXml::read(const QString &path, Preset *out, QString *model, QString *e
     return true;
 }
 
-bool FiiEqXml::readData(const QByteArray &data, Preset *out, QString *model, QString *error)
+bool PeqXmlFile::readData(const QByteArray &data, Preset *out, QString *model, QString *error)
 {
     const auto fail = [error](const QString &msg) {
         if (error) *error = msg;
@@ -189,7 +189,7 @@ bool FiiEqXml::readData(const QByteArray &data, Preset *out, QString *model, QSt
                     || band.q < kMinQ || band.q > kMaxQ) {
                     return fail(QStringLiteral(
                                     "第 %1 段的数值不像频率/增益/Q(%2 Hz, %3 dB, Q %4)。"
-                                    "这个文件可能用的是飞傲 K19 的 version 1.0 编码(整数寄存器值),"
+                                    "这个文件可能用的是 version 1.0 的编码(整数寄存器值),"
                                     "DreamDSP 只支持 0.0.1 的明文数值格式。")
                                     .arg(index + 1)
                                     .arg(band.frequency)
@@ -208,11 +208,11 @@ bool FiiEqXml::readData(const QByteArray &data, Preset *out, QString *model, QSt
                         .arg(xml.errorString()));
     }
     if (!sawRoot)
-        return fail(QStringLiteral("这个文件里没有 <FiiO_DSP> 根节点,不是飞傲的调音文件"));
+        return fail(QStringLiteral("这个文件里没有 <FiiO_DSP> 根节点,不是 PEQ 曲线文件"));
     if (p.bands.isEmpty())
         return fail(QStringLiteral("文件里没有可用的 <eq> 频段"));
     if (p.bands.size() > kMaxBands) {
-        return fail(QStringLiteral("文件有 %1 段,飞傲的客户端最多接受 %2 段")
+        return fail(QStringLiteral("文件有 %1 段,这种格式最多 %2 段")
                         .arg(p.bands.size())
                         .arg(kMaxBands));
     }
@@ -228,7 +228,7 @@ bool FiiEqXml::readData(const QByteArray &data, Preset *out, QString *model, QSt
     return true;
 }
 
-bool FiiEqXml::write(const QString &path, const Preset &preset, const QString &model, QString *error)
+bool PeqXmlFile::write(const QString &path, const Preset &preset, const QString &model, QString *error)
 {
     if (!preset.isValid()) {
         if (error) *error = QStringLiteral("当前没有可导出的曲线");
@@ -236,14 +236,14 @@ bool FiiEqXml::write(const QString &path, const Preset &preset, const QString &m
     }
     if (preset.bands.size() > kMaxBands) {
         if (error) {
-            *error = QStringLiteral("当前有 %1 段,飞傲的客户端最多接受 %2 段")
+            *error = QStringLiteral("当前有 %1 段,这种格式最多 %2 段")
                          .arg(preset.bands.size())
                          .arg(kMaxBands);
         }
         return false;
     }
 
-    // The XML has no room for a filter FiiO's equalizer cannot show, so say so
+    // The document has no room for a filter it cannot express, so say so
     // instead of writing a curve that is quietly missing it.
     for (int i = 0; i < preset.bands.size(); ++i) {
         const FilterType type = preset.bands[i].type;
@@ -251,7 +251,7 @@ bool FiiEqXml::write(const QString &path, const Preset &preset, const QString &m
             && type != FilterType::LSQ && type != FilterType::LSCQ && type != FilterType::HS
             && type != FilterType::HSC && type != FilterType::HSQ && type != FilterType::HSCQ) {
             if (error) {
-                *error = QStringLiteral("第 %1 段是 %2,飞傲的调音文件只支持峰值、低架和高架")
+                *error = QStringLiteral("第 %1 段是 %2,这种格式只支持峰值、低架和高架")
                              .arg(i + 1)
                              .arg(QString::fromLatin1(apoToken(type)));
             }

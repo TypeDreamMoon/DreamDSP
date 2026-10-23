@@ -134,7 +134,7 @@ RowLayout {
         onClicked: root.startNaming()
     }
 
-    // A curve someone else made -- a FiiO DSP XML from a K17/K19, an AutoEQ
+    // A curve someone else made -- a PEQ .xml from a DSP client, an AutoEQ
     // ParametricEQ.txt, a GraphicEQ curve. loadEqFile sorts out which it is.
     HusButton {
         visible: !root.naming
@@ -144,12 +144,12 @@ RowLayout {
         HusToolTip {
             parent: parent
             visible: parent.hovered
-            text: '飞傲调音文件 .xml · AutoEQ 的 ParametricEQ.txt / GraphicEQ.txt'
+            text: 'PEQ 曲线文件 .xml · AutoEQ 的 ParametricEQ.txt / GraphicEQ.txt'
         }
     }
 
     // The reverse: the curve that is loaded, written back out as something a
-    // K17/K19 DSP client will open. It lands in the preset folder.
+    // a DSP client will open. It lands in the preset folder.
     HusButton {
         visible: !root.naming
         text: '导出 XML'
@@ -159,7 +159,7 @@ RowLayout {
         HusToolTip {
             parent: parent
             visible: parent.hovered
-            text: '存成飞傲 K17/K19 的调音文件,放在预设目录里'
+            text: '导出成 DSP 客户端能读的 PEQ 曲线文件,放在预设目录里'
         }
     }
 
@@ -214,7 +214,7 @@ RowLayout {
         id: eqFileDialog
         title: '导入调音文件'
         fileMode: FileDialog.OpenFile
-        nameFilters: ['调音文件 (*.xml *.txt *.peace)', '飞傲调音曲线 (*.xml)', '所有文件 (*)']
+        nameFilters: ['曲线文件 (*.xml *.txt *.peace)', 'PEQ 曲线 (*.xml)', '所有文件 (*)']
         onAccepted: AppController.loadEqFile(selectedFile)
     }
 }

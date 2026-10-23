@@ -67,6 +67,10 @@ class AppController : public QObject
     // keep.
     Q_PROPERTY(QString eqSourcePath READ eqSourcePath NOTIFY eqSourceChanged)
     Q_PROPERTY(bool eqSourceExists READ eqSourceExists NOTIFY eqSourceChanged)
+    // Curve files imported before, newest first, as [{ label, value, path }] for
+    // a combo box. A curve typed into the paste box never enters this: there is
+    // no file to reopen.
+    Q_PROPERTY(QVariantList eqHistory READ eqHistory NOTIFY eqHistoryChanged)
     Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
 
     Q_PROPERTY(double preamp READ preamp WRITE setPreamp NOTIFY preampChanged)
@@ -199,6 +203,7 @@ public:
     QString currentPreset() const { return m_currentPreset; }
     QString eqSourcePath() const { return m_eqSourcePath; }
     bool eqSourceExists() const;
+    QVariantList eqHistory() const;
     bool dirty() const { return m_dirty; }
 
     double preamp() const { return m_preamp; }
@@ -256,7 +261,7 @@ public:
     Q_INVOKABLE bool deletePreset(int row);
 
     // One entry point for a shared "调音文件", routed by content rather than by
-    // extension -- the same curve travels as .xml (FiiO's DSP client),
+    // extension -- the same curve travels as .xml (a DSP client's export),
     // ParametricEQ.txt (AutoEQ, APO, review tables) and GraphicEQ.txt, and the
     // names people give them say nothing about which is which.
     Q_INVOKABLE bool loadEqFile(const QUrl &url);
@@ -264,10 +269,14 @@ public:
     // Re-reads the file this curve came from, so a target curve edited in place
     // can be picked up without a second file dialog.
     Q_INVOKABLE bool reloadEqSource();
+    // Loads one of the remembered files by its position in eqHistory().
+    Q_INVOKABLE bool loadEqHistory(int index);
+    // Forgets the list. The curve on the equalizer, and the file it came from,
+    // are left alone -- this clears a record, not a setting.
+    Q_INVOKABLE void clearEqHistory();
 
-    // Writes the curve that is loaded as a FiiO XML into the preset directory,
-    // which is what a K17/K19 DSP client -- or another copy of DreamDSP -- can
-    // read back. An empty name means "use the name of the loaded preset".
+    // Writes the curve that is loaded as a PEQ .xml into the preset directory,
+    // which a DSP client -- or another copy of DreamDSP -- can read back. An empty name means "use the name of the loaded preset".
     Q_INVOKABLE bool exportFiiXml(const QString &name = QString());
 
     // A preset that keeps everything, not just the bands: the effect rack, the
@@ -415,6 +424,7 @@ public:
 
 signals:
     void eqSourceChanged();
+    void eqHistoryChanged();
     void apoChanged();
     void devicesChanged();
     void currentDeviceChanged();
@@ -471,6 +481,10 @@ private:
     void setMessage(const QString &msg);
     void setCurrentPreset(const QString &name);
     void setEqSource(const QString &path);
+    // Moves `path` to the front of the recent list, dropping any earlier entry
+    // for the same file and anything past the cap.
+    void rememberEqFile(const QString &path);
+    void setEqHistory(const QStringList &paths);
     void markDirty(bool dirty);
 
     void saveSession();
@@ -574,7 +588,8 @@ private:
     bool m_restoring = false;
     QString m_currentPreset;
     QString m_eqSourcePath;
-    // The device an imported curve named ("FIIO K17 R2R"), so exporting it again
+    QStringList m_eqHistory;
+    // The device an imported curve named ("ANY DSP"), so exporting it again
     // says the same thing rather than inventing a provenance.
     QString m_importedModel;
     QString m_lastError;
