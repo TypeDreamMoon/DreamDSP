@@ -416,6 +416,12 @@ bool FileUpdatePackage::stageInto(const QString &containerPath, const FileUpdate
     return true;
 }
 
+QString FileUpdatePackage::restartMarkerPath()
+{
+    const QDir base(QFileInfo(stageDirectory()).absolutePath());
+    return base.filePath(QStringLiteral("restart-requested"));
+}
+
 bool FileUpdatePackage::isStaged()
 {
     return QFileInfo::exists(planPath(stageDirectory()));

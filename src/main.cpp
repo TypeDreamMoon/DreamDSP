@@ -198,6 +198,9 @@ int main(int argc, char *argv[])
 
     // Diagnostic runs deliberately bypass the single-instance guard so they can
     // be used while a normal copy is running.
+    // --restart-self is deliberately not a "diagnostic" run: it has to take the
+    // single-instance guard for real, because releasing it in time is half of
+    // what it is testing.
     const bool diagnostic = wantSelfTest || wantSliderTest
                             || args.contains(QStringLiteral("--grab"))
                             || args.contains(QStringLiteral("--applyir"));
@@ -238,6 +241,12 @@ int main(int argc, char *argv[])
             return 0;
         }
     }
+
+    // --restart-self: does the quit -> relaunch handoff work? Applies whatever is
+    // staged and then leaves through the same door "install and restart" uses,
+    // so the guard release, the respawn and the file swap are exercised for real
+    // rather than being read off the code.
+    const bool wantRestartTest = args.contains(QStringLiteral("--restart-self"));
 
     // Before the window, before anything is read out of the program directory:
     // a downloaded update is swapped in here. Qt and HuskarUI are already
@@ -327,6 +336,24 @@ int main(int argc, char *argv[])
                 else
                     QCoreApplication::quit();
             };
+
+            if (wantRestartTest) {
+                // Long enough for the window to exist, so this leaves through
+                // the ordinary shutdown path rather than mid-construction.
+                QTimer::singleShot(1500, root, [controller, leave] {
+                    // installNow() applies a staged delta and then quits; with
+                    // nothing staged it reports and stays, so fall back to a
+                    // plain restart request to exercise the handoff alone.
+                    if (!controller || !controller->updates()->installNow()) {
+                        QFile marker(dreamdsp::FileUpdatePackage::restartMarkerPath());
+                        if (marker.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                            marker.write(QByteArrayLiteral("1"));
+                            marker.close();
+                        }
+                        leave();
+                    }
+                });
+            }
 
             // A second launch asks the running copy to come forward.
             QObject::connect(&instance, &dreamdsp::SingleInstance::raiseRequested,
@@ -436,14 +463,17 @@ int main(int argc, char *argv[])
     if (comReady && hr != RPC_E_CHANGED_MODE)
         ::CoUninitialize();
 
-    // "Install and restart" writes this before asking us to quit. Applied
-    // updates normally need nothing but a restart, and making the user hunt for
-    // the shortcut afterwards is how an update gets left half-installed.
+    // "Install and restart" writes this before asking us to quit. Two things
+    // have to be true before the replacement is started, and getting either
+    // wrong costs the user a second quit: the files are already swapped, and
+    // this process has let go of the single-instance name -- a guard still held
+    // here makes the new copy exit immediately as "already running".
     {
-        const QString marker = QDir(dreamdsp::FileUpdatePackage::stageDirectory())
-                                   .filePath(QStringLiteral("restart-after-update"));
-        if (QFileInfo::exists(marker) && QFile::remove(marker))
+        const QString marker = dreamdsp::FileUpdatePackage::restartMarkerPath();
+        if (QFileInfo::exists(marker) && QFile::remove(marker)) {
+            instance.release();
             QProcess::startDetached(QCoreApplication::applicationFilePath(), QStringList());
+        }
     }
 
     return rc;

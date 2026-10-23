@@ -78,6 +78,12 @@ public:
     static bool stageInto(const QString &containerPath, const FileUpdate &pkg,
                           const QString &stageDir, QString *error = nullptr);
 
+    // "Install and restart" drops this before quitting and main() rereads it
+    // after the event loop, so the new copy starts without the user going to
+    // find the shortcut again. It lives beside the stage directory rather than
+    // inside it, because a successful apply deletes the latter.
+    static QString restartMarkerPath();
+
     static bool isStaged();
     static QString stagedVersion();   // empty when nothing is waiting
     // True when a start already tried to apply what is staged and something

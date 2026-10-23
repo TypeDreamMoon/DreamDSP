@@ -465,18 +465,30 @@ are, and patching somebody else's release into that tree would be a lie the
 updater can detect but not repair.
 
 Applying one is not a file copy. Every file in the package is checked against
-its own hash, the package is staged under `%LOCALAPPDATA%\DreamDSP\pending`,
-and the swap happens at the next start — before the window, because the files
-being replaced include the Qt DLLs this process has mapped. A mapped image
-cannot be deleted but it can be renamed, so the old file is moved to
-`*.ddsp-old`, the new one written in its place, and the leftovers swept up on a
-later start. Anything that cannot be released is *kept* rather than reported as
-done, and retried on the next start; “Install and restart” reopens the window
-afterwards so the update does not depend on the user finding the shortcut again.
+its own hash, the package is staged under `%LOCALAPPDATA%\DreamDSP\pending`, and
+the swap happens in two places, for two different reasons:
+
+* **When 退出并更新 is pressed.** The files being replaced include the Qt DLLs
+  this process has mapped, and a mapped image cannot be deleted — but it can be
+  renamed, so the old file moves to `*.ddsp-old`, the new one is written in its
+  place, and the leftovers are swept up on a later start. Doing it before
+  quitting is the part that matters: the replacement is started from this
+  directory, so if the swap happened after the restart request, the copy that
+  came back would be the old binary again and the update would need a second
+  restart. This process also gives up the single-instance name before spawning
+  the replacement — a guard still held makes the new copy exit immediately as
+  “already running”, which is the other way that second restart appeared.
+* **At start-up**, for a package that was staged but never installed — the app
+  closed from the tray instead, or the machine went down. Same swap, same
+  rename-aside, and anything that cannot be released is *kept* rather than
+  reported as done and retried on the next start.
 
 A delta that fails to verify, parse or stage says so and leaves the installer
 path available. `--update-report <file>` prints what a published container
-claims, which is how a release can be checked against its own asset.
+claims, which is how a release can be checked against its own asset, and
+`--restart-self` walks the quit → relaunch handoff end to end (it applies
+whatever is staged, then leaves the way the button does) — that path spans two
+processes and cannot be checked any other way.
 
 The audio component is deliberately not part of this: `DreamDspApo.dll` is
 staged into `ProgramData` and registered in HKLM, which needs elevation and a
@@ -489,6 +501,8 @@ update does not restart the machine's audio to do so silently.
 ```bat
 scripts\run.bat --selftest              :: headless: DSP, config I/O, presets, autostart
 scripts\run.bat --slidertest            :: drives the UI with synthetic mouse events
+scripts\run.bat --restart-self          :: apply what is staged, quit, come back (update handoff)
+scripts\run.bat --update-report f.bin   :: print what a delta container claims
 scripts\run.bat --view 1 --grab out.png :: screenshot a given tab (0/1/2)
 scripts\run.bat --traymenu --grab m.png :: screenshot the tray popup
 scripts\run.bat --spectrum --grab s.png :: screenshot with the analyser running

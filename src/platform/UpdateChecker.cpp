@@ -400,29 +400,46 @@ void UpdateChecker::onDownloadFinished(QNetworkReply *reply)
     setStatus(QStringLiteral("%1 已下载并校验通过,可以安装").arg(m_assetName));
 }
 
-void UpdateChecker::installNow()
+bool UpdateChecker::installNow()
 {
     if (m_deltaStaged) {
-        // Nothing in the program directory can be replaced while this process
-        // has it mapped, so the package is applied at the next start. The
-        // marker tells main() to reopen the window afterwards -- one click
-        // for the user instead of "quit, then find the shortcut again".
-        QSaveFile marker(QDir(FileUpdatePackage::stageDirectory())
-                              .filePath(QStringLiteral("restart-after-update")));
+        // Applied here, not at the next start. The process that comes back is
+        // started from this directory, so unless the swap happens before we
+        // quit, the replacement is the *old* binary again and the update needs
+        // a second restart to take effect -- which is exactly how it behaved.
+        const FileUpdatePackage::ApplyResult applied =
+            FileUpdatePackage::applyPending(QCoreApplication::applicationDirPath());
+
+        if (!applied.complete) {
+            // Something is still in use that even the rename could not move.
+            // Say so and stay running: quitting would only restart the old copy
+            // and retry the same thing.
+            m_deltaBlocked = true;
+            setStatus(QStringLiteral("更新没能完成:%1 —— 可以改用完整安装包")
+                          .arg(applied.error.isEmpty() ? QStringLiteral("文件被占用")
+                                                       : applied.error));
+            emit stateChanged();
+            return false;
+        }
+
+        m_deltaStaged = false;
+        m_pendingVersion.clear();
+
+        QFile marker(FileUpdatePackage::restartMarkerPath());
         if (marker.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
             marker.write(QByteArrayLiteral("1"));
-            marker.commit();
+            marker.close();
         }
-        setStatus(m_pendingVersion.isEmpty()
-                      ? QStringLiteral("正在退出,重启后完成更新")
-                      : QStringLiteral("正在退出,重启后完成到 %1 的更新").arg(m_pendingVersion));
+
+        setStatus(QStringLiteral("已更新到 %1,正在重新启动")
+                      .arg(applied.version.isEmpty() ? m_latestVersion : applied.version));
         emit quitRequested();
-        return;
+        return true;
     }
 
     if (m_downloadedPath.isEmpty() || !QFile::exists(m_downloadedPath)) {
         setStatus(QStringLiteral("还没有已下载的安装包"));
-        return;
+        return false;
     }
 
     // The installer replaces the whole directory, so anything staged from a
@@ -440,12 +457,13 @@ void UpdateChecker::installNow()
         m_downloadedPath, { QStringLiteral("/SILENT"), QStringLiteral("/NOCANCEL") });
     if (!started) {
         setStatus(QStringLiteral("无法启动安装程序"));
-        return;
+        return false;
     }
 
     setStatus(QStringLiteral("安装程序已启动,DreamDSP 即将退出"));
     // The installer cannot replace files this process has open.
     emit quitRequested();
+    return true;
 }
 
 void UpdateChecker::openReleasePage() const

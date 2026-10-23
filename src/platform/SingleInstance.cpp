@@ -37,4 +37,10 @@ bool SingleInstance::acquire()
     return true;
 }
 
+void SingleInstance::release()
+{
+    if (m_server.isListening())
+        m_server.close();
+}
+
 } // namespace dreamdsp

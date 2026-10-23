@@ -23,6 +23,12 @@ public:
     // exit immediately.
     bool acquire();
 
+    // Lets go of the name. Needed before spawning a replacement: the next copy
+    // probes the server, and a guard still held by a process on its way out
+    // makes it exit as "already running" -- which is what made an update take
+    // two quits to land.
+    void release();
+
 signals:
     void raiseRequested();
 

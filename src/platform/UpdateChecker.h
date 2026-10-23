@@ -92,8 +92,10 @@ public:
 
     Q_INVOKABLE void checkNow();
     Q_INVOKABLE void download();
-    // Runs the verified installer and closes this copy so it can be replaced.
-    Q_INVOKABLE void installNow();
+    // Applies the staged delta (or runs the verified installer) and closes this
+    // copy so it can be replaced. False when there was nothing to install, or
+    // when the swap could not finish.
+    Q_INVOKABLE bool installNow();
     Q_INVOKABLE void openReleasePage() const;
 
     // Compares two "1.2.3" strings. Public because it is worth testing on its
