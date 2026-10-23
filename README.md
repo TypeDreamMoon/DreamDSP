@@ -60,6 +60,7 @@ Everything runs in DreamDSP's own APO.
 | Preamp, per-device profiles | done |
 | AutoEQ headphone correction (20,777 curves) | done |
 | Peace `.peace` preset interop | done |
+| FiiO DSP curve `.xml` import/export (K17/K19 client) | done |
 | Convolution / impulse response, any rate, any file rate | done |
 | Compressor, with auto knee/attack/release/makeup | done |
 | Three-band multiband compressor | done |
@@ -400,6 +401,25 @@ Session state (bands, preamp, selected device, on/off) is restored on launch.
 Bands and preamp are stored as `%APPDATA%\DreamDSP\session.peace` — a normal
 preset file, so it can be inspected or copied like any other.
 
+### Curves made by someone else
+
+A shared headphone curve travels in three shapes, and *导入…* on the preset row
+(or dropping the file on the equalizer card) accepts all of them — the shape is
+decided by the contents, because the filenames say nothing:
+
+| Shape | Who writes it | What happens |
+|---|---|---|
+| `<FiiO_DSP …>.xml` | FiiO's K17/K19 DSP client, AutoEQ→FiiO converters | every `<eq>` band becomes a parametric band |
+| `ParametricEQ.txt` | AutoEQ, Equalizer APO, review tables | `Filter N: ON PK Fc …` lines become bands |
+| `GraphicEQ.txt` | every measurement site | fitted to the 31-band graphic bank |
+
+*导出 XML* writes the loaded curve back out as a FiiO XML in the preset
+folder, which is what a K17/K19 DSP client — or another copy of DreamDSP —
+will read. FiiO's two encodings are not the same: `version="0.0.1"` stores
+plain Hz/dB/Q and round-trips, while the K19 client's `version="1.0"` stores
+register values (gains around 120, frequencies quantised) and is refused with
+an explanation rather than imported as a curve that is 12 dB out.
+
 The `[Filters]` section stores a filter type as an integer. The decoding table
 is Peace's `$FilterTypes` array (`Peace.au3:384`), reproduced in
 `core/Biquad.h` — the enum order **is** the on-disk index:
@@ -425,8 +445,10 @@ window gain was halved twice, so the whole spectrum ran 6 dB hot — invisible b
 eye, obvious to the test.
 
 `--selftest` checks the parts a screenshot cannot: biquad magnitudes against
-known values, `config.txt` include add/remove idempotency and BOM-freedom, and
-a parse plus write/read round-trip of **every** `.peace` file on the machine.
+known values, `config.txt` include add/remove idempotency and BOM-freedom, a
+parse plus write/read round-trip of **every** `.peace` file on the machine, and
+the same round-trip for the FiiO XML reader/writer — including that a K19
+`version="1.0"` file is refused instead of read as +120 dB.
 
 `--slidertest` posts real `QMouseEvent`s into the live scene and asserts that
 band 0's model value follows the drag, then restores it. Dragging is the one

@@ -4,7 +4,9 @@
 #include "WavFile.h"
 
 #include "core/ApoConfig.h"
+#include "core/FiiEqXml.h"
 #include "core/GraphicCurve.h"
+#include "core/ParametricEqText.h"
 #include "platform/Autostart.h"
 
 #include <QCoreApplication>
@@ -1698,6 +1700,145 @@ bool AppController::deletePreset(int row)
         return false;
     }
     setMessage(QStringLiteral("已删除预设"));
+    return true;
+}
+
+// ------------------------------------------------------- imported curves
+
+bool AppController::applyImportedPreset(const Preset &preset, const QString &source)
+{
+    if (!preset.isValid()) {
+        setError(QStringLiteral("这条曲线里没有可用频段"));
+        return false;
+    }
+
+    m_restoring = true;
+    m_bands.setBands(preset.bands);
+    setPreamp(preset.preamp);
+    m_restoring = false;
+
+    // Show the curve's own name, unless one of ours already answers to it. Then
+    // the selector would mark that other preset as "loaded" and "保存" would
+    // write over it -- for a file we do not track, and that the user never
+    // picked. The name is still reported, so "另存为" can reproduce it.
+    QString name = preset.name;
+    bool collides = false;
+    for (const QVariant &entry : m_presets.entries()) {
+        if (entry.toMap().value(QStringLiteral("name")).toString().compare(name, Qt::CaseInsensitive) == 0) {
+            collides = true;
+            break;
+        }
+    }
+    if (collides)
+        name.clear();
+    setCurrentPreset(name);
+
+    setError({});
+
+    // Dirty on purpose: nothing on disk matches this curve yet.
+    markDirty(true);
+
+    const int shown = m_bands.rowCount({});
+    const int dropped = preset.bands.size() - shown;
+    QString msg = QStringLiteral("已载入%1 · %2 段").arg(source).arg(shown);
+    if (dropped > 0)
+        msg += QStringLiteral("(文件里的另外 %1 段超出上限)").arg(dropped);
+    if (collides && !preset.name.isEmpty())
+        msg += QStringLiteral(" · 与已有预设「%1」同名,没有自动选中它").arg(preset.name);
+    setMessage(msg);
+
+    scheduleWrite();
+    return true;
+}
+
+bool AppController::loadEqFile(const QUrl &url)
+{
+    const QString path = url.isLocalFile() ? url.toLocalFile() : url.toString();
+
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        setError(QStringLiteral("打不开 %1:%2").arg(path, f.errorString()));
+        return false;
+    }
+    const QByteArray data = f.readAll();
+    const QString text = QString::fromUtf8(data);
+
+    // Routed by content, not by extension: the same curve arrives as .xml from
+    // FiiO's client, as ParametricEQ.txt from AutoEQ and as GraphicEQ.txt from
+    // every measurement site, and people rename them freely.
+    if (FiiEqXml::looksLikeFiiXml(data)) {
+        Preset p;
+        QString model;
+        QString err;
+        if (!FiiEqXml::read(path, &p, &model, &err)) {
+            setError(QStringLiteral("导入失败:%1").arg(err));
+            return false;
+        }
+        m_importedModel = model;
+        return applyImportedPreset(
+            p, model.isEmpty() ? QStringLiteral("飞傲调音文件")
+                               : QStringLiteral("飞傲 %1 曲线").arg(model));
+    }
+
+    if (ParametricEqText::looksLikeParametricEq(text)) {
+        Preset p;
+        QString err;
+        if (!ParametricEqText::read(text, &p, &err)) {
+            setError(QStringLiteral("导入失败:%1").arg(err));
+            return false;
+        }
+        if (p.name.isEmpty())
+            p.name = QFileInfo(path).completeBaseName();
+        return applyImportedPreset(p, QStringLiteral("参数均衡曲线"));
+    }
+
+    // A .peace file from somewhere else: the preset list already shows the ones
+    // in our folder and APO's, but a curve handed over by chat is a file path
+    // like any other.
+    if (path.endsWith(QLatin1String(".peace"), Qt::CaseInsensitive)) {
+        Preset p;
+        QString err;
+        if (!PeaceFile::read(path, &p, &err)) {
+            setError(QStringLiteral("导入失败:%1").arg(err));
+            return false;
+        }
+        return applyImportedPreset(p, QStringLiteral("Peace 预设"));
+    }
+
+    // Everything else is a point-by-point curve, which the graphic equalizer
+    // already knows how to fit.
+    return importGraphicEq(text);
+}
+
+bool AppController::exportFiiXml(const QString &name)
+{
+    Preset p = currentAsPreset();
+
+    QString clean = name.trimmed();
+    if (clean.isEmpty())
+        clean = p.name.trimmed();
+    if (clean.isEmpty())
+        clean = QStringLiteral("DreamDSP 曲线");
+    for (QChar &c : clean) {
+        if (QStringLiteral("\\/:*?\"<>|").contains(c))
+            c = QLatin1Char('_');
+    }
+
+    QDir dir(PresetStore::userDirectory());
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+        setError(QStringLiteral("无法创建预设目录 %1").arg(dir.path()));
+        return false;
+    }
+
+    const QString path = dir.filePath(clean + QStringLiteral(".xml"));
+    QString err;
+    if (!FiiEqXml::write(path, p, m_importedModel, &err)) {
+        setError(QStringLiteral("导出失败:%1").arg(err));
+        return false;
+    }
+
+    setError({});
+    setMessage(QStringLiteral("已导出 %1").arg(path));
     return true;
 }
 

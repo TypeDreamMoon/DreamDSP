@@ -101,7 +101,7 @@ Item {
                 title: '图形均衡'
                 hint: AppController.graphicLoaded
                       ? '31 段 1/3 倍频'
-                      : '还没有曲线 · 载入 AutoEQ 的 GraphicEQ.txt'
+                      : '还没有曲线 · 拖入 GraphicEQ.txt / 飞傲调音文件 .xml 都可以'
 
                 // One row while there is no curve. The explanation used to be a
                 // box of its own, which pushed the band sliders below the fold
@@ -142,8 +142,9 @@ Item {
 
                     Note {
                         visible: Ui.showNotes && !AppController.graphicLoaded
-                        text: '这里载入的是别人做好的 GraphicEQ 曲线(比如 AutoEQ 网站上每款耳机的 GraphicEQ.txt),拟合成 31 段均衡。'
-                              + '已经在 AutoEQ 页导入过同一副耳机的话,不需要再载入。也可以把文件直接拖到这张卡片上。'
+                        text: '这里载入的是别人做好的曲线：AutoEQ 网站的 GraphicEQ.txt 会拟合成 31 段均衡；'
+                              + '别人分享的飞傲调音文件(.xml)或 ParametricEQ.txt 会直接变成上面的参数均衡段。'
+                              + '在 AutoEQ 页导入过同一副耳机的话,不需要再载入。也可以把文件直接拖到这张卡片上。'
                     }
                     RowLayout {
                         visible: AppController.graphicLoaded
@@ -255,8 +256,10 @@ Item {
                 DropArea {
                     anchors.fill: parent
                     onDropped: (drop) => {
+                        // Anything: a FiiO XML, an AutoEQ parametric text, a
+                        // GraphicEQ curve. loadEqFile decides from the contents.
                         if (drop.hasUrls && drop.urls.length > 0)
-                            AppController.loadGraphicEqFile(drop.urls[0]);
+                            AppController.loadEqFile(drop.urls[0]);
                     }
                 }
             }

@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import HuskarUI.Basic
 import DreamDSP
 
@@ -133,6 +134,35 @@ RowLayout {
         onClicked: root.startNaming()
     }
 
+    // A curve someone else made -- a FiiO DSP XML from a K17/K19, an AutoEQ
+    // ParametricEQ.txt, a GraphicEQ curve. loadEqFile sorts out which it is.
+    HusButton {
+        visible: !root.naming
+        text: '导入…'
+        onClicked: eqFileDialog.open()
+
+        HusToolTip {
+            parent: parent
+            visible: parent.hovered
+            text: '飞傲调音文件 .xml · AutoEQ 的 ParametricEQ.txt / GraphicEQ.txt'
+        }
+    }
+
+    // The reverse: the curve that is loaded, written back out as something a
+    // K17/K19 DSP client will open. It lands in the preset folder.
+    HusButton {
+        visible: !root.naming
+        text: '导出 XML'
+        enabled: AppController.bands.count > 0
+        onClicked: AppController.exportFiiXml('')
+
+        HusToolTip {
+            parent: parent
+            visible: parent.hovered
+            text: '存成飞傲 K17/K19 的调音文件,放在预设目录里'
+        }
+    }
+
     // Naming: confirm or abandon.
     HusButton {
         visible: root.naming
@@ -178,5 +208,13 @@ RowLayout {
             visible: parent.hovered
             text: '打开预设文件夹'
         }
+    }
+
+    FileDialog {
+        id: eqFileDialog
+        title: '导入调音文件'
+        fileMode: FileDialog.OpenFile
+        nameFilters: ['调音文件 (*.xml *.txt *.peace)', '飞傲调音曲线 (*.xml)', '所有文件 (*)']
+        onAccepted: AppController.loadEqFile(selectedFile)
     }
 }

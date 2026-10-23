@@ -30,7 +30,7 @@ if(WIN32)
     enable_language(RC)
 endif()
 
-find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui Quick Network Concurrent)
+find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui Quick Network Concurrent QuickDialogs2)
 find_package(HuskarUI REQUIRED)
 
 qt_standard_project_setup(REQUIRES 6.7)
@@ -112,6 +112,8 @@ qt_add_qml_module(DreamDSP
         src/core/Biquad.h              src/core/Biquad.cpp
         src/core/ApoConfig.h           src/core/ApoConfig.cpp
         src/core/PeacePreset.h         src/core/PeacePreset.cpp
+        src/core/FiiEqXml.h            src/core/FiiEqXml.cpp
+        src/core/ParametricEqText.h    src/core/ParametricEqText.cpp
         src/core/DreamPreset.h         src/core/DreamPreset.cpp
         src/core/GraphicCurve.h        src/core/GraphicCurve.cpp
         src/core/AutoEqDatabase.h      src/core/AutoEqDatabase.cpp
@@ -169,6 +171,7 @@ target_compile_definitions(DreamDSP PRIVATE
 
 target_link_libraries(DreamDSP PRIVATE
     Qt6::Quick
+    Qt6::QuickDialogs2 # the file picker behind "导入调音文件"
     Qt6::Network      # QLocalServer/Socket for the single-instance guard
     Qt6::Concurrent   # offline rendering off the GUI thread
     HuskarUI::Basic

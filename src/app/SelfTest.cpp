@@ -9,7 +9,9 @@
 #include "core/Fft.h"
 #include "GraphicEq.h"
 #include "core/DreamPreset.h"
+#include "core/FiiEqXml.h"
 #include "core/GraphicCurve.h"
+#include "core/ParametricEqText.h"
 #include "core/PeacePreset.h"
 #include "platform/ApoInstaller.h"
 #include "platform/ApoLocator.h"
@@ -914,6 +916,128 @@ int runSliderTest(QObject *rootObject)
     return g_failures;
 }
 
+void testEqImport()
+{
+    out() << "\n[imported curves]" << Qt::endl;
+
+    QTemporaryDir tmp;
+
+    // One band of each shape a FiiO file can hold. Written and read back: the
+    // encoding is the part that cannot be eyeballed, and a curve that lands a
+    // shelf where the peak was sounds wrong in a way nobody can debug.
+    Preset original;
+    original.name = QStringLiteral("JT7 → Harman 2018");
+    original.description = QStringLiteral("round-trip");
+    original.preamp = -3.0;
+    original.bands.push_back({ 47.0, 5.4, FiiEqXml::kStandardShelfQ, FilterType::LSC, true });
+    original.bands.push_back({ 2967.0, -4.0, 2.17, FilterType::PK, true });
+    original.bands.push_back({ 4582.0, -1.4, FiiEqXml::kStandardShelfQ, FilterType::HSC, true });
+    original.bands.push_back({ 1113.0, 0.2, 0.5, FilterType::LSCQ, true });
+
+    const QString xmlPath = QDir(tmp.path()).filePath(QStringLiteral("curve.xml"));
+    QString err;
+    check(FiiEqXml::write(xmlPath, original, QStringLiteral("FIIO K17 R2R"), &err),
+          QStringLiteral("wrote a FiiO XML (%1)").arg(err.isEmpty() ? QStringLiteral("ok") : err));
+
+    Preset back;
+    QString model;
+    check(FiiEqXml::read(xmlPath, &back, &model, &err),
+          QStringLiteral("read it back (%1)").arg(err.isEmpty() ? QStringLiteral("ok") : err));
+    check(model == QStringLiteral("FIIO K17 R2R"), QStringLiteral("model survives: %1").arg(model));
+    check(back.name == original.name, QStringLiteral("styleName survives: %1").arg(back.name));
+    check(std::abs(back.preamp - original.preamp) < 1e-6, QStringLiteral("masterGain survives"));
+    check(back.bands.size() == original.bands.size(),
+          QStringLiteral("%1 of %2 bands")
+              .arg(back.bands.size()).arg(original.bands.size()));
+
+    bool same = back.bands.size() == original.bands.size();
+    for (int i = 0; same && i < back.bands.size(); ++i) {
+        const PresetBand &a = original.bands[i];
+        const PresetBand &b = back.bands[i];
+        same = std::abs(a.frequency - b.frequency) < 0.01
+               && std::abs(a.gainDb - b.gainDb) < 0.01
+               && std::abs(a.q - b.q) < 0.001
+               && a.type == b.type;
+    }
+    check(same, QStringLiteral("every band survives the round-trip"));
+
+    // The k19 client's version 1.0 encoding stores register values, not Hz/dB/Q.
+    // Reading it as plain numbers would ask for +120 dB, so it has to be
+    // refused with an explanation instead.
+    const QByteArray encoded =
+        "<?xml version=\"1.0\"?>"
+        "<FiiO_DSP model=\"K19\" version=\"1.0\"><module name=\"EQ\"><eqGroup>"
+        "<eqList><eq index=\"0\">"
+        "<param name=\"type\">1</param><param name=\"freq\">84</param>"
+        "<param name=\"gain\">167</param><param name=\"q\">16</param>"
+        "</eq></eqList></eqGroup></module></FiiO_DSP>";
+    Preset v1;
+    err.clear();
+    const bool encodedRefused = !FiiEqXml::readData(encoded, &v1, nullptr, &err);
+    check(encodedRefused && !err.isEmpty(),
+          QStringLiteral("refuses the version 1.0 encoding: %1").arg(err));
+
+    // Parametric text, i.e. what AutoEQ and every review table export.
+    const QString text = QStringLiteral("Preamp: -3.0 dB\n"
+                                        "Filter 1: ON LSC Fc 105 Hz Gain -1.9 dB Q 0.70\n"
+                                        "Filter 2: ON PK Fc 2957 Hz Gain -5.2 dB Q 4.24\n");
+    check(ParametricEqText::looksLikeParametricEq(text), QStringLiteral("recognised as parametric text"));
+
+    Preset fromText;
+    err.clear();
+    const bool textRead = ParametricEqText::read(text, &fromText, &err);
+    check(textRead && fromText.bands.size() == 2,
+          QStringLiteral("parsed %1 filter(s)").arg(fromText.bands.size()));
+    if (fromText.bands.size() == 2) {
+        check(std::abs(fromText.preamp + 3.0) < 1e-6, QStringLiteral("preamp read"));
+        check(fromText.bands[0].type == FilterType::LSC && fromText.bands[1].type == FilterType::PK,
+              QStringLiteral("filter types read"));
+        check(std::abs(fromText.bands[1].frequency - 2957.0) < 1e-6
+                  && std::abs(fromText.bands[1].gainDb + 5.2) < 1e-6
+                  && std::abs(fromText.bands[1].q - 4.24) < 1e-6,
+              QStringLiteral("frequency/gain/Q read"));
+    }
+
+    // A GraphicEQ curve must not be mistaken for one: it has neither keyword.
+    const QString graphic = QStringLiteral("GraphicEQ: 20 -1.5; 25 -1.4; 31 -1.2");
+    check(!ParametricEqText::looksLikeParametricEq(graphic),
+          QStringLiteral("a GraphicEQ curve is not parametric text"));
+
+    // Whatever FiiO files are actually on this machine, parsed for real -- the
+    // synthetic document above proves the format, not the corpus.
+    QStringList dirs;
+    const ApoInstall apo = locateApo();
+    if (!apo.configPath.isEmpty())
+        dirs << apo.configPath;
+    dirs << PresetStore::userDirectory();
+
+    int found = 0;
+    for (const QString &dirPath : std::as_const(dirs)) {
+        QDir dir(dirPath);
+        if (!dir.exists())
+            continue;
+        const QStringList files = dir.entryList({ QStringLiteral("*.xml") }, QDir::Files, QDir::Name);
+        for (const QString &file : files) {
+            QFile f(dir.filePath(file));
+            if (!f.open(QIODevice::ReadOnly) || !FiiEqXml::looksLikeFiiXml(f.readAll()))
+                continue;
+            ++found;
+            Preset p;
+            QString e;
+            if (FiiEqXml::read(dir.filePath(file), &p, nullptr, &e)) {
+                out() << QStringLiteral("    %1  %2 bands  preamp %3 dB")
+                             .arg(file, -40).arg(p.bands.size(), 2).arg(p.preamp, 5, 'f', 1)
+                      << Qt::endl;
+            } else {
+                out() << QStringLiteral("    %1  --  %2").arg(file, -40).arg(e) << Qt::endl;
+            }
+        }
+    }
+    out() << QStringLiteral("  --   %1 FiiO XML file(s) found in the config and preset folders")
+                 .arg(found)
+          << Qt::endl;
+}
+
 int runSelfTest()
 {
     g_failures = 0;
@@ -930,6 +1054,7 @@ int runSelfTest()
     testFullPreset();
     testPresets(apo);
     testAutoEq(apo);
+    testEqImport();
 
     out() << "\n" << (g_failures == 0 ? "PASS" : "FAIL")
           << " -- " << g_failures << " failure(s)" << Qt::endl;

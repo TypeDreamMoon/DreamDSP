@@ -247,6 +247,17 @@ public:
     Q_INVOKABLE bool savePreset(const QString &name);
     Q_INVOKABLE bool deletePreset(int row);
 
+    // One entry point for a shared "调音文件", routed by content rather than by
+    // extension -- the same curve travels as .xml (FiiO's DSP client),
+    // ParametricEQ.txt (AutoEQ, APO, review tables) and GraphicEQ.txt, and the
+    // names people give them say nothing about which is which.
+    Q_INVOKABLE bool loadEqFile(const QUrl &url);
+
+    // Writes the curve that is loaded as a FiiO XML into the preset directory,
+    // which is what a K17/K19 DSP client -- or another copy of DreamDSP -- can
+    // read back. An empty name means "use the name of the loaded preset".
+    Q_INVOKABLE bool exportFiiXml(const QString &name = QString());
+
     // A preset that keeps everything, not just the bands: the effect rack, the
     // convolution and what an AutoEQ import came from. Saved beside the .peace
     // files rather than instead of them -- .peace still opens in Peace, and
@@ -454,6 +465,11 @@ private:
 
     Preset currentAsPreset() const;
 
+    // Puts an imported curve on the equalizer and says where it came from.
+    // Separate from loadPreset because nothing on disk matches it yet: the
+    // result is dirty, and the row it came from is not in the preset store.
+    bool applyImportedPreset(const Preset &preset, const QString &source);
+
     static constexpr const char *kIncludeFile = "dreamdsp.txt";
 
     ApoInstall m_apo;
@@ -536,6 +552,9 @@ private:
     bool m_dirty = false;
     bool m_restoring = false;
     QString m_currentPreset;
+    // The device an imported curve named ("FIIO K17 R2R"), so exporting it again
+    // says the same thing rather than inventing a provenance.
+    QString m_importedModel;
     QString m_lastError;
     QString m_lastMessage;
     QTimer m_writeTimer;
