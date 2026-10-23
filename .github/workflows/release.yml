@@ -104,10 +104,16 @@ jobs:
       - name: Check the HuskarUI install
         shell: pwsh
         run: |
-          $config = "third_party/HuskarUI-install/lib/cmake/HuskarUI/HuskarUIConfig.cmake"
-          $qml    = "third_party/HuskarUI-install/qml/HuskarUI/qmldir"
-          if (-not (Test-Path $config) -or -not (Test-Path $qml)) {
-            throw "HuskarUI install incomplete: $config or $qml missing"
+          # Three things this build needs, one from each half of the install:
+          # the CMake package, the QML module the app imports, and the DLL that
+          # has to be copied beside the executable.
+          $needed = @(
+            "third_party/HuskarUI-install/lib/cmake/HuskarUI/HuskarUIConfig.cmake",
+            "third_party/HuskarUI-install/qml/HuskarUI/Basic/qmldir",
+            "third_party/HuskarUI-install/bin/HuskarUIBasic.dll"
+          )
+          foreach ($path in $needed) {
+            if (-not (Test-Path $path)) { throw "HuskarUI install incomplete: $path missing" }
           }
           $hits = "${{ steps.huskarui-cache.outputs.cache-hit }}"
           Write-Host "HuskarUI install present (cache hit: $hits)"
